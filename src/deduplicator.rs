@@ -16,6 +16,9 @@ use crate::config::Config;
 use crate::record::{DeduplicationMap, FieldDetector, Record};
 use crate::utils::{discover_csv_files, estimate_remaining_time, format_bytes, format_duration};
 
+#[cfg(feature = "cuda")]
+use crate::cuda_processor::CudaProcessor;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessingStats {
     pub files_processed: usize,
@@ -41,6 +44,8 @@ pub struct Deduplicator {
     temp_dir: PathBuf,
     output_dir: PathBuf,
     checkpoint_path: PathBuf,
+    #[cfg(feature = "cuda")]
+    cuda_processor: Option<CudaProcessor>,
 }
 
 impl Deduplicator {
@@ -52,12 +57,31 @@ impl Deduplicator {
         fs::create_dir_all(&temp_dir)?;
         fs::create_dir_all(&output_dir)?;
 
+        #[cfg(feature = "cuda")]
+        let cuda_processor = if config.processing.enable_cuda {
+            match CudaProcessor::new() {
+                Ok(processor) => {
+                    info!("CUDA acceleration enabled");
+                    Some(processor)
+                }
+                Err(e) => {
+                    warn!("Failed to initialize CUDA processor: {}. Falling back to CPU processing.", e);
+                    None
+                }
+            }
+        } else {
+            info!("CUDA acceleration disabled in configuration");
+            None
+        };
+
         Ok(Self {
             config,
             field_detector: FieldDetector::new(),
             temp_dir,
             output_dir,
             checkpoint_path,
+            #[cfg(feature = "cuda")]
+            cuda_processor,
         })
     }
 
@@ -257,13 +281,60 @@ impl Deduplicator {
 
         let file = File::open(file_path)?;
         let reader = BufReader::new(file);
-        let mut csv_reader = ReaderBuilder::new()
+        let csv_reader = ReaderBuilder::new()
             .delimiter(delimiter)
             .has_headers(false)
             .flexible(true)
             .from_reader(reader);
 
+        // Determine processing strategy based on CUDA availability
+        #[cfg(feature = "cuda")]
+        let use_cuda = self.cuda_processor.is_some();
+        #[cfg(not(feature = "cuda"))]
+        let use_cuda = false;
+
+        if use_cuda {
+            #[cfg(feature = "cuda")]
+            {
+                stats = self.process_file_with_cuda(
+                    csv_reader,
+                    user_idx,
+                    password_idx,
+                    url_idx,
+                    file_path,
+                    config,
+                    dedup_map,
+                ).await?;
+            }
+        } else {
+            stats = self.process_file_cpu_only(
+                csv_reader,
+                user_idx,
+                password_idx,
+                url_idx,
+                file_path,
+                config,
+                dedup_map,
+            ).await?;
+        }
+
+        stats.files_processed = 1;
+        Ok(stats)
+    }
+
+    async fn process_file_cpu_only(
+        &self,
+        mut csv_reader: csv::Reader<BufReader<File>>,
+        user_idx: usize,
+        password_idx: usize,
+        url_idx: usize,
+        file_path: &Path,
+        config: &Config,
+        dedup_map: Arc<Mutex<DeduplicationMap>>,
+    ) -> Result<ProcessingStats> {
+        let mut stats = ProcessingStats::default();
         let mut line_number = 0;
+
         for result in csv_reader.records() {
             line_number += 1;
             
@@ -295,6 +366,86 @@ impl Deduplicator {
         }
 
         Ok(stats)
+    }
+
+    #[cfg(feature = "cuda")]
+    async fn process_file_with_cuda(
+        &self,
+        mut csv_reader: csv::Reader<BufReader<File>>,
+        user_idx: usize,
+        password_idx: usize,
+        url_idx: usize,
+        file_path: &Path,
+        config: &Config,
+        dedup_map: Arc<Mutex<DeduplicationMap>>,
+    ) -> Result<ProcessingStats> {
+        let mut stats = ProcessingStats::default();
+        let mut line_number = 0;
+        let mut record_batch = Vec::new();
+        
+        let cuda_processor = self.cuda_processor.as_ref().unwrap();
+        let batch_size = cuda_processor.get_max_batch_size().min(10000); // Limit to reasonable size
+
+        for result in csv_reader.records() {
+            line_number += 1;
+            
+            match result {
+                Ok(record) => {
+                    let fields: Vec<String> = record.iter().map(|s| s.to_string()).collect();
+                    
+                    if let Some(parsed_record) = Record::new_unnormalized(
+                        fields,
+                        user_idx,
+                        password_idx,
+                        url_idx,
+                        file_path.to_string_lossy().to_string(),
+                        line_number,
+                    ) {
+                        record_batch.push(parsed_record);
+                        stats.total_records += 1;
+
+                        // Process batch when it reaches the optimal size
+                        if record_batch.len() >= batch_size {
+                            self.process_cuda_batch(&mut record_batch, config, &dedup_map).await?;
+                            record_batch.clear();
+                        }
+                    }
+                }
+                Err(e) => {
+                    if config.logging.verbosity == "verbose" {
+                        warn!("Skipping malformed record at line {} in {}: {}", 
+                              line_number, file_path.display(), e);
+                    }
+                }
+            }
+        }
+
+        // Process remaining records in the batch
+        if !record_batch.is_empty() {
+            self.process_cuda_batch(&mut record_batch, config, &dedup_map).await?;
+        }
+
+        Ok(stats)
+    }
+
+    #[cfg(feature = "cuda")]
+    async fn process_cuda_batch(
+        &self,
+        records: &mut [Record],
+        config: &Config,
+        dedup_map: &Arc<Mutex<DeduplicationMap>>,
+    ) -> Result<()> {
+        if let Some(cuda_processor) = &self.cuda_processor {
+            // Use CUDA to accelerate normalization
+            cuda_processor.process_batch(records, config.deduplication.case_sensitive_usernames)?;
+            
+            // Insert processed records into deduplication map
+            let mut map = dedup_map.lock();
+            for record in records.iter() {
+                map.insert(record.clone());
+            }
+        }
+        Ok(())
     }
 
     fn detect_delimiter(&self, reader: &mut BufReader<File>) -> Result<u8> {

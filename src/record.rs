@@ -63,6 +63,42 @@ impl Record {
         })
     }
 
+    /// Create a record without normalization (for CUDA processing)
+    pub fn new_unnormalized(
+        fields: Vec<String>,
+        user_idx: usize,
+        password_idx: usize,
+        url_idx: usize,
+        source_file: String,
+        line_number: usize,
+    ) -> Option<Self> {
+        if fields.len() <= user_idx.max(password_idx).max(url_idx) {
+            return None;
+        }
+
+        let user = normalize_text(&fields[user_idx]);
+        let password = normalize_text(&fields[password_idx]);
+        let url = normalize_text(&fields[url_idx]);
+
+        if user.is_empty() || url.is_empty() {
+            return None;
+        }
+
+        let completeness_score = calculate_completeness(&fields);
+
+        Some(Record {
+            user,
+            password,
+            url,
+            normalized_url: String::new(), // Will be filled by CUDA
+            normalized_user: String::new(), // Will be filled by CUDA
+            fields,
+            completeness_score,
+            source_file,
+            line_number,
+        })
+    }
+
     pub fn dedup_key(&self) -> String {
         format!("{}|{}", self.normalized_user, self.normalized_url)
     }

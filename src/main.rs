@@ -8,6 +8,9 @@ mod deduplicator;
 mod record;
 mod utils;
 
+#[cfg(feature = "cuda")]
+mod cuda_processor;
+
 use config::Config;
 use deduplicator::Deduplicator;
 

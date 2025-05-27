@@ -86,6 +86,13 @@ $RECYCLE.BIN/
 /coverage/
 *.lcov
 
+# Tuonella Sift specific directories
+/test_data/
+/output_test/
+/test_output*/
+/temp/
+*.csv
+
 # Documentation build
 /book/
 /mdbook/
