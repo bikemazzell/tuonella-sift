@@ -118,7 +118,7 @@ pub struct UrlNormalizationConfig {
     pub protocol_patterns: Vec<Arc<Regex>>,
     pub subdomain_removal_patterns: Vec<Arc<Regex>>,
     pub path_cleanup_patterns: Vec<Arc<Regex>>,
-    pub android_uri_cleanup: bool,
+    // pub android_uri_cleanup: bool, // Removed
     pub remove_query_params: bool,
     pub remove_fragments: bool,
     pub normalize_case: bool,
@@ -129,7 +129,7 @@ pub struct UrlNormalizationConfigStrings {
     pub protocol_patterns: Vec<String>,
     pub subdomain_removal_patterns: Vec<String>,
     pub path_cleanup_patterns: Vec<String>,
-    pub android_uri_cleanup: bool,
+    // pub android_uri_cleanup: bool, // Removed
     pub remove_query_params: bool,
     pub remove_fragments: bool,
     pub normalize_case: bool,
@@ -147,7 +147,7 @@ impl From<UrlNormalizationConfigStrings> for UrlNormalizationConfig {
             path_cleanup_patterns: str_config.path_cleanup_patterns.into_iter()
                 .map(|s| Arc::new(Regex::new(&s).expect("Invalid path cleanup regex pattern")))
                 .collect(),
-            android_uri_cleanup: str_config.android_uri_cleanup,
+            // android_uri_cleanup: str_config.android_uri_cleanup, // Removed
             remove_query_params: str_config.remove_query_params,
             remove_fragments: str_config.remove_fragments,
             normalize_case: str_config.normalize_case,
@@ -175,7 +175,7 @@ impl Default for UrlNormalizationConfig {
             path_cleanup_patterns: vec![
                 "/.*$".to_string(),
             ],
-            android_uri_cleanup: true,
+            // android_uri_cleanup: true, // Removed
             remove_query_params: true,
             remove_fragments: true,
             normalize_case: true,
@@ -396,4 +396,4 @@ mod tests {
             println!("✓ CUDA disabled: {}", !config.processing.enable_cuda);
         }
     }
-} 
+}

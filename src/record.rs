@@ -30,6 +30,7 @@ impl Record {
         source_file: String,
         line_number: usize,
         case_sensitive_usernames: bool,
+        url_config: &UrlNormalizationConfig, // Added url_config parameter
     ) -> Option<Self> {
         if fields.len() <= user_idx.max(password_idx).max(url_idx) {
             return None;
@@ -49,12 +50,12 @@ impl Record {
 
         // Use fast normalization for better performance
         let normalized_url = if !url.is_empty() {
-            if url.len() < 512 && !url.contains("android://") {
+            if url.len() < 512 { // Removed !url.contains("android://")
                 // Use fast normalization for typical URLs
                 normalize_url_fast(&url)
             } else {
                 // Use full normalization for complex URLs
-                normalize_url(&url)
+                normalize_url(&url, url_config) // Pass url_config
             }
         } else {
             String::new()
@@ -266,8 +267,9 @@ fn normalize_text(text: &str) -> String {
         .to_string()
 }
 
-fn normalize_url(url_str: &str) -> String {
-    normalize_url_with_config(url_str, &UrlNormalizationConfig::default())
+// Changed to accept UrlNormalizationConfig
+fn normalize_url(url_str: &str, url_config: &UrlNormalizationConfig) -> String {
+    normalize_url_with_config(url_str, url_config)
 }
 
 pub fn normalize_url_with_config(url_str: &str, config: &UrlNormalizationConfig) -> String {
@@ -278,24 +280,12 @@ pub fn normalize_url_with_config(url_str: &str, config: &UrlNormalizationConfig)
     // Clean up the input - handle various separators and whitespace
     let result = url_str.trim().to_string();
 
-    // Handle android:// URIs specially
-    if config.android_uri_cleanup && result.starts_with("android://") {
-        // Extract the domain part after the @ symbol for android URIs
-        if let Some(at_pos) = result.rfind('@') {
-            let domain_part = &result[at_pos + 1..];
-            // Remove trailing slash if present
-            let cleaned = domain_part.trim_end_matches('/').to_string();
-            // For android URIs, return as-is without further processing
-            return if config.normalize_case {
-                cleaned.to_lowercase()
-            } else {
-                cleaned
-            };
-        }
-    }
+    // Android URI special handling removed to process all protocols uniformly.
+    // The generic protocol stripping in normalize_url_fast and later in this function
+    // should cover this.
 
     // Try to parse as URL first
-    let mut url_to_parse = result.clone(); // result is url_str.trim().to_string()
+    let mut url_to_parse = result.clone(); // result is url_str.trim().to_string() - Cloned here
     let mut has_known_protocol = false;
     // config.protocol_patterns is guaranteed by default/deserialization to contain at least one pattern
     for pattern in &config.protocol_patterns {

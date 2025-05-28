@@ -60,7 +60,7 @@ impl Deduplicator {
 
         #[cfg(feature = "cuda")]
         let cuda_processor = if config.processing.enable_cuda {
-            match CudaProcessor::new(config.cuda.clone(), config.url_normalization.clone()) {
+            match CudaProcessor::new(config.cuda.clone()) { // Removed config.url_normalization.clone()
                 Ok(processor) => {
                     info!("CUDA acceleration enabled");
                     Some(processor)
@@ -391,6 +391,7 @@ impl Deduplicator {
                         file_path.to_string_lossy().into_owned(),
                         line_num,
                         config.deduplication.case_sensitive_usernames,
+                        &config.url_normalization, // Added url_config
                     ) {
                         let mut map = dedup_map.lock();
                         if map.insert(record) {
@@ -522,6 +523,7 @@ impl Deduplicator {
                         file_path.display().to_string(),
                         line_number,
                         config.deduplication.case_sensitive_usernames,
+                        &config.url_normalization, // Added url_config
                     ) {
                         record_batch.push(record);
                         

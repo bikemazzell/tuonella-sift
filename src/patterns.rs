@@ -44,123 +44,74 @@ pub static PATH_CLEANUP_PATTERN: Lazy<Regex> = Lazy::new(|| {
 
 /// Fast URL normalization using hardcoded patterns
 pub fn normalize_url_fast(url: &str) -> String {
-    // Handle empty URLs
-    if url.is_empty() {
+    let trimmed_url = url.trim();
+    if trimmed_url.is_empty() {
         return String::new();
     }
 
-    // Clean up the input - handle various separators and whitespace
-    let result = url.trim().to_lowercase();
+    // Always lowercase for consistent processing
+    let lowercased_url = trimmed_url.to_lowercase();
 
-    // Handle android URIs specially
-    if result.starts_with("android://") {
-        if let Some(at_pos) = result.rfind('@') {
-            let domain_part = &result[at_pos + 1..];
-            // Remove trailing slash if present
-            return domain_part.trim_end_matches('/').to_string();
-        }
-    }
+    // Attempt to strip any protocol.
+    // PROTOCOL_PATTERN is ^[a-zA-Z][a-zA-Z0-9+.-]*://
+    let protocol_stripped_url = PROTOCOL_PATTERN.replace(&lowercased_url, "").to_string();
+    
+    // Prepend "http://" to the protocol-stripped URL to help Url::parse identify the host.
+    // This is useful for inputs like "example.com/path" which become "http://example.com/path".
+    let parse_candidate = format!("http://{}", protocol_stripped_url);
 
-    // Try to parse URL directly first
-    if let Ok(parsed_url) = url::Url::parse(&result) {
-        if let Some(host) = parsed_url.host_str() {
-            let mut host = host.to_string();
-            
-            // Apply subdomain removal pattern
+    if let Ok(parsed_url) = url::Url::parse(&parse_candidate) {
+        if let Some(host_str) = parsed_url.host_str() {
+            let mut host = host_str.to_string();
+
+            // Remove www. prefix specifically, as it's very common
+            if host.starts_with("www.") {
+                host = host[4..].to_string();
+            }
+
+            // Apply general subdomain removal pattern.
+            // SUBDOMAIN_PATTERN captures `sub.domain.tld` as `sub` and `domain.tld`.
+            // We want `domain.tld` (group 2).
+            // If it doesn't match (e.g., "example.com", "localhost"), use host as is.
             if let Some(captures) = SUBDOMAIN_PATTERN.captures(&host) {
                 if let Some(main_domain) = captures.get(2) {
-                    host = main_domain.as_str().to_string();
+                    return main_domain.as_str().to_string();
                 }
             }
-            return host;
+            return host; // Return (potentially www-stripped) host
         }
     }
 
-    // If direct parsing failed, try with http:// prefix
-    let mut result = result;
-    if !result.starts_with("http://") && 
-       !result.starts_with("https://") && 
-       !result.starts_with("ftp://") {
-        result = format!("http://{}", result);
-    }
+    // Fallback: If Url::parse failed or didn't yield a host, manually process.
+    // Start with the already protocol-stripped and lowercased string.
+    let mut fallback_result = protocol_stripped_url;
 
-    // Try parsing with the current protocol
-    if let Ok(parsed_url) = url::Url::parse(&result) {
-        if let Some(host) = parsed_url.host_str() {
-            let mut host = host.to_string();
-            
-            // Apply subdomain removal pattern
-            if let Some(captures) = SUBDOMAIN_PATTERN.captures(&host) {
-                if let Some(main_domain) = captures.get(2) {
-                    host = main_domain.as_str().to_string();
-                }
-            }
-            return host;
-        }
-    }
-
-    // Fallback: manual protocol and path removal
-    let mut result = result;
-
-    // Extract domain from FTP URL if present
-    if result.starts_with("ftp://") {
-        let without_protocol = result.strip_prefix("ftp://").unwrap();
-        let domain_end = without_protocol.find('/').unwrap_or(without_protocol.len());
-        let domain = &without_protocol[..domain_end];
-        
-        // Try parsing with http:// prefix to use URL parser's host extraction
-        let with_http = format!("http://{}", domain);
-        if let Ok(parsed_url) = url::Url::parse(&with_http) {
-            if let Some(host) = parsed_url.host_str() {
-                let mut host = host.to_string();
-                
-                // Apply subdomain removal pattern
-                if let Some(captures) = SUBDOMAIN_PATTERN.captures(&host) {
-                    if let Some(main_domain) = captures.get(2) {
-                        host = main_domain.as_str().to_string();
-                    }
-                }
-                return host;
-            }
-        }
-        
-        // If parsing failed, return the domain as is
-        return domain.to_string();
-    }
-
-    // Remove other protocols using string manipulation
-    if let Some(stripped) = result.strip_prefix("http://") {
-        result = stripped.to_string();
-    } else if let Some(stripped) = result.strip_prefix("https://") {
-        result = stripped.to_string();
-    }
-
-    // Remove path using regex pattern
-    result = PATH_PATTERN.replace(&result, "").to_string();
+    // Remove path using regex pattern (e.g., /.*$)
+    fallback_result = PATH_PATTERN.replace(&fallback_result, "").to_string();
 
     // Remove query parameters
-    if let Some(pos) = result.find('?') {
-        result = result[..pos].to_string();
+    if let Some(pos) = fallback_result.find('?') {
+        fallback_result.truncate(pos);
     }
 
     // Remove fragments
-    if let Some(pos) = result.find('#') {
-        result = result[..pos].to_string();
+    if let Some(pos) = fallback_result.find('#') {
+        fallback_result.truncate(pos);
     }
 
-    // Remove www. prefix if present
-    if result.starts_with("www.") {
-        result = result[4..].to_string();
+    // Remove www. prefix if present (might be missed if parsing failed early)
+    if fallback_result.starts_with("www.") {
+        fallback_result = fallback_result[4..].to_string();
     }
 
-    // Apply subdomain removal pattern
-    if let Some(captures) = SUBDOMAIN_PATTERN.captures(&result) {
+    // Apply subdomain removal pattern again for the fallback processed string
+    if let Some(captures) = SUBDOMAIN_PATTERN.captures(&fallback_result) {
         if let Some(main_domain) = captures.get(2) {
-            result = main_domain.as_str().to_string();
+            fallback_result = main_domain.as_str().to_string();
         }
     }
 
-    result
+    fallback_result
 }
 
 /* // Helper function for fast domain extraction

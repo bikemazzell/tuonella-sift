@@ -4,9 +4,10 @@ use tracing::info;
 use crate::record::Record;
 use crate::config::{CudaConfig, UrlNormalizationConfig};
 use crate::patterns::normalize_url_fast;
+use crate::constants::BYTES_PER_GB; // Added import
 use std::sync::Arc;
 
-const BYTES_PER_GB: f64 = 1024.0 * 1024.0 * 1024.0;
+// Removed const BYTES_PER_GB definition from here
 
 pub struct CudaProcessor {
     device: Arc<CudaDevice>,
@@ -16,7 +17,7 @@ pub struct CudaProcessor {
 }
 
 impl CudaProcessor {
-    pub fn new(config: CudaConfig, _url_config: UrlNormalizationConfig) -> Result<Self> {
+    pub fn new(config: CudaConfig) -> Result<Self> { // Removed _url_config parameter
         // Initialize CUDA device
         let device = CudaDevice::new(0)
             .map_err(|e| anyhow::anyhow!("Failed to initialize CUDA device 0: {}. Ensure NVIDIA drivers and CUDA toolkit are installed.", e))?;
@@ -178,7 +179,7 @@ mod tests {
     #[test]
     fn test_cuda_processor_creation() {
         if CudaProcessor::is_available() {
-            let processor = CudaProcessor::new(CudaConfig::default(), UrlNormalizationConfig::default());
+            let processor = CudaProcessor::new(CudaConfig::default()); // Removed UrlNormalizationConfig::default()
             assert!(processor.is_ok());
             
             if let Ok(processor) = processor {
@@ -214,4 +215,4 @@ mod tests {
             println!("CUDA not available, skipping memory detection test");
         }
     }
-} 
+}
