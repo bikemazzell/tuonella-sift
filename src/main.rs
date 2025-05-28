@@ -58,6 +58,12 @@ async fn main() -> Result<()> {
         anyhow::bail!("Input directory does not exist: {}", args.input.display());
     }
 
+    // Create output directory if it doesn't exist
+    if !output_dir.exists() {
+        std::fs::create_dir_all(&output_dir)?;
+        info!("Created output directory: {}", output_dir.display());
+    }
+
     let mut deduplicator = Deduplicator::new(config).await?;
     
     let stats = if args.resume {
@@ -74,4 +80,4 @@ async fn main() -> Result<()> {
     info!("Processing time: {:.2}s", stats.processing_time_seconds);
 
     Ok(())
-} 
+}
