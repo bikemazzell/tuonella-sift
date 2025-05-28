@@ -16,7 +16,7 @@ pub fn setup_logging(verbosity: &str, _log_file: &str) -> Result<()> {
     };
 
     let filter = EnvFilter::from_default_env()
-        .add_directive(format!("dataset_dedup={}", level).parse()?);
+        .add_directive(format!("tuonella_sift={}", level).parse()?);
 
     let subscriber = fmt::Subscriber::builder()
         .with_env_filter(filter)

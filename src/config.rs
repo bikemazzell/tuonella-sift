@@ -32,6 +32,16 @@ pub struct MemoryConfig {
     pub auto_detect_memory: bool,
 }
 
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            max_ram_usage_percent: 80,
+            batch_size_gb: 1.0,
+            auto_detect_memory: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessingConfig {
     pub max_threads: usize,
@@ -40,12 +50,34 @@ pub struct ProcessingConfig {
     pub max_output_file_size_gb: f64,
 }
 
+impl Default for ProcessingConfig {
+    fn default() -> Self {
+        Self {
+            max_threads: 0, // Auto-detected
+            enable_cuda: false,
+            chunk_size_mb: 16,
+            max_output_file_size_gb: 1.0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IoConfig {
     pub temp_directory: String,
     pub output_directory: String,
     pub enable_memory_mapping: bool,
     pub parallel_io: bool,
+}
+
+impl Default for IoConfig {
+    fn default() -> Self {
+        Self {
+            temp_directory: "./temp".to_string(),
+            output_directory: "./output".to_string(),
+            enable_memory_mapping: true,
+            parallel_io: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,6 +92,21 @@ pub struct DeduplicationConfig {
     pub max_sample_size: usize,
 }
 
+impl Default for DeduplicationConfig {
+    fn default() -> Self {
+        Self {
+            case_sensitive_usernames: false,
+            normalize_urls: true,
+            strip_url_params: true,
+            strip_url_prefixes: true,
+            completeness_strategy: "character_count".to_string(),
+            field_detection_sample_percent: 5.0,
+            min_sample_size: 50,
+            max_sample_size: 1000,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoggingConfig {
     pub verbosity: String,
@@ -67,10 +114,29 @@ pub struct LoggingConfig {
     pub log_file: String,
 }
 
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            verbosity: "normal".to_string(),
+            progress_interval_seconds: 30,
+            log_file: "tuonella-sift.log".to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecoveryConfig {
     pub enable_checkpointing: bool,
     pub checkpoint_interval_records: usize,
+}
+
+impl Default for RecoveryConfig {
+    fn default() -> Self {
+        Self {
+            enable_checkpointing: true,
+            checkpoint_interval_records: 100000,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

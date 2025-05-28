@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use parking_lot::Mutex;
 use anyhow::Result;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::fs::{self, File};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -13,11 +13,15 @@ use futures::stream::{self, StreamExt};
 use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 use serde::{Serialize, Deserialize};
+use rand::Rng;
+use std::collections::HashSet;
 
 #[cfg(feature = "cuda")]
 use crate::cuda_processor::CudaProcessor;
 use crate::constants::{DEFAULT_PROGRESS_INTERVAL_SECONDS, VERBOSE_PROGRESS_INTERVAL_SECONDS};
 use crate::utils::{discover_csv_files, estimate_remaining_time, format_bytes, format_duration};
+#[cfg(feature = "cuda")]
+use crate::patterns::normalize_url_fast;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessingStats {
@@ -322,6 +326,7 @@ impl Deduplicator {
         };
         stats.unique_records = unique_records;
         stats.duplicates_removed = stats.total_records.saturating_sub(unique_records);
+        stats.files_processed = progress_counter.load(Ordering::Relaxed);
 
         self.write_batch_output(batch_idx, dedup_map).await?;
 
@@ -338,11 +343,33 @@ impl Deduplicator {
     ) -> Result<ProcessingStats> {
         let mut stats = ProcessingStats::default();
 
-        // Use line-by-line parsing for malformed CSV files
+        #[cfg(feature = "cuda")]
+        if let Some(_) = &self.cuda_processor {
+            // Use CUDA processor if available
+            let file = File::open(file_path)?;
+            let reader = ReaderBuilder::new()
+                .has_headers(false)
+                .flexible(true)
+                .from_reader(BufReader::new(file));
+
+            let sample_records = self.sample_records_robust(file_path)?;
+            let (user_idx, password_idx, url_idx) = field_detector.detect_fields(&sample_records);
+
+            return self.process_file_with_cuda(
+                reader,
+                user_idx,
+                password_idx,
+                url_idx,
+                file_path,
+                config,
+                dedup_map,
+            ).await;
+        }
+
+        // Fallback to CPU processing
         let file = File::open(file_path)?;
         let reader = BufReader::new(file);
         
-        // Sample records for field detection using robust parsing
         let sample_records = self.sample_records_robust(file_path)?;
         let (user_idx, password_idx, url_idx) = field_detector.detect_fields(&sample_records);
 
@@ -366,7 +393,6 @@ impl Deduplicator {
                         continue;
                     }
 
-                    // Parse line as CSV with robust handling
                     let fields = self.parse_csv_line_robust(&line);
                     
                     if fields.len() < 3 {
@@ -376,7 +402,6 @@ impl Deduplicator {
 
                     stats.total_records += 1;
 
-                    // Ensure we have enough fields for the detected indices
                     let max_idx = user_idx.max(password_idx).max(url_idx);
                     if fields.len() <= max_idx {
                         debug!("Skipping line {}:{} (not enough fields for indices)", file_path.display(), line_num);
@@ -391,7 +416,7 @@ impl Deduplicator {
                         file_path.to_string_lossy().into_owned(),
                         line_num,
                         config.deduplication.case_sensitive_usernames,
-                        &config.url_normalization, // Added url_config
+                        &config.url_normalization,
                     ) {
                         let mut map = dedup_map.lock();
                         if map.insert(record) {
@@ -418,76 +443,6 @@ impl Deduplicator {
         );
         Ok(stats)
     }
-
-    /* async fn process_file_cpu_only(
-        &self,
-        mut csv_reader: csv::Reader<BufReader<File>>,
-        user_idx: usize,
-        password_idx: usize,
-        url_idx: usize,
-        file_path: &Path,
-        config: &Config,
-        dedup_map: Arc<Mutex<DeduplicationMap>>,
-    ) -> Result<ProcessingStats> {
-        let mut stats = ProcessingStats::default();
-        let mut record_count = 0;
-        let mut processed_count = 0;
-        let mut line_num = 0; // For accurate line numbers, including headers and skipped lines
-
-        for result in csv_reader.records() {
-            line_num += 1;
-            match result {
-                Ok(string_record) => {
-                    stats.total_records += 1;
-                    record_count += 1;
-
-                    if !is_record_qualifies_for_processing(&string_record) {
-                        debug!("Skipping line {}:{} (doesn\'t qualify for processing)", file_path.display(), line_num);
-                        continue; // Skip this record
-                    }
-
-                    let fields: Vec<String> = string_record.iter().map(|f| f.to_string()).collect();
-
-                    if let Some(record) = Record::new(
-                        fields,
-                        user_idx,
-                        password_idx,
-                        url_idx,
-                        file_path.to_string_lossy().into_owned(),
-                        line_num, // Use the actual line number from file
-                        config.deduplication.case_sensitive_usernames,
-                    ) {
-                        let mut map = dedup_map.lock();
-                        if map.insert(record) {
-                            stats.unique_records += 1; // This might be better counted at the end from map.len()
-                        } else {
-                            stats.duplicates_removed += 1;
-                        }
-                        processed_count += 1;
-                    } else {
-                        debug!("Skipping line {}:{} (failed to create record)", file_path.display(), line_num);
-                        // This could happen if essential fields are missing or empty after normalization
-                    }
-                }
-                Err(e) => {
-                    warn!("Error reading record from {}:{} - {}", file_path.display(), line_num, e);
-                    stats.errors_encountered += 1;
-                }
-            }
-        }
-        
-        // unique_records is more accurately taken from the dedup_map size after processing a batch/file.
-        // The current logic for unique_records in stats will be off if merging multiple files into one dedup_map.
-        // This will be handled when aggregating stats at batch/directory level.
-        
-        debug!(
-            "Processed {} records ({} qualified) from {}",
-            processed_count,
-            record_count,
-            file_path.display()
-        );
-        Ok(stats)
-    } */
 
     #[cfg(feature = "cuda")]
     async fn process_file_with_cuda(
@@ -595,104 +550,6 @@ impl Deduplicator {
         
         Ok(stats)
     }
-
-    /* fn detect_delimiter(&self, reader: &mut BufReader<File>) -> Result<u8> {
-        let mut line = String::new();
-        reader.read_line(&mut line)?;
-        
-        let comma_count = line.matches(',').count();
-        let semicolon_count = line.matches(';').count();
-        let tab_count = line.matches('\t').count();
-        let pipe_count = line.matches('|').count();
-
-        let delimiter = if comma_count >= semicolon_count.max(tab_count).max(pipe_count) {
-            b','
-        } else if semicolon_count >= tab_count.max(pipe_count) {
-            b';'
-        } else if tab_count >= pipe_count {
-            b'\t'
-        } else {
-            b'|'
-        };
-
-        Ok(delimiter)
-    } */
-
-    /* fn sample_records(
-        &self,
-        file_path: &Path,
-        delimiter: u8,
-    ) -> Result<Vec<Vec<String>>> {
-        use std::io::BufRead;
-        
-        // First pass: count total lines
-        let file = File::open(file_path)?;
-        let reader = BufReader::new(file);
-        let total_lines = reader.lines().count();
-        
-        if total_lines == 0 {
-            return Ok(Vec::new());
-        }
-
-        // Calculate sample size
-        let sample_percent = self.config.deduplication.field_detection_sample_percent / 100.0;
-        let target_sample_size = ((total_lines as f64) * sample_percent).ceil() as usize;
-        let sample_size = target_sample_size
-            .max(self.config.deduplication.min_sample_size)
-            .min(self.config.deduplication.max_sample_size)
-            .min(total_lines);
-
-        // Generate deterministic sample indices distributed across the file
-        use std::collections::HashSet;
-        let mut sample_indices: HashSet<usize> = HashSet::new();
-        
-        // Use a simple deterministic sampling based on file size for reproducibility
-        let step = if sample_size >= total_lines {
-            1
-        } else {
-            total_lines / sample_size
-        };
-        
-        for i in 0..sample_size {
-            let index = (i * step + (total_lines / (sample_size * 2))) % total_lines;
-            sample_indices.insert(index);
-        }
-
-        // Second pass: collect sampled records
-        let file = File::open(file_path)?;
-        let mut reader = BufReader::new(file);
-        let mut csv_reader = ReaderBuilder::new()
-            .delimiter(delimiter)
-            .has_headers(false)
-            .flexible(true)
-            .quote(b'"')
-            .double_quote(false)
-            .escape(None)
-            .from_reader(&mut reader);
-
-        let mut samples = Vec::new();
-        for (line_idx, result) in csv_reader.records().enumerate() {
-            if sample_indices.contains(&line_idx) {
-                if let Ok(record) = result {
-                    let fields: Vec<String> = record.iter().map(|s| s.to_string()).collect();
-                    if fields.len() >= 3 {
-                        samples.push(fields);
-                    }
-                }
-            }
-            
-            // Early exit if we have enough samples
-            if samples.len() >= sample_size {
-                break;
-            }
-        }
-
-        debug!("Sampled {} records from {} total lines ({:.1}% of file)", 
-               samples.len(), total_lines, 
-               (samples.len() as f64 / total_lines as f64) * 100.0);
-
-        Ok(samples)
-    } */
 
     async fn write_batch_output(
         &self,
@@ -853,33 +710,57 @@ impl Deduplicator {
     }
 
     fn sample_records_robust(&self, file_path: &Path) -> Result<Vec<Vec<String>>> {
-        let file = File::open(file_path)?;
-        let reader = BufReader::new(file);
-        
+        let mut file = File::open(file_path)?;
+        let reader = BufReader::new(&mut file);
+
+        // 1. Count total lines
+        let total_lines = reader.lines().count();
+        if total_lines == 0 {
+            return Ok(Vec::new());
+        }
+
+        let sample_size = 100;
         let mut samples = Vec::new();
-        let mut line_count = 0;
-        let sample_size = 100; // Sample first 100 valid lines
-        
-        for line_result in reader.lines() {
-            if samples.len() >= sample_size {
-                break;
+        let mut rng = rand::thread_rng();
+        let mut selected_line_indices = HashSet::new();
+
+        // Generate unique random indices
+        if total_lines <= sample_size {
+            // If fewer lines than sample_size, just take all valid lines
+            for i in 0..total_lines {
+                selected_line_indices.insert(i);
             }
-            
-            line_count += 1;
-            if let Ok(line) = line_result {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
+        } else {
+            while selected_line_indices.len() < sample_size {
+                let random_line_num = rng.gen_range(0..total_lines);
+                selected_line_indices.insert(random_line_num);
+            }
+        }
+
+        // 2. Read selected lines
+        file.seek(SeekFrom::Start(0))?; // Reset file pointer to beginning
+        let reader = BufReader::new(&mut file);
+        let mut current_line_num = 0;
+
+        for line_result in reader.lines() {
+            if selected_line_indices.contains(&current_line_num) {
+                if let Ok(line) = line_result {
+                    let line = line.trim();
+                    if !line.is_empty() {
+                        let fields = self.parse_csv_line_robust(&line);
+                        if fields.len() >= 3 {
+                            samples.push(fields);
+                        }
+                    }
                 }
-                
-                let fields = self.parse_csv_line_robust(&line);
-                if fields.len() >= 3 {
-                    samples.push(fields);
-                }
+            }
+            current_line_num += 1;
+            if samples.len() == sample_size || current_line_num >= total_lines {
+                break;
             }
         }
         
-        debug!("Sampled {} records from {} lines in {}", samples.len(), line_count, file_path.display());
+        debug!("Sampled {} records from {} lines in {}", samples.len(), total_lines, file_path.display());
         Ok(samples)
     }
 
@@ -1004,34 +885,125 @@ impl ProcessingStats {
     }
 }
 
-#[cfg(feature = "cuda")]
-fn process_chunk_cpu(records: &mut [Record], config: &Config) -> Result<()> {
-    for record in records.iter_mut() {
-        // Normalize URL if present and normalization is enabled
-        if !record.url.is_empty() && config.deduplication.normalize_urls {
-            record.normalized_url = normalize_url_fast(&record.url);
-        }
-        
-        // Normalize username based on case sensitivity setting
-        record.normalized_user = if config.deduplication.case_sensitive_usernames {
-            record.user.clone()
-        } else {
-            record.user.to_lowercase()
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+    use std::io::Write;
+    use crate::config::{Config, FieldDetectionConfig, UrlNormalizationConfig, DeduplicationConfig, IoConfig, LoggingConfig, ProcessingConfig, CudaConfig, MemoryConfig, RecoveryConfig};
+
+    // Helper function to create a dummy Deduplicator for testing
+    async fn create_dummy_deduplicator() -> Deduplicator {
+        let config = Config {
+            memory: MemoryConfig::default(),
+            processing: ProcessingConfig::default(),
+            io: IoConfig::default(),
+            deduplication: DeduplicationConfig::default(),
+            logging: LoggingConfig::default(),
+            recovery: RecoveryConfig::default(),
+            cuda: CudaConfig::default(),
+            url_normalization: UrlNormalizationConfig::default(),
+            field_detection: FieldDetectionConfig::default(),
         };
-    }
-    Ok(())
-}
-
-#[cfg(feature = "cuda")]
-fn process_batch_cuda(records: &mut [Record], config: &Config, cuda_processor: &CudaProcessor) -> Result<()> {
-    if records.is_empty() {
-        return Ok(());
+        Deduplicator::new(config).await.unwrap()
     }
 
-    let batch_size = records.len().min(cuda_processor.get_max_batch_size());
-    for chunk in records.chunks_mut(batch_size) {
-        process_chunk_cpu(chunk, config)?;
+    #[tokio::test]
+    async fn test_random_sampling_large_file() {
+        let temp_dir = tempdir().unwrap();
+        let file_path = temp_dir.path().join("large_test.csv");
+        let mut file = File::create(&file_path).unwrap();
+
+        // Create a file with more than 100 lines
+        let total_lines = 500;
+        for i in 0..total_lines {
+            writeln!(file, "user{},pass{},url{}.com", i, i, i).unwrap();
+        }
+        file.flush().unwrap();
+
+        let deduplicator = create_dummy_deduplicator().await;
+        let samples = deduplicator.sample_records_robust(&file_path).unwrap();
+
+        // Assert that exactly 100 samples are returned
+        assert_eq!(samples.len(), 100);
+
+        // Assert that all sampled records are valid (have 3 fields)
+        for record in &samples {
+            assert_eq!(record.len(), 3);
+        }
+
+        // Clean up
+        std::fs::remove_dir_all(temp_dir).unwrap();
     }
 
-    Ok(())
+    #[tokio::test]
+    async fn test_random_sampling_small_file() {
+        let temp_dir = tempdir().unwrap();
+        let file_path = temp_dir.path().join("small_test.csv");
+        let mut file = File::create(&file_path).unwrap();
+
+        // Create a file with fewer than 100 lines
+        let total_lines = 50;
+        for i in 0..total_lines {
+            writeln!(file, "user{},pass{},url{}.com", i, i, i).unwrap();
+        }
+        file.flush().unwrap();
+
+        let deduplicator = create_dummy_deduplicator().await;
+        let samples = deduplicator.sample_records_robust(&file_path).unwrap();
+
+        // Assert that all lines are sampled
+        assert_eq!(samples.len(), total_lines);
+
+        // Assert that all sampled records are valid (have 3 fields)
+        for record in &samples {
+            assert_eq!(record.len(), 3);
+        }
+
+        // Clean up
+        std::fs::remove_dir_all(temp_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_random_sampling_empty_file() {
+        let temp_dir = tempdir().unwrap();
+        let file_path = temp_dir.path().join("empty_test.csv");
+        let mut file = File::create(&file_path).unwrap();
+        file.flush().unwrap();
+
+        let deduplicator = create_dummy_deduplicator().await;
+        let samples = deduplicator.sample_records_robust(&file_path).unwrap();
+
+        // Assert that no samples are returned
+        assert!(samples.is_empty());
+
+        // Clean up
+        std::fs::remove_dir_all(temp_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_random_sampling_invalid_lines() {
+        let temp_dir = tempdir().unwrap();
+        let file_path = temp_dir.path().join("invalid_lines_test.csv");
+        let mut file = File::create(&file_path).unwrap();
+
+        // Create a file with some invalid lines (fewer than 3 fields, empty)
+        writeln!(file, "user1,pass1").unwrap(); // Invalid
+        writeln!(file, "").unwrap(); // Empty
+        writeln!(file, "user2,pass2,url2.com").unwrap(); // Valid
+        writeln!(file, "user3,pass3").unwrap(); // Invalid
+        writeln!(file, "user4,pass4,url4.com").unwrap(); // Valid
+        file.flush().unwrap();
+
+        let deduplicator = create_dummy_deduplicator().await;
+        let samples = deduplicator.sample_records_robust(&file_path).unwrap();
+
+        // Assert that only valid lines are sampled
+        assert_eq!(samples.len(), 2);
+        assert_eq!(samples[0][0], "user2");
+        assert_eq!(samples[1][0], "user4");
+
+        // Clean up
+        std::fs::remove_dir_all(temp_dir).unwrap();
+    }
 }
