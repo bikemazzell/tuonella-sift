@@ -1,23 +1,23 @@
+use crate::record::{Record, DeduplicationMap, FieldDetector};
+use crate::config::Config;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use parking_lot::Mutex;
 use anyhow::Result;
+use std::io::{BufRead, BufReader};
+use std::fs::{self, File};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 use csv::{ReaderBuilder, WriterBuilder};
 use futures::stream::{self, StreamExt};
-use parking_lot::Mutex;
-use serde::{Deserialize, Serialize};
-use std::fs::{self, File};
-use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
 use tokio::time::interval;
 use tracing::{debug, error, info, warn};
-
-use crate::config::Config;
-use crate::record::{DeduplicationMap, FieldDetector, Record};
-use crate::utils::{discover_csv_files, estimate_remaining_time, format_bytes, format_duration};
+use serde::{Serialize, Deserialize};
 
 #[cfg(feature = "cuda")]
 use crate::cuda_processor::CudaProcessor;
+use crate::constants::{DEFAULT_PROGRESS_INTERVAL_SECONDS, VERBOSE_PROGRESS_INTERVAL_SECONDS};
+use crate::utils::{discover_csv_files, estimate_remaining_time, format_bytes, format_duration};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessingStats {
@@ -28,9 +28,11 @@ pub struct ProcessingStats {
     pub processing_time_seconds: f64,
     pub files_skipped: usize,
     pub errors_encountered: usize,
+    pub invalid_records: usize,
+    pub error_records: usize,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Checkpoint {
     processed_files: Vec<PathBuf>,
     current_batch: usize,
@@ -42,7 +44,6 @@ pub struct Deduplicator {
     config: Config,
     field_detector: FieldDetector,
     temp_dir: PathBuf,
-    output_dir: PathBuf,
     checkpoint_path: PathBuf,
     #[cfg(feature = "cuda")]
     cuda_processor: Option<CudaProcessor>,
@@ -59,7 +60,7 @@ impl Deduplicator {
 
         #[cfg(feature = "cuda")]
         let cuda_processor = if config.processing.enable_cuda {
-            match CudaProcessor::new() {
+            match CudaProcessor::new(config.cuda.clone(), config.url_normalization.clone()) {
                 Ok(processor) => {
                     info!("CUDA acceleration enabled");
                     Some(processor)
@@ -75,10 +76,9 @@ impl Deduplicator {
         };
 
         Ok(Self {
-            config,
-            field_detector: FieldDetector::new(),
+            config: config.clone(),
+            field_detector: FieldDetector::from_config(&config.field_detection),
             temp_dir,
-            output_dir,
             checkpoint_path,
             #[cfg(feature = "cuda")]
             cuda_processor,
@@ -111,15 +111,19 @@ impl Deduplicator {
 
         let start_time = Instant::now();
         let mut stats = ProcessingStats::default();
+        let mut all_processed_files = Vec::new();
 
         for (batch_idx, batch) in batches.into_iter().enumerate() {
             info!("Processing batch {}/{}", batch_idx + 1, total_batches);
             
-            let batch_stats = self.process_batch(batch, batch_idx).await?;
+            let batch_stats = self.process_batch(batch.clone(), batch_idx).await?;
             stats.merge(batch_stats);
+            
+            // Track processed files for checkpointing
+            all_processed_files.extend(batch.clone());
 
             if self.config.recovery.enable_checkpointing {
-                self.save_checkpoint(&stats, batch_idx).await?;
+                self.save_checkpoint_with_files(&stats, batch_idx, all_processed_files.clone()).await?;
             }
         }
 
@@ -129,6 +133,12 @@ impl Deduplicator {
         info!("Final output written to: {}", final_output.display());
 
         self.cleanup_temp_files().await?;
+        
+        // Clean up checkpoint file after successful completion
+        if self.checkpoint_path.exists() {
+            tokio::fs::remove_file(&self.checkpoint_path).await?;
+            info!("Checkpoint file cleaned up after successful completion");
+        }
 
         Ok(stats)
     }
@@ -140,11 +150,74 @@ impl Deduplicator {
     ) -> Result<ProcessingStats> {
         if let Ok(checkpoint) = self.load_checkpoint().await {
             info!("Resuming from checkpoint at batch {}", checkpoint.current_batch);
-            // Implementation for resume would go here
-            // For now, fall back to full processing
+            
+            // Discover all CSV files
+            let csv_files = discover_csv_files(input_dir)?;
+            
+            if csv_files.is_empty() {
+                warn!("No CSV files found in directory");
+                return Ok(ProcessingStats::default());
+            }
+
+            // Filter out already processed files
+            let remaining_files: Vec<PathBuf> = csv_files
+                .into_iter()
+                .filter(|file| !checkpoint.processed_files.contains(file))
+                .collect();
+
+            if remaining_files.is_empty() {
+                info!("All files have been processed. Loading existing results.");
+                return Ok(checkpoint.stats);
+            }
+
+            info!("Found {} remaining files to process", remaining_files.len());
+            
+            // Process remaining files starting from the checkpoint batch
+            let batches = self.create_batches(&remaining_files)?;
+            let total_batches = batches.len();
+            let start_batch = checkpoint.current_batch;
+            
+            info!("Resuming processing from batch {} of {}", start_batch + 1, total_batches + start_batch);
+
+            let start_time = Instant::now();
+            let mut stats = checkpoint.stats.clone();
+
+            for (batch_idx, batch) in batches.into_iter().enumerate() {
+                let actual_batch_idx = start_batch + batch_idx + 1;
+                info!("Processing batch {}/{}", actual_batch_idx + 1, total_batches + start_batch);
+                
+                let batch_stats = self.process_batch(batch.clone(), actual_batch_idx).await?;
+                stats.merge(batch_stats);
+
+                // Update checkpoint with processed files
+                let mut updated_checkpoint = checkpoint.clone();
+                updated_checkpoint.processed_files.extend(batch);
+                updated_checkpoint.current_batch = actual_batch_idx;
+                updated_checkpoint.stats = stats.clone();
+                
+                if self.config.recovery.enable_checkpointing {
+                    self.save_checkpoint(&updated_checkpoint.stats, actual_batch_idx).await?;
+                }
+            }
+
+            stats.processing_time_seconds += start_time.elapsed().as_secs_f64();
+            
+            let final_output = self.merge_batch_outputs(output_dir).await?;
+            info!("Final output written to: {}", final_output.display());
+
+            self.cleanup_temp_files().await?;
+            
+            // Clean up checkpoint file after successful completion
+            if self.checkpoint_path.exists() {
+                tokio::fs::remove_file(&self.checkpoint_path).await?;
+                info!("Checkpoint file cleaned up after successful completion");
+            }
+
+            Ok(stats)
+        } else {
+            info!("No valid checkpoint found, starting fresh processing");
+            self.process_directory(input_dir, output_dir).await
         }
-        
-        self.process_directory(input_dir, output_dir).await
     }
 
     fn create_batches(&self, files: &[PathBuf]) -> Result<Vec<Vec<PathBuf>>> {
@@ -263,66 +336,89 @@ impl Deduplicator {
         field_detector: &FieldDetector,
         dedup_map: Arc<Mutex<DeduplicationMap>>,
     ) -> Result<ProcessingStats> {
-        debug!("Processing file: {}", file_path.display());
-        
         let mut stats = ProcessingStats::default();
-        stats.files_processed = 1;
 
-        let file = File::open(file_path)?;
-        let mut reader = BufReader::new(file);
-        
-        let delimiter = self.detect_delimiter(&mut reader)?;
-
-        let sample_records = self.sample_records(file_path, delimiter)?;
-        let (user_idx, password_idx, url_idx) = field_detector.detect_fields(&sample_records);
-
-        debug!("Detected field positions - user: {}, password: {}, url: {}", 
-               user_idx, password_idx, url_idx);
-
+        // Use line-by-line parsing for malformed CSV files
         let file = File::open(file_path)?;
         let reader = BufReader::new(file);
-        let csv_reader = ReaderBuilder::new()
-            .delimiter(delimiter)
-            .has_headers(false)
-            .flexible(true)
-            .from_reader(reader);
+        
+        // Sample records for field detection using robust parsing
+        let sample_records = self.sample_records_robust(file_path)?;
+        let (user_idx, password_idx, url_idx) = field_detector.detect_fields(&sample_records);
 
-        // Determine processing strategy based on CUDA availability
-        #[cfg(feature = "cuda")]
-        let use_cuda = self.cuda_processor.is_some();
-        #[cfg(not(feature = "cuda"))]
-        let use_cuda = false;
+        debug!(
+            "Detected field indices for {}: user={}, password={}, url={}",
+            file_path.display(),
+            user_idx,
+            password_idx,
+            url_idx
+        );
 
-        if use_cuda {
-            #[cfg(feature = "cuda")]
-            {
-                stats = self.process_file_with_cuda(
-                    csv_reader,
-                    user_idx,
-                    password_idx,
-                    url_idx,
-                    file_path,
-                    config,
-                    dedup_map,
-                ).await?;
+        // Process file line by line
+        let mut line_num = 0;
+        for line_result in reader.lines() {
+            line_num += 1;
+            
+            match line_result {
+                Ok(line) => {
+                    let line = line.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+
+                    // Parse line as CSV with robust handling
+                    let fields = self.parse_csv_line_robust(&line);
+                    
+                    if fields.len() < 3 {
+                        debug!("Skipping line {}:{} (insufficient fields: {})", file_path.display(), line_num, fields.len());
+                        continue;
+                    }
+
+                    stats.total_records += 1;
+
+                    // Ensure we have enough fields for the detected indices
+                    let max_idx = user_idx.max(password_idx).max(url_idx);
+                    if fields.len() <= max_idx {
+                        debug!("Skipping line {}:{} (not enough fields for indices)", file_path.display(), line_num);
+                        continue;
+                    }
+
+                    if let Some(record) = Record::new(
+                        fields,
+                        user_idx,
+                        password_idx,
+                        url_idx,
+                        file_path.to_string_lossy().into_owned(),
+                        line_num,
+                        config.deduplication.case_sensitive_usernames,
+                    ) {
+                        let mut map = dedup_map.lock();
+                        if map.insert(record) {
+                            stats.unique_records += 1;
+                        } else {
+                            stats.duplicates_removed += 1;
+                        }
+                    } else {
+                        debug!("Skipping line {}:{} (failed to create record)", file_path.display(), line_num);
+                    }
+                }
+                Err(e) => {
+                    warn!("Error reading line from {}:{} - {}", file_path.display(), line_num, e);
+                    stats.errors_encountered += 1;
+                }
             }
-        } else {
-            stats = self.process_file_cpu_only(
-                csv_reader,
-                user_idx,
-                password_idx,
-                url_idx,
-                file_path,
-                config,
-                dedup_map,
-            ).await?;
         }
 
         stats.files_processed = 1;
+        debug!(
+            "Processed {} total records from {}",
+            stats.total_records,
+            file_path.display()
+        );
         Ok(stats)
     }
 
-    async fn process_file_cpu_only(
+    /* async fn process_file_cpu_only(
         &self,
         mut csv_reader: csv::Reader<BufReader<File>>,
         user_idx: usize,
@@ -333,40 +429,64 @@ impl Deduplicator {
         dedup_map: Arc<Mutex<DeduplicationMap>>,
     ) -> Result<ProcessingStats> {
         let mut stats = ProcessingStats::default();
-        let mut line_number = 0;
+        let mut record_count = 0;
+        let mut processed_count = 0;
+        let mut line_num = 0; // For accurate line numbers, including headers and skipped lines
 
         for result in csv_reader.records() {
-            line_number += 1;
-            
+            line_num += 1;
             match result {
-                Ok(record) => {
-                    let fields: Vec<String> = record.iter().map(|s| s.to_string()).collect();
-                    
-                    if let Some(parsed_record) = Record::new(
+                Ok(string_record) => {
+                    stats.total_records += 1;
+                    record_count += 1;
+
+                    if !is_record_qualifies_for_processing(&string_record) {
+                        debug!("Skipping line {}:{} (doesn\'t qualify for processing)", file_path.display(), line_num);
+                        continue; // Skip this record
+                    }
+
+                    let fields: Vec<String> = string_record.iter().map(|f| f.to_string()).collect();
+
+                    if let Some(record) = Record::new(
                         fields,
                         user_idx,
                         password_idx,
                         url_idx,
-                        file_path.to_string_lossy().to_string(),
-                        line_number,
+                        file_path.to_string_lossy().into_owned(),
+                        line_num, // Use the actual line number from file
                         config.deduplication.case_sensitive_usernames,
                     ) {
                         let mut map = dedup_map.lock();
-                        map.insert(parsed_record);
-                        stats.total_records += 1;
+                        if map.insert(record) {
+                            stats.unique_records += 1; // This might be better counted at the end from map.len()
+                        } else {
+                            stats.duplicates_removed += 1;
+                        }
+                        processed_count += 1;
+                    } else {
+                        debug!("Skipping line {}:{} (failed to create record)", file_path.display(), line_num);
+                        // This could happen if essential fields are missing or empty after normalization
                     }
                 }
                 Err(e) => {
-                    if config.logging.verbosity == "verbose" {
-                        warn!("Skipping malformed record at line {} in {}: {}", 
-                              line_number, file_path.display(), e);
-                    }
+                    warn!("Error reading record from {}:{} - {}", file_path.display(), line_num, e);
+                    stats.errors_encountered += 1;
                 }
             }
         }
-
+        
+        // unique_records is more accurately taken from the dedup_map size after processing a batch/file.
+        // The current logic for unique_records in stats will be off if merging multiple files into one dedup_map.
+        // This will be handled when aggregating stats at batch/directory level.
+        
+        debug!(
+            "Processed {} records ({} qualified) from {}",
+            processed_count,
+            record_count,
+            file_path.display()
+        );
         Ok(stats)
-    }
+    } */
 
     #[cfg(feature = "cuda")]
     async fn process_file_with_cuda(
@@ -384,47 +504,50 @@ impl Deduplicator {
         let mut record_batch = Vec::new();
         
         let cuda_processor = self.cuda_processor.as_ref().unwrap();
-        let batch_size = cuda_processor.get_max_batch_size().min(10000); // Limit to reasonable size
-
+        let batch_size = cuda_processor.get_optimal_batch_size();
+        
+        debug!("Processing file {} with CUDA batch size {}", file_path.display(), batch_size);
+        
         for result in csv_reader.records() {
             line_number += 1;
             
             match result {
-                Ok(record) => {
-                    let fields: Vec<String> = record.iter().map(|s| s.to_string()).collect();
-                    
-                    if let Some(parsed_record) = Record::new_unnormalized(
-                        fields,
+                Ok(string_record) => {
+                    // Apply line filters and create record
+                    if let Some(record) = Record::new(
+                        string_record.iter().map(|s| s.to_string()).collect(),
                         user_idx,
                         password_idx,
                         url_idx,
-                        file_path.to_string_lossy().to_string(),
+                        file_path.display().to_string(),
                         line_number,
+                        config.deduplication.case_sensitive_usernames,
                     ) {
-                        record_batch.push(parsed_record);
-                        stats.total_records += 1;
-
-                        // Process batch when it reaches the optimal size
+                        record_batch.push(record);
+                        
+                        // Process batch when it reaches optimal size
                         if record_batch.len() >= batch_size {
-                            self.process_cuda_batch(&mut record_batch, config, &dedup_map).await?;
+                            let batch_stats = self.process_cuda_batch(&mut record_batch, config, &dedup_map).await?;
+                            stats.merge(batch_stats);
                             record_batch.clear();
                         }
+                    } else {
+                        stats.invalid_records += 1;
                     }
                 }
                 Err(e) => {
-                    if config.logging.verbosity == "verbose" {
-                        warn!("Skipping malformed record at line {} in {}: {}", 
-                              line_number, file_path.display(), e);
-                    }
+                    warn!("Error reading line {}: {}", line_number, e);
+                    stats.error_records += 1;
                 }
             }
         }
-
-        // Process remaining records in the batch
+        
+        // Process remaining records
         if !record_batch.is_empty() {
-            self.process_cuda_batch(&mut record_batch, config, &dedup_map).await?;
+            let batch_stats = self.process_cuda_batch(&mut record_batch, config, &dedup_map).await?;
+            stats.merge(batch_stats);
         }
-
+        
         Ok(stats)
     }
 
@@ -434,21 +557,44 @@ impl Deduplicator {
         records: &mut [Record],
         config: &Config,
         dedup_map: &Arc<Mutex<DeduplicationMap>>,
-    ) -> Result<()> {
+    ) -> Result<ProcessingStats> {
+        let mut stats = ProcessingStats::default();
+        
+        // Process records in CUDA
         if let Some(cuda_processor) = &self.cuda_processor {
-            // Use CUDA to accelerate normalization
             cuda_processor.process_batch(records, config.deduplication.case_sensitive_usernames)?;
-            
-            // Insert processed records into deduplication map
-            let mut map = dedup_map.lock();
-            for record in records.iter() {
-                map.insert(record.clone());
+        } else {
+            // Fallback to CPU processing
+            for record in records.iter_mut() {
+                // Normalize URL if present
+                if !record.url.is_empty() {
+                    record.normalized_url = normalize_url_fast(&record.url);
+                }
+                
+                // Normalize username based on case sensitivity setting
+                record.normalized_user = if config.deduplication.case_sensitive_usernames {
+                    record.user.clone()
+                } else {
+                    record.user.to_lowercase()
+                };
             }
         }
-        Ok(())
+        
+        // Update deduplication map
+        let mut map = dedup_map.lock();
+        for record in records.iter() {
+            if map.insert(record.clone()) {
+                stats.duplicates_removed += 1;
+            } else {
+                stats.unique_records += 1;
+            }
+            stats.total_records += 1;
+        }
+        
+        Ok(stats)
     }
 
-    fn detect_delimiter(&self, reader: &mut BufReader<File>) -> Result<u8> {
+    /* fn detect_delimiter(&self, reader: &mut BufReader<File>) -> Result<u8> {
         let mut line = String::new();
         reader.read_line(&mut line)?;
         
@@ -468,9 +614,9 @@ impl Deduplicator {
         };
 
         Ok(delimiter)
-    }
+    } */
 
-    fn sample_records(
+    /* fn sample_records(
         &self,
         file_path: &Path,
         delimiter: u8,
@@ -517,6 +663,9 @@ impl Deduplicator {
             .delimiter(delimiter)
             .has_headers(false)
             .flexible(true)
+            .quote(b'"')
+            .double_quote(false)
+            .escape(None)
             .from_reader(&mut reader);
 
         let mut samples = Vec::new();
@@ -541,7 +690,7 @@ impl Deduplicator {
                (samples.len() as f64 / total_lines as f64) * 100.0);
 
         Ok(samples)
-    }
+    } */
 
     async fn write_batch_output(
         &self,
@@ -562,7 +711,9 @@ impl Deduplicator {
         let mut writer = WriterBuilder::new().from_writer(file);
 
         for record in records {
-            writer.write_record(&record.fields)?;
+            // Write only the essential fields in a consistent format
+            let output_record = vec![&record.user, &record.password, &record.url];
+            writer.write_record(&output_record)?;
         }
 
         writer.flush()?;
@@ -596,6 +747,7 @@ impl Deduplicator {
             let file = File::open(&batch_file)?;
             let mut reader = ReaderBuilder::new()
                 .has_headers(false)
+                .flexible(true)
                 .from_reader(file);
 
             for result in reader.records() {
@@ -615,7 +767,11 @@ impl Deduplicator {
         total_files: usize,
         start_time: Instant,
     ) -> tokio::task::JoinHandle<()> {
-        let interval_duration = Duration::from_secs(self.config.logging.progress_interval_seconds);
+        let interval_duration = if self.config.logging.verbosity == "verbose" {
+            Duration::from_secs(VERBOSE_PROGRESS_INTERVAL_SECONDS)
+        } else {
+            Duration::from_secs(self.config.logging.progress_interval_seconds.max(DEFAULT_PROGRESS_INTERVAL_SECONDS))
+        };
         
         tokio::spawn(async move {
             let mut interval = interval(interval_duration);
@@ -641,8 +797,9 @@ impl Deduplicator {
     }
 
     async fn save_checkpoint(&self, stats: &ProcessingStats, batch_idx: usize) -> Result<()> {
+        // This is a simplified checkpoint - in a full implementation, we'd track more state
         let checkpoint = Checkpoint {
-            processed_files: Vec::new(), // Would track processed files in full implementation
+            processed_files: Vec::new(), // Would need to track this properly in process_batch
             current_batch: batch_idx,
             stats: stats.clone(),
             timestamp: std::time::SystemTime::now()
@@ -652,7 +809,25 @@ impl Deduplicator {
 
         let checkpoint_json = serde_json::to_string_pretty(&checkpoint)?;
         tokio::fs::write(&self.checkpoint_path, checkpoint_json).await?;
+        
+        debug!("Checkpoint saved at batch {}", batch_idx);
+        Ok(())
+    }
 
+    async fn save_checkpoint_with_files(&self, stats: &ProcessingStats, batch_idx: usize, processed_files: Vec<PathBuf>) -> Result<()> {
+        let checkpoint = Checkpoint {
+            processed_files,
+            current_batch: batch_idx,
+            stats: stats.clone(),
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs(),
+        };
+
+        let checkpoint_json = serde_json::to_string_pretty(&checkpoint)?;
+        tokio::fs::write(&self.checkpoint_path, checkpoint_json).await?;
+        
+        debug!("Checkpoint saved at batch {} with {} processed files", batch_idx, checkpoint.processed_files.len());
         Ok(())
     }
 
@@ -674,6 +849,127 @@ impl Deduplicator {
         }
         Ok(())
     }
+
+    fn sample_records_robust(&self, file_path: &Path) -> Result<Vec<Vec<String>>> {
+        let file = File::open(file_path)?;
+        let reader = BufReader::new(file);
+        
+        let mut samples = Vec::new();
+        let mut line_count = 0;
+        let sample_size = 100; // Sample first 100 valid lines
+        
+        for line_result in reader.lines() {
+            if samples.len() >= sample_size {
+                break;
+            }
+            
+            line_count += 1;
+            if let Ok(line) = line_result {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                
+                let fields = self.parse_csv_line_robust(&line);
+                if fields.len() >= 3 {
+                    samples.push(fields);
+                }
+            }
+        }
+        
+        debug!("Sampled {} records from {} lines in {}", samples.len(), line_count, file_path.display());
+        Ok(samples)
+    }
+
+    fn parse_csv_line_robust(&self, line: &str) -> Vec<String> {
+        let mut fields = Vec::new();
+        let mut current_field = String::new();
+        let mut in_quotes = false;
+        let mut escaped_quote = false;
+        let mut chars = line.chars().peekable();
+        
+        while let Some(ch) = chars.next() {
+            match ch {
+                '"' => {
+                    if escaped_quote {
+                        // This is an escaped quote ("""), add a single quote
+                        current_field.push('"');
+                        escaped_quote = false;
+                    } else if in_quotes {
+                        // Check if this is an escaped quote
+                        if chars.peek() == Some(&'"') {
+                            escaped_quote = true;
+                            chars.next(); // Skip the next quote
+                        } else {
+                            // End of quoted section
+                            in_quotes = false;
+                        }
+                    } else {
+                        // Start of quoted section
+                        in_quotes = true;
+                    }
+                }
+                ',' if !in_quotes => {
+                    // Field separator when not in quotes
+                    fields.push(current_field.trim().to_string());
+                    current_field.clear();
+                }
+                '\\' if in_quotes => {
+                    // Handle escaped characters in quotes
+                    if let Some(&next_ch) = chars.peek() {
+                        match next_ch {
+                            'n' => {
+                                current_field.push('\n');
+                                chars.next();
+                            }
+                            'r' => {
+                                current_field.push('\r');
+                                chars.next();
+                            }
+                            't' => {
+                                current_field.push('\t');
+                                chars.next();
+                            }
+                            _ => current_field.push(ch),
+                        }
+                    } else {
+                        current_field.push(ch);
+                    }
+                }
+                _ => {
+                    current_field.push(ch);
+                }
+            }
+        }
+        
+        // Add the last field
+        if !current_field.is_empty() || fields.len() > 0 {
+            fields.push(current_field.trim().to_string());
+        }
+        
+        // Handle empty fields
+        if fields.len() < 3 {
+            // Try to split by comma and preserve empty fields
+            let simple_fields: Vec<String> = line.split(',')
+                .map(|s| s.trim().to_string())
+                .collect();
+            
+            if simple_fields.len() >= 3 {
+                return simple_fields;
+            }
+        }
+        
+        // Handle line continuations in URLs
+        if fields.len() >= 3 {
+            let url = &fields[2];
+            if url.ends_with('\\') || url.ends_with('-') || url.ends_with('_') {
+                // Remove the continuation character
+                fields[2] = url.trim_end_matches(|c| c == '\\' || c == '-' || c == '_').to_string();
+            }
+        }
+        
+        fields
+    }
 }
 
 impl Default for ProcessingStats {
@@ -686,17 +982,54 @@ impl Default for ProcessingStats {
             processing_time_seconds: 0.0,
             files_skipped: 0,
             errors_encountered: 0,
+            invalid_records: 0,
+            error_records: 0,
         }
     }
 }
 
 impl ProcessingStats {
-    fn merge(&mut self, other: ProcessingStats) {
+    pub fn merge(&mut self, other: ProcessingStats) {
         self.files_processed += other.files_processed;
         self.total_records += other.total_records;
         self.unique_records += other.unique_records;
         self.duplicates_removed += other.duplicates_removed;
+        self.processing_time_seconds += other.processing_time_seconds;
         self.files_skipped += other.files_skipped;
         self.errors_encountered += other.errors_encountered;
+        self.invalid_records += other.invalid_records;
+        self.error_records += other.error_records;
     }
-} 
+}
+
+#[cfg(feature = "cuda")]
+fn process_chunk_cpu(records: &mut [Record], config: &Config) -> Result<()> {
+    for record in records.iter_mut() {
+        // Normalize URL if present and normalization is enabled
+        if !record.url.is_empty() && config.deduplication.normalize_urls {
+            record.normalized_url = normalize_url_fast(&record.url);
+        }
+        
+        // Normalize username based on case sensitivity setting
+        record.normalized_user = if config.deduplication.case_sensitive_usernames {
+            record.user.clone()
+        } else {
+            record.user.to_lowercase()
+        };
+    }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+fn process_batch_cuda(records: &mut [Record], config: &Config, cuda_processor: &CudaProcessor) -> Result<()> {
+    if records.is_empty() {
+        return Ok(());
+    }
+
+    let batch_size = records.len().min(cuda_processor.get_max_batch_size());
+    for chunk in records.chunks_mut(batch_size) {
+        process_chunk_cpu(chunk, config)?;
+    }
+
+    Ok(())
+}

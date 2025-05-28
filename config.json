@@ -1,4 +1,79 @@
 {
+  "profiles": {
+    "production": {
+      "memory": {
+        "max_ram_usage_percent": 50,
+        "batch_size_gb": 4,
+        "auto_detect_memory": true
+      },
+      "processing": {
+        "max_threads": 0,
+        "enable_cuda": true,
+        "chunk_size_mb": 64,
+        "max_output_file_size_gb": 32
+      },
+      "logging": {
+        "verbosity": "normal",
+        "progress_interval_seconds": 30,
+        "log_file": "tuonella-sift.log"
+      }
+    },
+    "testing": {
+      "memory": {
+        "max_ram_usage_percent": 30,
+        "batch_size_gb": 1,
+        "auto_detect_memory": true
+      },
+      "processing": {
+        "max_threads": 2,
+        "enable_cuda": false,
+        "chunk_size_mb": 16,
+        "max_output_file_size_gb": 1
+      },
+      "logging": {
+        "verbosity": "verbose",
+        "progress_interval_seconds": 5,
+        "log_file": "tuonella-sift-test.log"
+      }
+    },
+    "cuda_optimized": {
+      "memory": {
+        "max_ram_usage_percent": 60,
+        "batch_size_gb": 16,
+        "auto_detect_memory": true
+      },
+      "processing": {
+        "max_threads": 0,
+        "enable_cuda": true,
+        "chunk_size_mb": 128,
+        "max_output_file_size_gb": 64
+      },
+      "logging": {
+        "verbosity": "verbose",
+        "progress_interval_seconds": 10,
+        "log_file": "tuonella-sift-cuda.log"
+      }
+    },
+    "cuda_large_batch": {
+      "memory": {
+        "max_ram_usage_percent": 70,
+        "batch_size_gb": 32,
+        "auto_detect_memory": true
+      },
+      "processing": {
+        "max_threads": 0,
+        "enable_cuda": true,
+        "chunk_size_mb": 256,
+        "max_output_file_size_gb": 128
+      },
+      "logging": {
+        "verbosity": "verbose",
+        "progress_interval_seconds": 20,
+        "log_file": "tuonella-sift-cuda-large.log"
+      }
+    }
+  },
+  "active_profile": "production",
   "memory": {
     "max_ram_usage_percent": 50,
     "batch_size_gb": 4,
@@ -27,12 +102,55 @@
     "max_sample_size": 1000
   },
   "logging": {
-    "verbosity": "verbose",
-    "progress_interval_seconds": 10,
-    "log_file": "tuonella-sift-cuda.log"
+    "verbosity": "normal",
+    "progress_interval_seconds": 30,
+    "log_file": "tuonella-sift.log"
   },
   "recovery": {
     "enable_checkpointing": true,
     "checkpoint_interval_records": 100000
+  },
+  "cuda": {
+    "gpu_memory_usage_percent": 80,
+    "estimated_bytes_per_record": 500,
+    "min_batch_size": 1000000,
+    "max_batch_size": 10000000,
+    "max_url_buffer_size": 256,
+    "max_username_buffer_size": 64,
+    "threads_per_block": 256,
+    "batch_sizes": {
+      "small": 1000000,
+      "medium": 2500000,
+      "large": 5000000,
+      "xlarge": 10000000
+    }
+  },
+  "url_normalization": {
+    "protocol_patterns": [
+      "^[a-zA-Z][a-zA-Z0-9+.-]*://"
+    ],
+    "subdomain_removal_patterns": [
+      "^([a-zA-Z0-9-]+)\\.([a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})$"
+    ],
+    "path_cleanup_patterns": [
+      "/.*$"
+    ],
+    "android_uri_cleanup": true,
+    "remove_query_params": true,
+    "remove_fragments": true,
+    "normalize_case": true
+  },
+  "field_detection": {
+    "url_patterns": [
+      "^[a-zA-Z][a-zA-Z0-9+.-]*://",
+      "\\.[a-zA-Z]{2,}",
+      "^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}"
+    ],
+    "email_patterns": [
+      "@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"
+    ],
+    "password_patterns": [
+      "^[a-zA-Z0-9!@#$%^&*()_+=\\-\\[\\]{};':,.<>/?]{4,}$"
+    ]
   }
-} 
+}

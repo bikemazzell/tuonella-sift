@@ -4,7 +4,9 @@ use std::path::PathBuf;
 use tracing::info;
 
 mod config;
+mod constants;
 mod deduplicator;
+mod patterns;
 mod record;
 mod utils;
 
