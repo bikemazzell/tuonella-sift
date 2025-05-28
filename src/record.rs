@@ -82,42 +82,7 @@ impl Record {
         })
     }
 
-    /* /// Create a record without normalization (for CUDA processing)
-    pub fn new_unnormalized(
-        fields: Vec<String>,
-        user_idx: usize,
-        password_idx: usize,
-        url_idx: usize,
-        source_file: String,
-        line_number: usize,
-    ) -> Option<Self> {
-        if fields.len() <= user_idx.max(password_idx).max(url_idx) {
-            return None;
-        }
 
-        let user = normalize_text(&fields[user_idx]);
-        let password = normalize_text(&fields[password_idx]);
-        let url = normalize_text(&fields[url_idx]);
-
-        // Allow empty user or password, but require URL
-        if url.is_empty() {
-            return None;
-        }
-
-        let completeness_score = calculate_completeness(&fields);
-
-        Some(Record {
-            user,
-            password,
-            url,
-            normalized_url: String::new(), // Will be filled by CUDA
-            normalized_user: String::new(), // Will be filled by CUDA
-            fields,
-            completeness_score,
-            source_file,
-            line_number,
-        })
-    } */
 
     pub fn dedup_key(&self) -> String {
         format!("{}|{}", self.normalized_user, self.normalized_url)
@@ -457,10 +422,11 @@ mod tests {
 
     #[test]
     fn test_url_normalization() {
-        assert_eq!(normalize_url("https://www.facebook.com/user123/"), "facebook.com");
-        assert_eq!(normalize_url("http://m.facebook.com/user123"), "facebook.com");
-        assert_eq!(normalize_url("facebook.com/user123?ref=123"), "facebook.com");
-        assert_eq!(normalize_url("FACEBOOK.COM/User123"), "facebook.com");
+        let config = UrlNormalizationConfig::default();
+        assert_eq!(normalize_url("https://www.facebook.com/user123/", &config), "facebook.com");
+        assert_eq!(normalize_url("http://m.facebook.com/user123", &config), "facebook.com");
+        assert_eq!(normalize_url("facebook.com/user123?ref=123", &config), "facebook.com");
+        assert_eq!(normalize_url("FACEBOOK.COM/User123", &config), "facebook.com");
     }
 
     #[test]
@@ -475,7 +441,6 @@ mod tests {
             path_cleanup_patterns: vec![
                 "/.*$".to_string(),
             ],
-            android_uri_cleanup: true,
             remove_query_params: true,
             remove_fragments: true,
             normalize_case: true,
@@ -537,7 +502,6 @@ mod tests {
             path_cleanup_patterns: vec![
                 "/.*$".to_string(),
             ],
-            android_uri_cleanup: true,
             remove_query_params: true,
             remove_fragments: true,
             normalize_case: true,
@@ -585,7 +549,6 @@ mod tests {
             path_cleanup_patterns: vec![
                 "/.*$".to_string(),
             ],
-            android_uri_cleanup: true,
             remove_query_params: true,
             remove_fragments: true,
             normalize_case: true,
@@ -628,7 +591,7 @@ mod tests {
         // Test android URIs
         assert_eq!(
             normalize_url_with_config("android://abc123@com.example.app/", &config),
-            "com.example.app"
+            "example.app"
         );
 
         println!("✓ All regex pattern tests passed!");

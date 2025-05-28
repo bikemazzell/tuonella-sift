@@ -6,7 +6,6 @@ use walkdir::WalkDir;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use glob::Pattern;
-// use crate::constants::{MIN_FIELDS_FOR_PROCESSING};
 
 pub fn setup_logging(verbosity: &str, _log_file: &str) -> Result<()> {
     let level = match verbosity {
@@ -134,117 +133,6 @@ pub fn estimate_remaining_time(
     Some(remaining / rate)
 }
 
-/* /// Enhanced record qualification check
-pub fn is_record_qualifies_for_processing(record: &csv::StringRecord) -> bool {
-    // Check if record has minimum number of fields
-    if record.len() < MIN_FIELDS_FOR_PROCESSING {
-        return false;
-    }
-    
-    // Check if record has any non-empty, non-whitespace content
-    let has_content = record.iter().any(|field| !field.trim().is_empty());
-    if !has_content {
-        return false;
-    }
-    
-    // Check if record has at least one field with substantial content (more than just punctuation)
-    let has_substantial_content = record.iter().any(|field| {
-        let trimmed = field.trim();
-        trimmed.len() > 2 && trimmed.chars().any(|c| c.is_alphanumeric())
-    });
-    
-    has_substantial_content
-} */
-
-/* /// Check if a line has proper delimiters (for pre-validation)
-pub fn line_has_delimiters(line: &str, expected_delimiter_count: usize) -> bool {
-    if line.trim().is_empty() {
-        return false;
-    }
-    
-    let comma_count = line.matches(',').count();
-    let semicolon_count = line.matches(';').count();
-    let tab_count = line.matches('\t').count();
-    let pipe_count = line.matches('|').count();
-    
-    let max_delimiter_count = comma_count.max(semicolon_count).max(tab_count).max(pipe_count);
-    
-    // Should have at least the expected number of delimiters (or close to it)
-    max_delimiter_count >= expected_delimiter_count.saturating_sub(1)
-} */
-
-/* /// Check if input files are sorted (optimization hint)
-pub fn detect_sorted_input(sample_records: &[Vec<String>], user_idx: usize) -> SortOrder {
-    if sample_records.len() < 10 {
-        return SortOrder::Unknown;
-    }
-    
-    let mut ascending_count = 0;
-    let mut descending_count = 0;
-    let mut total_comparisons = 0;
-    
-    for window in sample_records.windows(2) {
-        if let (Some(current), Some(next)) = (window[0].get(user_idx), window[1].get(user_idx)) {
-            total_comparisons += 1;
-            match current.cmp(next) {
-                std::cmp::Ordering::Less => ascending_count += 1,
-                std::cmp::Ordering::Greater => descending_count += 1,
-                std::cmp::Ordering::Equal => {} // Neutral
-            }
-        }
-    }
-    
-    if total_comparisons == 0 {
-        return SortOrder::Unknown;
-    }
-    
-    let ascending_ratio = ascending_count as f64 / total_comparisons as f64;
-    let descending_ratio = descending_count as f64 / total_comparisons as f64;
-    
-    // Consider sorted if 70% or more comparisons follow the same order
-    if ascending_ratio >= 0.7 {
-        SortOrder::Ascending
-    } else if descending_ratio >= 0.7 {
-        SortOrder::Descending
-    } else {
-        SortOrder::Random
-    }
-} */
-
-/* #[derive(Debug, Clone, PartialEq)]
-pub enum SortOrder {
-    Ascending,
-    Descending,
-    Random,
-    Unknown,
-} */
-
-/* /// Detect the delimiter used in a CSV file
-pub fn detect_delimiter(reader: &mut BufReader<File>) -> Result<u8> {
-    let mut first_line = String::new();
-    reader.read_line(&mut first_line)?;
-    
-    // Reset the reader position
-    reader.seek(std::io::SeekFrom::Start(0))?;
-    
-    let line = first_line.trim();
-    if line.is_empty() {
-        return Ok(b','); // Default to comma
-    }
-    
-    let delimiters = [(b',', line.matches(',').count()),
-                      (b';', line.matches(';').count()),
-                      (b'\t', line.matches('\t').count()),
-                      (b'|', line.matches('|').count())];
-    
-    let (best_delimiter, _) = delimiters
-        .iter()
-        .max_by_key(|(_, count)| count)
-        .unwrap_or(&(b',', 0));
-    
-    Ok(*best_delimiter)
-} */
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,39 +182,4 @@ mod tests {
         assert!(is_ignored("temp_file.txt", &patterns));
         assert!(!is_ignored("data.csv", &patterns));
     }
-
-    /* fn test_is_record_qualifies_for_processing() {
-        let mut record = csv::StringRecord::new();
-        record.push_field("hello");
-        record.push_field("world");
-        record.push_field("test");
-        assert!(is_record_qualifies_for_processing(&record));
-
-        let mut record_with_empty = csv::StringRecord::new();
-        record_with_empty.push_field("");
-        record_with_empty.push_field("world");
-        record_with_empty.push_field("test");
-        assert!(is_record_qualifies_for_processing(&record_with_empty));
-
-        let mut record_all_empty_fields = csv::StringRecord::new();
-        record_all_empty_fields.push_field("");
-        record_all_empty_fields.push_field("   ");
-        record_all_empty_fields.push_field("\t\n");
-        assert!(!is_record_qualifies_for_processing(&record_all_empty_fields));
-
-        let mut record_only_whitespace = csv::StringRecord::new();
-        record_only_whitespace.push_field("   ");
-        record_only_whitespace.push_field("   ");
-        record_only_whitespace.push_field("   ");
-        assert!(!is_record_qualifies_for_processing(&record_only_whitespace));
-
-        let mut record_single_printable = csv::StringRecord::new();
-        record_single_printable.push_field("abc");
-        record_single_printable.push_field("def");
-        record_single_printable.push_field("ghi");
-        assert!(is_record_qualifies_for_processing(&record_single_printable));
-
-        let empty_record = csv::StringRecord::new(); // Completely empty record (e.g. from an empty line)
-        assert!(!is_record_qualifies_for_processing(&empty_record));
-    } */
 }
