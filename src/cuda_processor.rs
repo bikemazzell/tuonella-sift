@@ -1,13 +1,15 @@
 use anyhow::Result;
-use cudarc::driver::safe::{CudaContext, DriverError};
+use cudarc::driver::safe::{CudaContext, DriverError, CudaFunction};
 use cudarc::driver::sys::CUdevice_attribute_enum;
 use cudarc::driver::result;
-use tracing::info;
+use cudarc::nvrtc::safe::compile_ptx;
+use tracing::{info, warn, debug, trace};
 use crate::record::Record;
 use crate::config::CudaConfig;
 use crate::constants::{
     BYTES_PER_GB, BYTES_PER_KB, BYTES_PER_MB, PERCENT_100, PERCENT_95
 };
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct CudaDeviceProperties {
@@ -21,18 +23,49 @@ pub struct CudaDeviceProperties {
     pub l2_cache_size: i32,
 }
 
-use std::sync::Arc;
+// CUDA kernel source code for string processing
+const CUDA_KERNEL_SOURCE: &str = r#"
+extern "C" __global__ void normalize_strings(
+    char* input_data,
+    char* output_data,
+    int* input_offsets,
+    int* output_offsets,
+    int* lengths,
+    int num_strings,
+    bool to_lowercase
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_strings) return;
+
+    int start = input_offsets[idx];
+    int len = lengths[idx];
+    int out_start = output_offsets[idx];
+
+    for (int i = 0; i < len; i++) {
+        char c = input_data[start + i];
+        if (to_lowercase && c >= 'A' && c <= 'Z') {
+            output_data[out_start + i] = c + 32; // Convert to lowercase
+        } else {
+            output_data[out_start + i] = c;
+        }
+    }
+}
+"#;
 
 pub struct CudaProcessor {
     context: Arc<CudaContext>,
+    normalize_function: CudaFunction,
     optimal_batch_size: usize,
+    max_string_length: usize,
 }
 
 impl Clone for CudaProcessor {
     fn clone(&self) -> Self {
         Self {
             context: Arc::clone(&self.context),
+            normalize_function: self.normalize_function.clone(),
             optimal_batch_size: self.optimal_batch_size,
+            max_string_length: self.max_string_length,
         }
     }
 }
@@ -51,7 +84,7 @@ impl CudaProcessor {
         info!("  Total Memory: {:.2} GB ({} bytes)", props.total_memory as f64 / BYTES_PER_GB, props.total_memory);
         info!("  Free Memory: {:.2} GB ({} bytes)", props.free_memory as f64 / BYTES_PER_GB, props.free_memory);
         info!("  Max Threads per Block: {}", props.max_threads_per_block);
-        info!("  Max Shared Memory per Block: {} KB", props.max_shared_memory_per_block as usize / BYTES_PER_KB);
+        info!("  Max Shared Memory per Block: {} KB", props.max_shared_memory_per_block as f64 / BYTES_PER_KB);
         info!("  Memory Bus Width: {} bits", props.memory_bus_width);
         info!("  L2 Cache Size: {} MB", props.l2_cache_size as usize / BYTES_PER_MB);
 
@@ -73,14 +106,28 @@ impl CudaProcessor {
               max_batch_size,
               optimal_batch_size);
 
+        // Compile CUDA kernel
+        info!("Compiling CUDA kernel for string normalization...");
+        let ptx = compile_ptx(CUDA_KERNEL_SOURCE)
+            .map_err(|e| anyhow::anyhow!("Failed to compile CUDA kernel: {}", e))?;
+
+        let module = context.load_module(ptx)
+            .map_err(|e| anyhow::anyhow!("Failed to load CUDA kernel: {}", e))?;
+
+        let normalize_function = module.load_function("normalize_strings")
+            .map_err(|e| anyhow::anyhow!("Failed to get CUDA function: {}", e))?;
+
+        info!("CUDA kernel compiled and loaded successfully");
+
         Ok(Self {
             context,
+            normalize_function,
             optimal_batch_size,
+            max_string_length: config.max_url_buffer_size.max(config.max_username_buffer_size),
         })
     }
 
     fn get_device_properties_internal(context: &Arc<CudaContext>) -> Result<CudaDeviceProperties, DriverError> {
-        context.bind_to_thread()?;
         let compute_capability_major = context.attribute(CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)?;
         let compute_capability_minor = context.attribute(CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)?;
         let max_threads_per_block = context.attribute(CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK)?;
@@ -139,8 +186,17 @@ impl CudaProcessor {
     }
 
     fn process_chunk_on_gpu(&self, records: &mut [Record], case_sensitive_usernames: bool) -> Result<()> {
-        process_records(records, case_sensitive_usernames);
+        trace!("Processing {} records on GPU", records.len());
+
+        // For now, fall back to CPU processing until we can properly implement GPU kernels
+        // This is a temporary solution to get the system working
+        trace!("GPU kernel implementation not yet complete, falling back to CPU processing");
+        process_records_cpu(records, case_sensitive_usernames);
         Ok(())
+
+        // TODO: Implement proper GPU processing with cudarc
+        // The challenge is that cudarc's API has changed and we need to properly
+        // handle string processing on GPU which is complex
     }
 
     pub fn get_optimal_batch_size(&self) -> usize {
@@ -148,8 +204,8 @@ impl CudaProcessor {
     }
 }
 
-// Extract common record processing logic to reduce duplication
-fn process_records(records: &mut [Record], case_sensitive_usernames: bool) {
+// Fallback CPU processing for when GPU is not available or fails
+fn process_records_cpu(records: &mut [Record], case_sensitive_usernames: bool) {
     for record in records.iter_mut() {
         record.normalized_url = record.url.to_lowercase();
         if !case_sensitive_usernames {
@@ -248,8 +304,8 @@ mod tests {
             create_test_record("TEST@GMAIL.COM", "secret456", "HTTP://WWW.GOOGLE.COM"),
         ];
 
-        // Directly use the extracted process_records function
-        process_records(&mut records, true);
+        // Directly use the extracted process_records_cpu function
+        process_records_cpu(&mut records, true);
 
         assert_eq!(records[0].normalized_user, "User@Example.com"); // Case preserved
         assert_eq!(records[0].normalized_url, "https://example.com/path");
@@ -264,8 +320,8 @@ mod tests {
             create_test_record("TEST@GMAIL.COM", "secret456", "HTTP://WWW.GOOGLE.COM"),
         ];
 
-        // Directly use the extracted process_records function
-        process_records(&mut records, false);
+        // Directly use the extracted process_records_cpu function
+        process_records_cpu(&mut records, false);
 
         assert_eq!(records[0].normalized_user, "user@example.com"); // Lowercased
         assert_eq!(records[0].normalized_url, "https://example.com/path");
@@ -340,7 +396,7 @@ mod tests {
         let mut processed_chunks = 0;
         for chunk in records.chunks_mut(chunk_size) {
             processed_chunks += 1;
-            process_records(chunk, false);
+            process_records_cpu(chunk, false);
         }
 
         assert_eq!(processed_chunks, 2); // 5 records / 3 chunk_size = 2 chunks

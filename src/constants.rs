@@ -1,6 +1,9 @@
 pub const DEFAULT_PROGRESS_INTERVAL_SECONDS: u64 = 30;
 pub const VERBOSE_PROGRESS_INTERVAL_SECONDS: u64 = 5;
 pub const BYTES_PER_GB: f64 = 1_073_741_824.0;
+pub const BYTES_PER_KB: f64 = 1024.0;
+pub const PERCENT_100: f64 = 100.0;
+pub const PERCENT_95: f64 = 0.95;
 
 pub const DEFAULT_SAMPLE_SIZE: usize = 100;
 pub const DEFAULT_RECORD_ESTIMATED_BYTES: usize = 200;

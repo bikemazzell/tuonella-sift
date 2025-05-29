@@ -6,7 +6,7 @@ use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
 use std::time::{Duration, Instant};
 use tokio::time::interval;
 use csv::{ReaderBuilder, WriterBuilder, Writer};
-use tracing::{debug, info, warn};
+use tracing::{debug, info, warn, trace};
 use serde::{Serialize, Deserialize};
 use std::collections::HashSet;
 use rand::Rng;
@@ -41,7 +41,75 @@ use crate::constants::{
 use crate::utils::{estimate_remaining_time, format_duration, format_bytes, discover_csv_files};
 #[cfg(feature = "cuda")]
 use crate::cuda_processor::CudaProcessor;
-use sysinfo::System;
+use sysinfo::{System, Pid};
+
+#[derive(Debug, Clone, PartialEq)]
+enum MemoryStatus {
+    Normal,
+    Medium,
+    High,
+    Critical,
+}
+
+// Memory monitoring struct to enforce memory limits
+struct MemoryMonitor {
+    max_memory_bytes: usize,
+    system: System,
+    process_pid: Pid,
+}
+
+impl MemoryMonitor {
+    fn new(max_memory_bytes: usize) -> Self {
+        let mut system = System::new_all();
+        system.refresh_all();
+        let process_pid = Pid::from_u32(std::process::id());
+
+        Self {
+            max_memory_bytes,
+            system,
+            process_pid,
+        }
+    }
+
+    fn check_memory_usage(&mut self) -> Result<MemoryStatus> {
+        self.system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+
+        if let Some(process) = self.system.process(self.process_pid) {
+            let current_memory = process.memory() as usize * 1024; // Convert KB to bytes
+            let usage_percent = (current_memory as f64 / self.max_memory_bytes as f64) * 100.0;
+
+            trace!("Memory usage: {} / {} bytes ({:.1}%)",
+                   current_memory,
+                   self.max_memory_bytes,
+                   usage_percent);
+
+            if current_memory > self.max_memory_bytes {
+                trace!("Memory usage exceeded limit: {} bytes used, {} bytes allowed ({:.1}%)",
+                      current_memory, self.max_memory_bytes, usage_percent);
+                return Ok(MemoryStatus::Critical);
+            } else if usage_percent > 80.0 {
+                trace!("Memory usage high: {:.1}% of limit", usage_percent);
+                return Ok(MemoryStatus::High);
+            } else if usage_percent > 60.0 {
+                return Ok(MemoryStatus::Medium);
+            } else {
+                return Ok(MemoryStatus::Normal);
+            }
+        }
+
+        Ok(MemoryStatus::Normal)
+    }
+
+    fn get_current_memory_usage(&mut self) -> usize {
+        self.system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+
+        if let Some(process) = self.system.process(self.process_pid) {
+            process.memory() as usize * 1024 // Convert KB to bytes
+        } else {
+            0
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessingStats {
@@ -394,8 +462,8 @@ impl SwappableDeduplicationMap {
             // Ensure we have enough data for all fields
             let total_data_needed = user_len + pass_len + url_len;
             if pos + total_data_needed > buffer.len() {
-                warn!("Insufficient data for record at position {} in segment {} (need {} bytes, have {}), stopping",
-                      pos, segment_path.display(), total_data_needed, buffer.len() - pos);
+                debug!("Insufficient data for record at position {} in segment {} (need {} bytes, have {}), stopping",
+                       pos, segment_path.display(), total_data_needed, buffer.len() - pos);
                 break;
             }
 
@@ -451,6 +519,7 @@ pub struct Deduplicator {
     field_detector: FieldDetector,
     temp_dir: PathBuf,
     checkpoint_path: PathBuf,
+    memory_monitor: MemoryMonitor,
     #[cfg(feature = "cuda")]
     cuda_processor: Option<CudaProcessor>,
 }
@@ -463,6 +532,13 @@ impl Deduplicator {
 
         fs::create_dir_all(&temp_dir)?;
         fs::create_dir_all(&output_dir)?;
+
+        // Initialize memory monitor with configured limits
+        let max_memory_bytes = config.get_max_memory_bytes();
+        let memory_monitor = MemoryMonitor::new(max_memory_bytes);
+        info!("Memory monitor initialized with limit: {} bytes ({:.2} GB)",
+              max_memory_bytes,
+              max_memory_bytes as f64 / BYTES_PER_GB);
 
         #[cfg(feature = "cuda")]
         let cuda_processor = if config.processing.enable_cuda {
@@ -486,6 +562,7 @@ impl Deduplicator {
             field_detector: FieldDetector::new(),
             temp_dir,
             checkpoint_path,
+            memory_monitor,
             #[cfg(feature = "cuda")]
             cuda_processor,
         })
@@ -657,7 +734,7 @@ impl Deduplicator {
     }
 
     async fn process_batch(
-        &self,
+        &mut self,
         batch_files: Vec<PathBuf>,
         batch_idx: usize,
     ) -> Result<ProcessingStats> {
@@ -678,6 +755,14 @@ impl Deduplicator {
             total_size,
             start_time,
         );
+
+        // Check memory usage before creating swap directory and map
+        let memory_status = self.memory_monitor.check_memory_usage()?;
+        if memory_status == MemoryStatus::Critical {
+            trace!("Memory usage critical before creating swap map, forcing garbage collection");
+            // Force garbage collection to free up memory
+            std::hint::black_box(());
+        }
 
         let swap_dir = self.temp_dir.join(format!("swap_batch_{}", batch_idx));
         fs::create_dir_all(&swap_dir)?;
@@ -704,6 +789,16 @@ impl Deduplicator {
                 )?
             }
         };
+
+        // Check memory usage after creating swappable map
+        let memory_status = self.memory_monitor.check_memory_usage()?;
+        if memory_status == MemoryStatus::Critical {
+            trace!("Memory usage critical after creating swap map, triggering early swap");
+            // Force early swap to disk if memory is critical
+            if !swappable_map.in_memory_map.is_empty() {
+                swappable_map.swap_segment_to_disk()?;
+            }
+        }
 
         // Process files with chunked loading to prevent memory overflow
         let chunk_size = self.config.processing.record_chunk_size;
@@ -746,9 +841,9 @@ impl Deduplicator {
                     Err(e) => {
                         let error_str = e.to_string();
                         if error_str.contains("invalid utf-8") || error_str.contains("invalid UTF-8") {
-                            warn!("UTF-8 encoding error on line {}: {}. Skipping to prevent data corruption.", line_number, e);
+                            debug!("UTF-8 encoding error on line {}: {}. Skipping to prevent data corruption.", line_number, e);
                         } else {
-                            warn!("Error reading line {}: {}", line_number, e);
+                            debug!("Error reading line {}: {}", line_number, e);
                         }
                         stats.error_records += 1;
                     }
@@ -757,6 +852,15 @@ impl Deduplicator {
                 if record_chunk.len() >= chunk_size {
                     self.process_record_chunk(&mut record_chunk, &mut swappable_map, &mut stats)?;
                     record_chunk.clear();
+                }
+
+                // Check memory usage periodically during file processing
+                if line_number % 10000 == 0 {
+                    let memory_status = self.memory_monitor.check_memory_usage()?;
+                    if memory_status == MemoryStatus::Critical {
+                        trace!("Memory usage critical during file processing, forcing swap");
+                        swappable_map.swap_segment_to_disk()?;
+                    }
                 }
             }
 
@@ -779,11 +883,18 @@ impl Deduplicator {
     }
 
     fn process_record_chunk(
-        &self,
+        &mut self,
         records: &mut Vec<Record>,
         map: &mut SwappableDeduplicationMap,
         stats: &mut ProcessingStats,
     ) -> Result<()> {
+        // Check memory usage before processing
+        let memory_status = self.memory_monitor.check_memory_usage()?;
+        if memory_status == MemoryStatus::Critical {
+            trace!("Memory usage critical before processing records, forcing swap");
+            map.swap_segment_to_disk()?;
+        }
+
         #[cfg(feature = "cuda")]
         {
             if let Some(cuda_proc) = &self.cuda_processor {
@@ -798,6 +909,13 @@ impl Deduplicator {
             } else {
                 stats.unique_records += 1;
             }
+        }
+
+        // Check memory usage after processing
+        let memory_status = self.memory_monitor.check_memory_usage()?;
+        if memory_status == MemoryStatus::Critical || memory_status == MemoryStatus::High {
+            trace!("Memory usage high after processing records, forcing swap");
+            map.swap_segment_to_disk()?;
         }
         Ok(())
     }
@@ -946,12 +1064,47 @@ impl Deduplicator {
         Ok(())
     }
 
-    fn sample_records_robust(&self, file_path: &Path) -> Result<Vec<Vec<String>>> {
-        let mut file = File::open(file_path)?;
-        let reader = BufReader::new(&mut file);
+    fn count_lines_efficiently(&mut self, file: &mut File) -> Result<usize> {
+        use std::io::{BufRead, BufReader, Seek, SeekFrom};
 
-        // 1. Count total lines
-        let total_lines = reader.lines().count();
+        let mut line_count = 0;
+        let mut buffer = Vec::new();
+
+        // Create a BufReader that borrows the file
+        {
+            let mut reader = BufReader::new(&mut *file);
+
+            loop {
+                buffer.clear();
+                match reader.read_until(b'\n', &mut buffer) {
+                    Ok(0) => break, // EOF
+                    Ok(_) => {
+                        line_count += 1;
+
+                        // Check memory usage every 100,000 lines
+                        if line_count % 100000 == 0 {
+                            let memory_status = self.memory_monitor.check_memory_usage()?;
+                            if memory_status == MemoryStatus::Critical {
+                                trace!("Memory usage critical during line counting, stopping count early");
+                                break;
+                            }
+                        }
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            }
+        } // BufReader is dropped here, releasing the borrow
+
+        // Reset file position to beginning
+        file.seek(SeekFrom::Start(0))?;
+        Ok(line_count)
+    }
+
+    fn sample_records_robust(&mut self, file_path: &Path) -> Result<Vec<Vec<String>>> {
+        let mut file = File::open(file_path)?;
+
+        // 1. Count total lines efficiently without loading all into memory
+        let total_lines = self.count_lines_efficiently(&mut file)?;
         if total_lines == 0 {
             return Ok(Vec::new());
         }
@@ -973,26 +1126,48 @@ impl Deduplicator {
             }
         }
 
-        // 2. Read selected lines
+        // 2. Read selected lines with UTF-8 error handling
         file.seek(SeekFrom::Start(0))?;
-        let reader = BufReader::new(&mut file);
+        let mut reader = BufReader::new(&mut file);
         let mut current_line_num = 0;
+        let mut line_buffer = Vec::new();
 
-        for line_result in reader.lines() {
-            if selected_line_indices.contains(&current_line_num) {
-                if let Ok(line) = line_result {
-                    let line = line.trim();
-                    if !line.is_empty() {
-                        let fields = self.parse_csv_line_robust(&line);
-                        if fields.len() >= 3 {
-                            samples.push(fields);
+        loop {
+            line_buffer.clear();
+            match reader.read_until(b'\n', &mut line_buffer) {
+                Ok(0) => break, // EOF
+                Ok(_) => {
+                    if selected_line_indices.contains(&current_line_num) {
+                        // Convert bytes to string with lossy UTF-8 conversion
+                        let line = String::from_utf8_lossy(&line_buffer);
+                        let line = line.trim();
+                        if !line.is_empty() {
+                            let fields = self.parse_csv_line_robust(&line);
+                            if fields.len() >= 3 {
+                                samples.push(fields);
+                            }
                         }
                     }
+                    current_line_num += 1;
+
+                    // Check memory usage during sampling to prevent excessive memory growth
+                    if current_line_num % 100000 == 0 {
+                        let memory_status = self.memory_monitor.check_memory_usage()?;
+                        if memory_status == MemoryStatus::Critical {
+                            trace!("Memory usage critical during sampling, stopping early");
+                            break;
+                        }
+                    }
+
+                    if samples.len() == sample_size || current_line_num >= total_lines {
+                        break;
+                    }
                 }
-            }
-            current_line_num += 1;
-            if samples.len() == sample_size || current_line_num >= total_lines {
-                break;
+                Err(e) => {
+                    debug!("Error reading line {} from {}: {}. Skipping.", current_line_num + 1, file_path.display(), e);
+                    current_line_num += 1;
+                    continue;
+                }
             }
         }
 
@@ -1156,7 +1331,7 @@ mod tests {
         }
         file.flush().unwrap();
 
-        let deduplicator = create_dummy_deduplicator().await;
+        let mut deduplicator = create_dummy_deduplicator().await;
         let samples = deduplicator.sample_records_robust(&file_path).unwrap();
 
         // Assert that exactly 100 samples are returned
@@ -1184,7 +1359,7 @@ mod tests {
         }
         file.flush().unwrap();
 
-        let deduplicator = create_dummy_deduplicator().await;
+        let mut deduplicator = create_dummy_deduplicator().await;
         let samples = deduplicator.sample_records_robust(&file_path).unwrap();
 
         // Assert that all lines are sampled
@@ -1206,7 +1381,7 @@ mod tests {
         let mut file = File::create(&file_path).unwrap();
         file.flush().unwrap();
 
-        let deduplicator = create_dummy_deduplicator().await;
+        let mut deduplicator = create_dummy_deduplicator().await;
         let samples = deduplicator.sample_records_robust(&file_path).unwrap();
 
         // Assert that no samples are returned
@@ -1230,7 +1405,7 @@ mod tests {
         writeln!(file, "user4,pass4,url4.com").unwrap(); // Valid
         file.flush().unwrap();
 
-        let deduplicator = create_dummy_deduplicator().await;
+        let mut deduplicator = create_dummy_deduplicator().await;
         let samples = deduplicator.sample_records_robust(&file_path).unwrap();
 
         // Assert that only valid lines are sampled

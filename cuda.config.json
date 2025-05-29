@@ -1,7 +1,7 @@
 {
   "memory": {
-    "max_ram_usage_percent": 70,
-    "batch_size_gb": 32,
+    "max_ram_usage_percent": 50,
+    "batch_size_gb": 8.0,
     "auto_detect_memory": true
   },
   "processing": {
@@ -28,7 +28,7 @@
     "max_sample_size": 1000
   },
   "logging": {
-    "verbosity": "verbose",
+    "verbosity": "normal",
     "progress_interval_seconds": 20,
     "log_file": "tuonella-sift-cuda.log"
   },
