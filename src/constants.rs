@@ -7,3 +7,19 @@ pub const DEFAULT_RECORD_ESTIMATED_BYTES: usize = 200;
 pub const DEFAULT_MAX_GPU_BATCH_SIZE: usize = 100000;
 pub const DEFAULT_CPU_SEGMENT_MIN_MB: usize = 64;
 pub const DEFAULT_MAX_URL_LENGTH_FOR_FAST_NORMALIZATION: usize = 512;
+
+// Memory and processing constants
+pub const BYTES_PER_MB: usize = 1024 * 1024;
+pub const MAX_FIELD_LENGTH_BYTES: usize = 1024 * 1024; // 1MB max per field
+pub const CONSERVATIVE_RECORD_BYTES_MULTIPLIER: usize = 3;
+pub const CPU_SEGMENT_MEMORY_DIVISOR: usize = 4;
+pub const BINARY_HEADER_SIZE_BYTES: usize = 6;
+
+// GPU-related constants
+pub const DEFAULT_GPU_BUS_WIDTH_NORMALIZATION: f64 = 256.0;
+pub const DEFAULT_GPU_L2_CACHE_NORMALIZATION_MB: f64 = 2.0 * 1024.0 * 1024.0;
+pub const DEFAULT_GPU_SEGMENT_BASE_SIZE_MB: f64 = 128.0 * 1024.0 * 1024.0;
+pub const DEFAULT_GPU_MEMORY_USAGE_PERCENT: f64 = 0.2;
+pub const DEFAULT_GPU_MEMORY_HEADROOM_PERCENT: f64 = 0.8;
+pub const DEFAULT_GPU_COMPUTE_CAPABILITY_FACTOR: f64 = 2.0;
+pub const DEFAULT_GPU_MIN_SEGMENT_SIZE_MB: usize = 1;

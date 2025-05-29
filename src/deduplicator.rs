@@ -5,7 +5,7 @@ use std::io::{BufReader, BufWriter, Read, Write, Seek, SeekFrom, BufRead};
 use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
 use std::time::{Duration, Instant};
 use tokio::time::interval;
-use csv::{ReaderBuilder, WriterBuilder};
+use csv::{ReaderBuilder, WriterBuilder, Writer};
 use tracing::{debug, info, warn};
 use serde::{Serialize, Deserialize};
 use std::collections::HashSet;
@@ -20,6 +20,22 @@ use crate::constants::{
     DEFAULT_RECORD_ESTIMATED_BYTES,
     DEFAULT_SAMPLE_SIZE,
     DEFAULT_CPU_SEGMENT_MIN_MB,
+    BYTES_PER_MB,
+    MAX_FIELD_LENGTH_BYTES,
+    CPU_SEGMENT_MEMORY_DIVISOR,
+    BINARY_HEADER_SIZE_BYTES
+};
+
+#[cfg(feature = "cuda")]
+use crate::constants::{
+    DEFAULT_GPU_BUS_WIDTH_NORMALIZATION,
+    DEFAULT_GPU_L2_CACHE_NORMALIZATION_MB,
+    DEFAULT_GPU_SEGMENT_BASE_SIZE_MB,
+    DEFAULT_GPU_MEMORY_USAGE_PERCENT,
+    DEFAULT_GPU_MEMORY_HEADROOM_PERCENT,
+    DEFAULT_GPU_COMPUTE_CAPABILITY_FACTOR,
+    DEFAULT_GPU_MIN_SEGMENT_SIZE_MB,
+    CONSERVATIVE_RECORD_BYTES_MULTIPLIER,
 };
 
 use crate::utils::{estimate_remaining_time, format_duration, format_bytes, discover_csv_files};
@@ -69,19 +85,19 @@ impl SwappableDeduplicationMap {
         if let Some(proc) = &cuda_processor {
             if let Ok(props) = proc.get_properties() {
                 // Adapted logic from former GpuCapabilities::optimal_segment_size
-                let memory_factor = props.memory_bus_width as f64 / 256.0; // DEFAULT_GPU_BUS_WIDTH_NORMALIZATION
-                let cache_factor = (props.l2_cache_size as f64 / (2.0 * 1024.0 * 1024.0)).min(1.0); // DEFAULT_GPU_L2_CACHE_NORMALIZATION_MB
-                let base_size_bytes = (128 * 1024 * 1024) as f64; // DEFAULT_GPU_SEGMENT_BASE_SIZE_MB
+                let memory_factor = props.memory_bus_width as f64 / DEFAULT_GPU_BUS_WIDTH_NORMALIZATION;
+                let cache_factor = (props.l2_cache_size as f64 / DEFAULT_GPU_L2_CACHE_NORMALIZATION_MB).min(1.0);
+                let base_size_bytes = DEFAULT_GPU_SEGMENT_BASE_SIZE_MB;
                 let adjusted_size_bytes = base_size_bytes * memory_factor * cache_factor;
 
-                let max_size_bytes = (props.free_memory as f64 * 0.2) as usize; // DEFAULT_GPU_MEMORY_USAGE_PERCENT
-                segment_size_mb = ((adjusted_size_bytes.round() as usize).min(max_size_bytes) / (1024 * 1024)).max(1);
+                let max_size_bytes = (props.free_memory as f64 * DEFAULT_GPU_MEMORY_USAGE_PERCENT) as usize;
+                segment_size_mb = ((adjusted_size_bytes.round() as usize).min(max_size_bytes) / BYTES_PER_MB).max(DEFAULT_GPU_MIN_SEGMENT_SIZE_MB);
             }
         }
 
         // Use 3x the estimated bytes per record to account for overhead and variations
-        let conservative_bytes_per_record = DEFAULT_RECORD_ESTIMATED_BYTES * 3;
-        let max_memory_entries = (max_memory_mb * 1024 * 1024) / conservative_bytes_per_record;
+        let conservative_bytes_per_record = DEFAULT_RECORD_ESTIMATED_BYTES * CONSERVATIVE_RECORD_BYTES_MULTIPLIER;
+        let max_memory_entries = (max_memory_mb * BYTES_PER_MB) / conservative_bytes_per_record;
 
         Ok(Self {
             in_memory_map: DeduplicationMap::new(),
@@ -98,8 +114,8 @@ impl SwappableDeduplicationMap {
     fn new(swap_dir: PathBuf, max_memory_mb: usize) -> Result<Self> {
         fs::create_dir_all(&swap_dir)?;
         // Use larger segments to reduce fragmentation and I/O overhead
-        let segment_size_mb = (max_memory_mb / 4).max(DEFAULT_CPU_SEGMENT_MIN_MB);
-        let max_memory_entries = (max_memory_mb * 1024 * 1024) / DEFAULT_RECORD_ESTIMATED_BYTES;
+        let segment_size_mb = (max_memory_mb / CPU_SEGMENT_MEMORY_DIVISOR).max(DEFAULT_CPU_SEGMENT_MIN_MB);
+        let max_memory_entries = (max_memory_mb * BYTES_PER_MB) / DEFAULT_RECORD_ESTIMATED_BYTES;
 
         Ok(Self {
             in_memory_map: DeduplicationMap::new(),
@@ -130,7 +146,7 @@ impl SwappableDeduplicationMap {
             .create(true)
             .open(&segment_path)?;
 
-        let mut buffer = Vec::with_capacity(self.segment_size_mb * 1024 * 1024);
+        let mut buffer = Vec::with_capacity(self.segment_size_mb * BYTES_PER_MB);
         for record in self.in_memory_map.records.values() {
 
             let user_bytes = record.user.as_bytes();
@@ -183,19 +199,19 @@ impl SwappableDeduplicationMap {
         let mut parallel_segments = 1;
 
         if let Ok(props) = cuda_proc.get_properties() {
-            let memory_factor = props.memory_bus_width as f64 / 256.0; // DEFAULT_GPU_BUS_WIDTH_NORMALIZATION
-            let cache_factor = (props.l2_cache_size as f64 / (2.0 * 1024.0 * 1024.0)).min(1.0); // DEFAULT_GPU_L2_CACHE_NORMALIZATION_MB
-            let base_size_bytes = (128 * 1024 * 1024) as f64; // DEFAULT_GPU_SEGMENT_BASE_SIZE_MB
+            let memory_factor = props.memory_bus_width as f64 / DEFAULT_GPU_BUS_WIDTH_NORMALIZATION;
+            let cache_factor = (props.l2_cache_size as f64 / DEFAULT_GPU_L2_CACHE_NORMALIZATION_MB).min(1.0);
+            let base_size_bytes = DEFAULT_GPU_SEGMENT_BASE_SIZE_MB;
             let adjusted_size_bytes = base_size_bytes * memory_factor * cache_factor;
             let current_free_memory_bytes = props.free_memory;
-            let max_size_bytes = (current_free_memory_bytes as f64 * 0.2) as usize; // DEFAULT_GPU_MEMORY_USAGE_PERCENT
-            let optimal_segment_size_bytes = (adjusted_size_bytes.round() as usize).min(max_size_bytes).max(1024 * 1024);
+            let max_size_bytes = (current_free_memory_bytes as f64 * DEFAULT_GPU_MEMORY_USAGE_PERCENT) as usize;
+            let optimal_segment_size_bytes = (adjusted_size_bytes.round() as usize).min(max_size_bytes).max(DEFAULT_GPU_MIN_SEGMENT_SIZE_MB * BYTES_PER_MB);
 
             if optimal_segment_size_bytes > 0 {
-                let memory_headroom_bytes = (current_free_memory_bytes as f64 * 0.8) as usize;
+                let memory_headroom_bytes = (current_free_memory_bytes as f64 * DEFAULT_GPU_MEMORY_HEADROOM_PERCENT) as usize;
                 let max_segments_by_mem = memory_headroom_bytes / optimal_segment_size_bytes;
 
-                let capability_factor = (props.compute_capability_major as f64 * 2.0) as usize; // DEFAULT_GPU_COMPUTE_CAPABILITY_FACTOR
+                let capability_factor = (props.compute_capability_major as f64 * DEFAULT_GPU_COMPUTE_CAPABILITY_FACTOR) as usize;
                 parallel_segments = max_segments_by_mem.min(capability_factor).max(1);
             }
         }
@@ -219,17 +235,57 @@ impl SwappableDeduplicationMap {
 
                     let mut pos = 0;
                     while pos < buffer.len() {
+                        // Ensure we have at least 6 bytes for the length headers
+                        if pos + BINARY_HEADER_SIZE_BYTES > buffer.len() {
+                            warn!("Incomplete length headers at position {} in segment {}, stopping", pos, segment_path.display());
+                            break;
+                        }
+
                         let user_len = u16::from_le_bytes([buffer[pos], buffer[pos + 1]]) as usize;
                         let pass_len = u16::from_le_bytes([buffer[pos + 2], buffer[pos + 3]]) as usize;
                         let url_len = u16::from_le_bytes([buffer[pos + 4], buffer[pos + 5]]) as usize;
-                        pos += 6;
+                        pos += BINARY_HEADER_SIZE_BYTES;
 
-                        let user = String::from_utf8_lossy(&buffer[pos..pos + user_len]).to_string();
+                        // Validate length fields are reasonable (prevent huge allocations)
+                        if user_len > MAX_FIELD_LENGTH_BYTES || pass_len > MAX_FIELD_LENGTH_BYTES || url_len > MAX_FIELD_LENGTH_BYTES {
+                            warn!("Unreasonable field lengths (user:{}, pass:{}, url:{}) at position {} in segment {}, skipping record",
+                                  user_len, pass_len, url_len, pos - BINARY_HEADER_SIZE_BYTES, segment_path.display());
+                            break;
+                        }
+
+                        // Ensure we have enough data for all fields
+                        let total_data_needed = user_len + pass_len + url_len;
+                        if pos + total_data_needed > buffer.len() {
+                            warn!("Insufficient data for record at position {} in segment {} (need {} bytes, have {}), stopping",
+                                  pos, segment_path.display(), total_data_needed, buffer.len() - pos);
+                            break;
+                        }
+
+                        let user = if user_len > 0 {
+                            String::from_utf8_lossy(&buffer[pos..pos + user_len]).to_string()
+                        } else {
+                            String::new()
+                        };
                         pos += user_len;
-                        let password = String::from_utf8_lossy(&buffer[pos..pos + pass_len]).to_string();
+
+                        let password = if pass_len > 0 {
+                            String::from_utf8_lossy(&buffer[pos..pos + pass_len]).to_string()
+                        } else {
+                            String::new()
+                        };
                         pos += pass_len;
-                        let url = String::from_utf8_lossy(&buffer[pos..pos + url_len]).to_string();
+
+                        let url = if url_len > 0 {
+                            String::from_utf8_lossy(&buffer[pos..pos + url_len]).to_string()
+                        } else {
+                            String::new()
+                        };
                         pos += url_len;
+
+                        // Skip empty records
+                        if user.is_empty() && password.is_empty() {
+                            continue;
+                        }
 
                         records.push(Record::new_normalized(user, password, url, segment_path.to_string_lossy().into_owned(), 0));
                     }
@@ -281,47 +337,112 @@ impl SwappableDeduplicationMap {
     async fn cpu_merge_segments(&self, output_file: File) -> Result<ProcessingStats> {
         let mut stats = ProcessingStats::default();
         let mut writer = WriterBuilder::new().from_writer(BufWriter::new(output_file));
-        let mut seen_hashes = HashSet::new();
+        let mut seen_hashes: HashSet<String> = HashSet::new();
         let mut batch_size = 0;
 
         for segment_path in &self.segments {
-            let mut file = fs::File::open(segment_path)?;
-            let mut buffer = Vec::new();
-            file.read_to_end(&mut buffer)?;
-
-            let mut pos = 0;
-            while pos < buffer.len() {
-                let user_len = u16::from_le_bytes([buffer[pos], buffer[pos + 1]]) as usize;
-                let pass_len = u16::from_le_bytes([buffer[pos + 2], buffer[pos + 3]]) as usize;
-                let url_len = u16::from_le_bytes([buffer[pos + 4], buffer[pos + 5]]) as usize;
-                pos += 6;
-
-                let user = String::from_utf8_lossy(&buffer[pos..pos + user_len]).to_string();
-                pos += user_len;
-                let password = String::from_utf8_lossy(&buffer[pos..pos + pass_len]).to_string();
-                pos += pass_len;
-                let url = String::from_utf8_lossy(&buffer[pos..pos + url_len]).to_string();
-                pos += url_len;
-
-                let record = Record::new_normalized(user, password, url, segment_path.to_string_lossy().into_owned(), 0);
-                let hash = record.get_hash();
-                if seen_hashes.insert(hash) {
-                    stats.unique_records += 1;
-                    writer.write_record(&[&record.user, &record.password, &record.url])?;
-                    batch_size += 1;
-
-                    if batch_size >= DEFAULT_MAX_GPU_BATCH_SIZE {
-                        writer.flush()?;
-                        batch_size = 0;
-                    }
-                } else {
-                    stats.duplicates_removed += 1;
+            match self.process_segment_file(segment_path, &mut writer, &mut seen_hashes, &mut batch_size, &mut stats) {
+                Ok(_) => {},
+                Err(e) => {
+                    warn!("Error processing segment file {}: {}. Skipping and continuing.", segment_path.display(), e);
+                    stats.errors_encountered += 1;
+                    continue;
                 }
-                stats.total_records += 1;
             }
         }
         writer.flush()?;
         Ok(stats)
+    }
+
+    fn process_segment_file(
+        &self,
+        segment_path: &Path,
+        writer: &mut Writer<BufWriter<File>>,
+        seen_hashes: &mut HashSet<String>,
+        batch_size: &mut usize,
+        stats: &mut ProcessingStats,
+    ) -> Result<()> {
+        let mut file = fs::File::open(segment_path)?;
+        let mut buffer = Vec::new();
+        file.read_to_end(&mut buffer)?;
+
+        if buffer.len() < BINARY_HEADER_SIZE_BYTES {
+            warn!("Segment file {} is too small ({}bytes), skipping", segment_path.display(), buffer.len());
+            return Ok(());
+        }
+
+        let mut pos = 0;
+        while pos < buffer.len() {
+            // Ensure we have at least 6 bytes for the length headers
+            if pos + BINARY_HEADER_SIZE_BYTES > buffer.len() {
+                warn!("Incomplete length headers at position {} in segment {}, stopping", pos, segment_path.display());
+                break;
+            }
+
+            let user_len = u16::from_le_bytes([buffer[pos], buffer[pos + 1]]) as usize;
+            let pass_len = u16::from_le_bytes([buffer[pos + 2], buffer[pos + 3]]) as usize;
+            let url_len = u16::from_le_bytes([buffer[pos + 4], buffer[pos + 5]]) as usize;
+            pos += BINARY_HEADER_SIZE_BYTES;
+
+            // Validate length fields are reasonable (prevent huge allocations)
+            if user_len > MAX_FIELD_LENGTH_BYTES || pass_len > MAX_FIELD_LENGTH_BYTES || url_len > MAX_FIELD_LENGTH_BYTES {
+                warn!("Unreasonable field lengths (user:{}, pass:{}, url:{}) at position {} in segment {}, skipping record",
+                      user_len, pass_len, url_len, pos - BINARY_HEADER_SIZE_BYTES, segment_path.display());
+                break;
+            }
+
+            // Ensure we have enough data for all fields
+            let total_data_needed = user_len + pass_len + url_len;
+            if pos + total_data_needed > buffer.len() {
+                warn!("Insufficient data for record at position {} in segment {} (need {} bytes, have {}), stopping",
+                      pos, segment_path.display(), total_data_needed, buffer.len() - pos);
+                break;
+            }
+
+            // Extract fields with bounds checking
+            let user = if user_len > 0 {
+                String::from_utf8_lossy(&buffer[pos..pos + user_len]).to_string()
+            } else {
+                String::new()
+            };
+            pos += user_len;
+
+            let password = if pass_len > 0 {
+                String::from_utf8_lossy(&buffer[pos..pos + pass_len]).to_string()
+            } else {
+                String::new()
+            };
+            pos += pass_len;
+
+            let url = if url_len > 0 {
+                String::from_utf8_lossy(&buffer[pos..pos + url_len]).to_string()
+            } else {
+                String::new()
+            };
+            pos += url_len;
+
+            // Skip empty records
+            if user.is_empty() && password.is_empty() {
+                continue;
+            }
+
+            let record = Record::new_normalized(user, password, url, segment_path.to_string_lossy().into_owned(), 0);
+            let hash = record.get_hash();
+            if seen_hashes.insert(hash) {
+                stats.unique_records += 1;
+                writer.write_record(&[&record.user, &record.password, &record.url])?;
+                *batch_size += 1;
+
+                if *batch_size >= DEFAULT_MAX_GPU_BATCH_SIZE {
+                    writer.flush()?;
+                    *batch_size = 0;
+                }
+            } else {
+                stats.duplicates_removed += 1;
+            }
+            stats.total_records += 1;
+        }
+        Ok(())
     }
 }
 
@@ -558,17 +679,14 @@ impl Deduplicator {
             start_time,
         );
 
-        // Create swap directory for this batch
         let swap_dir = self.temp_dir.join(format!("swap_batch_{}", batch_idx));
         fs::create_dir_all(&swap_dir)?;
 
-        // Calculate max memory usage in MB
         let mut sys = System::new_all();
         sys.refresh_all();
         let total_memory_mb = (sys.total_memory() / (1024 * 1024)) as usize;
         let max_memory_mb = (total_memory_mb as f64 * (self.config.memory.max_ram_usage_percent as f64 / 100.0)) as usize;
 
-        // Initialize swappable map
         let mut swappable_map = {
             #[cfg(feature = "cuda")]
             {
@@ -626,19 +744,22 @@ impl Deduplicator {
                         }
                     }
                     Err(e) => {
-                        warn!("Error reading line {}: {}", line_number, e);
+                        let error_str = e.to_string();
+                        if error_str.contains("invalid utf-8") || error_str.contains("invalid UTF-8") {
+                            warn!("UTF-8 encoding error on line {}: {}. Skipping to prevent data corruption.", line_number, e);
+                        } else {
+                            warn!("Error reading line {}: {}", line_number, e);
+                        }
                         stats.error_records += 1;
                     }
                 }
 
-                // Process chunk when it's full
                 if record_chunk.len() >= chunk_size {
                     self.process_record_chunk(&mut record_chunk, &mut swappable_map, &mut stats)?;
                     record_chunk.clear();
                 }
             }
 
-            // Process remaining records in the chunk
             if !record_chunk.is_empty() {
                 self.process_record_chunk(&mut record_chunk, &mut swappable_map, &mut stats)?;
                 record_chunk.clear();
@@ -647,7 +768,6 @@ impl Deduplicator {
             progress_counter.fetch_add(1, Ordering::Relaxed);
         }
 
-        // Write batch output file
         let batch_output_path = self.temp_dir.join(format!("batch_{}.csv", batch_idx));
         let _batch_output_stats = swappable_map.merge_and_write_output(&batch_output_path).await?;
 
@@ -672,7 +792,6 @@ impl Deduplicator {
             }
         }
 
-        // Insert processed records into the deduplication map
         for record in records.drain(..) {
             if map.insert(record)? {
                 stats.duplicates_removed += 1;
@@ -774,7 +893,7 @@ impl Deduplicator {
     }
 
     async fn save_checkpoint(&self, stats: &ProcessingStats, batch_idx: usize) -> Result<()> {
-        // This is a simplified checkpoint - in a full implementation, we'd track more state
+        // TODO: this is a simplified checkpoint - in a full implementation, we'd track more state
         let checkpoint = Checkpoint {
             processed_files: Vec::new(), // Would need to track this properly in process_batch
             current_batch: batch_idx,
@@ -844,7 +963,6 @@ impl Deduplicator {
 
         // Generate unique random indices
         if total_lines <= sample_size {
-            // If fewer lines than sample_size, just take all valid lines
             for i in 0..total_lines {
                 selected_line_indices.insert(i);
             }
@@ -856,7 +974,7 @@ impl Deduplicator {
         }
 
         // 2. Read selected lines
-        file.seek(SeekFrom::Start(0))?; // Reset file pointer to beginning
+        file.seek(SeekFrom::Start(0))?;
         let reader = BufReader::new(&mut file);
         let mut current_line_num = 0;
 
