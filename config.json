@@ -71,9 +71,27 @@
         "progress_interval_seconds": 20,
         "log_file": "tuonella-sift-cuda-large.log"
       }
+    },
+    "large_dataset": {
+      "memory": {
+        "max_ram_usage_percent": 25,
+        "batch_size_gb": 0.25,
+        "auto_detect_memory": true
+      },
+      "processing": {
+        "max_threads": 0,
+        "enable_cuda": true,
+        "chunk_size_mb": 8,
+        "max_output_file_size_gb": 4
+      },
+      "logging": {
+        "verbosity": "normal",
+        "progress_interval_seconds": 30,
+        "log_file": "tuonella-sift-large.log"
+      }
     }
   },
-  "active_profile": "production",
+  "active_profile": "large_dataset",
   "memory": {
     "max_ram_usage_percent": 50,
     "batch_size_gb": 4,

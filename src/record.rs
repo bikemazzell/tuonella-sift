@@ -7,6 +7,7 @@ use url::Url;
 use crate::config::{UrlNormalizationConfig, FieldDetectionConfig};
 use crate::patterns::{PROTOCOL_PATTERN, SUBDOMAIN_PATTERN, PATH_PATTERN, EMAIL_PATTERN, PASSWORD_PATTERN, normalize_url_fast};
 use std::sync::Arc;
+use crate::constants::DEFAULT_MAX_URL_LENGTH_FOR_FAST_NORMALIZATION;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Record {
@@ -16,7 +17,7 @@ pub struct Record {
     pub normalized_url: String,
     pub normalized_user: String,
     pub fields: Vec<String>,
-    pub completeness_score: usize,
+    pub completeness_score: f32,
     pub source_file: String,
     pub line_number: usize,
 }
@@ -30,7 +31,7 @@ impl Record {
         source_file: String,
         line_number: usize,
         case_sensitive_usernames: bool,
-        url_config: &UrlNormalizationConfig, // Added url_config parameter
+        url_config: &UrlNormalizationConfig,
     ) -> Option<Self> {
         if fields.len() <= user_idx.max(password_idx).max(url_idx) {
             return None;
@@ -48,14 +49,11 @@ impl Record {
             return None;
         }
 
-        // Use fast normalization for better performance
         let normalized_url = if !url.is_empty() {
-            if url.len() < 512 { // Removed !url.contains("android://")
-                // Use fast normalization for typical URLs
+            if url.len() < DEFAULT_MAX_URL_LENGTH_FOR_FAST_NORMALIZATION {
                 normalize_url_fast(&url)
             } else {
-                // Use full normalization for complex URLs
-                normalize_url(&url, url_config) // Pass url_config
+                normalize_url(&url, url_config)
             }
         } else {
             String::new()
@@ -76,13 +74,48 @@ impl Record {
             normalized_url,
             normalized_user,
             fields,
-            completeness_score,
+            completeness_score: completeness_score as f32,
             source_file,
             line_number,
         })
     }
 
+    pub fn new_normalized(
+        user: String,
+        password: String,
+        url: String,
+        source_file: String,
+        line_number: usize,
+    ) -> Self {
+        let normalized_user = user.to_lowercase();
+        let normalized_url = if !url.is_empty() {
+            #[cfg(feature = "cuda")]
+            {
+                crate::patterns::normalize_url_fast(&url)
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                url.to_lowercase()
+            }
+        } else {
+            String::new()
+        };
 
+        let fields = vec![user.clone(), password.clone(), url.clone()];
+        let completeness_score = fields.iter().filter(|f| !f.is_empty()).count() as f32;
+
+        Self {
+            user,
+            password,
+            url,
+            normalized_user,
+            normalized_url,
+            source_file,
+            line_number,
+            fields,
+            completeness_score,
+        }
+    }
 
     pub fn dedup_key(&self) -> String {
         format!("{}|{}", self.normalized_user, self.normalized_url)
@@ -90,6 +123,10 @@ impl Record {
 
     pub fn is_more_complete_than(&self, other: &Record) -> bool {
         self.completeness_score > other.completeness_score
+    }
+
+    pub fn get_hash(&self) -> String {
+        format!("{}:{}:{}", self.normalized_user, self.password, self.normalized_url)
     }
 }
 
@@ -141,7 +178,7 @@ impl FieldDetector {
             url_patterns,
             email_patterns,
             password_patterns,
-            use_fast_patterns: true, // Enable fast patterns by default
+            use_fast_patterns: true,
         }
     }
 
@@ -167,7 +204,6 @@ impl FieldDetector {
                 }
 
                 if self.use_fast_patterns {
-                    // Use optimized hardcoded patterns for better performance
                     if PROTOCOL_PATTERN.is_match(field) || SUBDOMAIN_PATTERN.is_match(field) || PATH_PATTERN.is_match(field) {
                         url_scores[i] += 1;
                     }
@@ -180,7 +216,6 @@ impl FieldDetector {
                         password_scores[i] += 1;
                     }
                 } else {
-                    // Fallback to config-based patterns
                     for pattern_arc in &self.url_patterns {
                         if pattern_arc.is_match(field) {
                             url_scores[i] += 1;
@@ -232,7 +267,6 @@ fn normalize_text(text: &str) -> String {
         .to_string()
 }
 
-// Changed to accept UrlNormalizationConfig
 fn normalize_url(url_str: &str, url_config: &UrlNormalizationConfig) -> String {
     normalize_url_with_config(url_str, url_config)
 }
@@ -242,17 +276,10 @@ pub fn normalize_url_with_config(url_str: &str, config: &UrlNormalizationConfig)
         return String::new();
     }
 
-    // Clean up the input - handle various separators and whitespace
     let result = url_str.trim().to_string();
 
-    // Android URI special handling removed to process all protocols uniformly.
-    // The generic protocol stripping in normalize_url_fast and later in this function
-    // should cover this.
-
-    // Try to parse as URL first
-    let mut url_to_parse = result.clone(); // result is url_str.trim().to_string() - Cloned here
+    let mut url_to_parse = result.clone();
     let mut has_known_protocol = false;
-    // config.protocol_patterns is guaranteed by default/deserialization to contain at least one pattern
     for pattern in &config.protocol_patterns {
         if pattern.is_match(&url_to_parse) {
             has_known_protocol = true;
@@ -279,27 +306,17 @@ pub fn normalize_url_with_config(url_str: &str, config: &UrlNormalizationConfig)
                 path = regex_arc.replace_all(&path, "").to_string();
             }
             
-            // If path cleanup resulted in an empty string, or original path was just "/",
-            // we return only the host. Otherwise, combine host and path.
-            // This assumes path_cleanup_patterns are designed to produce either an empty path
-            // or a path that should be appended (potentially starting with /).
             return if path.is_empty() || path == "/" {
                 host
             } else {
-                // Ensure path doesn't lead to double slashes if it's not empty and host doesn't end with /
-                // and path starts with /. Most host strings won't end with /.
-                // A typical path from Url::path() starts with /.
                 format!("{}{}", host, path)
             };
         }
     }
     
-    // Fallback for URLs that can't be parsed correctly by Url::parse or if host_str was None
-    // The 'result' variable here refers to the original trimmed url_str.
     {
-        let mut fallback_result = result; // result is url_str.trim().to_string()
+        let mut fallback_result = result;
         
-        // Remove protocols using regex patterns
         for regex_arc in &config.protocol_patterns {
             let temp_result = regex_arc.replace_all(&fallback_result, "").to_string();
             if temp_result != fallback_result && !temp_result.is_empty() {
@@ -308,27 +325,22 @@ pub fn normalize_url_with_config(url_str: &str, config: &UrlNormalizationConfig)
             }
         }
 
-        // Normalize case if configured
         if config.normalize_case {
             fallback_result = fallback_result.to_lowercase();
         }
         
-        // Remove query parameters manually
         if config.remove_query_params {
             if let Some(pos) = fallback_result.find('?') {
                 fallback_result.truncate(pos);
             }
         }
         
-        // Remove fragments manually
         if config.remove_fragments {
             if let Some(pos) = fallback_result.find('#') {
                 fallback_result.truncate(pos);
             }
         }
         
-        // Apply subdomain patterns to the (potentially) host part
-        // This is imperfect as fallback_result might still contain a path
         let host_part_for_subdomain = if let Some(slash_pos) = fallback_result.find('/') {
             &fallback_result[..slash_pos]
         } else {
@@ -336,7 +348,6 @@ pub fn normalize_url_with_config(url_str: &str, config: &UrlNormalizationConfig)
         };
         let mut processed_host = apply_subdomain_patterns(host_part_for_subdomain, config);
 
-        // Re-attach path if it existed and wasn't part of subdomain processing
         if let Some(slash_pos) = fallback_result.find('/') {
             if host_part_for_subdomain.len() < fallback_result.len() {
                  processed_host.push_str(&fallback_result[slash_pos..]);
@@ -344,7 +355,6 @@ pub fn normalize_url_with_config(url_str: &str, config: &UrlNormalizationConfig)
         }
         fallback_result = processed_host;
         
-        // Apply path cleanup patterns to the entire result
         for regex_arc in &config.path_cleanup_patterns {
             fallback_result = regex_arc.replace_all(&fallback_result, "").to_string();
         }
@@ -356,7 +366,6 @@ pub fn normalize_url_with_config(url_str: &str, config: &UrlNormalizationConfig)
 fn apply_subdomain_patterns(host: &str, config: &UrlNormalizationConfig) -> String {
     let mut result = host.to_string();
     
-    // Only apply subdomain removal if the host has at least one dot
     if result.contains('.') {
         for regex_arc in &config.subdomain_removal_patterns {
             if let Some(captures) = regex_arc.captures(&result) {
@@ -405,12 +414,13 @@ impl DeduplicationMap {
         }
     }
 
-    pub fn into_records(self) -> Vec<Record> {
-        self.records.into_values().collect()
-    }
 
     pub fn len(&self) -> usize {
         self.records.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty()
     }
 }
 

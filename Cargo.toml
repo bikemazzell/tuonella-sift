@@ -33,21 +33,21 @@ crossbeam = "0.8"
 parking_lot = "0.12"
 
 # System utilities
-sysinfo = "0.30"
+sysinfo = "0.35.1"
 walkdir = "2.4"
-clap = { version = "4.4", features = ["derive"] }
+clap = { version = "4.5.39", features = ["derive"] }
 num_cpus = "1.16"
 glob = "0.3"
-rand = "0.8"
+rand = "0.9.1"
 
 # Logging and error handling
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1.0"
-thiserror = "1.0"
+thiserror = "2.0.12"
 
 # Optional CUDA support (feature-gated)
-cudarc = { version = "0.10", optional = true }
+cudarc = { version = "0.16.4", optional = true, features = ["driver"] }
 log = "0.4.27"
 
 [dev-dependencies]
@@ -55,7 +55,7 @@ tempfile = "3.10"
 
 [features]
 default = []
-cuda = ["cudarc"]
+cuda = ["cudarc", "cudarc/cuda-version-from-build-system"]
 
 [profile.release]
 lto = true

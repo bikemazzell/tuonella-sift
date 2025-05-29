@@ -157,7 +157,7 @@ mod tests {
         let dir_path = test_dir.path();
 
         File::create(dir_path.join("file1.csv")).unwrap();
-        File::create(dir_path.join("file2.txt")).unwrap(); // Should be ignored by extension
+        File::create(dir_path.join("file2.txt")).unwrap();
         File::create(dir_path.join("ignored_by_pattern.csv")).unwrap();
         File::create(dir_path.join("another.csv")).unwrap();
 
@@ -171,7 +171,6 @@ mod tests {
         assert!(files.iter().any(|p| p.file_name().unwrap_or_default() == "another.csv"));
         assert!(!files.iter().any(|p| p.file_name().unwrap_or_default() == "ignored_by_pattern.csv"));
 
-        // Cleanup
         std::fs::remove_file(ignore_file_path).unwrap();
     }
 

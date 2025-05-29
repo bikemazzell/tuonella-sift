@@ -53,7 +53,7 @@ pub struct ProcessingConfig {
 impl Default for ProcessingConfig {
     fn default() -> Self {
         Self {
-            max_threads: 0, // Auto-detected
+            max_threads: 0,
             enable_cuda: false,
             chunk_size_mb: 16,
             max_output_file_size_gb: 1.0,
@@ -184,7 +184,6 @@ pub struct UrlNormalizationConfig {
     pub protocol_patterns: Vec<Arc<Regex>>,
     pub subdomain_removal_patterns: Vec<Arc<Regex>>,
     pub path_cleanup_patterns: Vec<Arc<Regex>>,
-    // pub android_uri_cleanup: bool, // Removed
     pub remove_query_params: bool,
     pub remove_fragments: bool,
     pub normalize_case: bool,
@@ -195,7 +194,6 @@ pub struct UrlNormalizationConfigStrings {
     pub protocol_patterns: Vec<String>,
     pub subdomain_removal_patterns: Vec<String>,
     pub path_cleanup_patterns: Vec<String>,
-    // pub android_uri_cleanup: bool, // Removed
     pub remove_query_params: bool,
     pub remove_fragments: bool,
     pub normalize_case: bool,
@@ -213,7 +211,6 @@ impl From<UrlNormalizationConfigStrings> for UrlNormalizationConfig {
             path_cleanup_patterns: str_config.path_cleanup_patterns.into_iter()
                 .map(|s| Arc::new(Regex::new(&s).expect("Invalid path cleanup regex pattern")))
                 .collect(),
-            // android_uri_cleanup: str_config.android_uri_cleanup, // Removed
             remove_query_params: str_config.remove_query_params,
             remove_fragments: str_config.remove_fragments,
             normalize_case: str_config.normalize_case,
@@ -241,7 +238,6 @@ impl Default for UrlNormalizationConfig {
             path_cleanup_patterns: vec![
                 "/.*$".to_string(),
             ],
-            // android_uri_cleanup: true, // Removed
             remove_query_params: true,
             remove_fragments: true,
             normalize_case: true,
@@ -283,6 +279,17 @@ impl Config {
         config.validate()?;
         
         Ok(config)
+    }
+
+    pub async fn get_memory_info(&self) -> Result<(f64, f64, f64)> {
+        let mut system = System::new_all();
+        system.refresh_memory();
+        
+        let total_memory_gb = system.total_memory() as f64 / BYTES_PER_GB;
+        let available_memory_gb = system.available_memory() as f64 / BYTES_PER_GB;
+        let max_usable_gb = available_memory_gb * (self.memory.max_ram_usage_percent as f64 / 100.0);
+        
+        Ok((total_memory_gb, available_memory_gb, max_usable_gb))
     }
 
     async fn auto_configure_memory(&mut self) -> Result<()> {
