@@ -26,3 +26,57 @@ pub const DEFAULT_GPU_MEMORY_USAGE_PERCENT: f64 = 0.2;
 pub const DEFAULT_GPU_MEMORY_HEADROOM_PERCENT: f64 = 0.8;
 pub const DEFAULT_GPU_COMPUTE_CAPABILITY_FACTOR: f64 = 2.0;
 pub const DEFAULT_GPU_MIN_SEGMENT_SIZE_MB: usize = 1;
+
+// Test constants for CUDA processor tests
+#[cfg(test)]
+pub const TEST_TOTAL_MEMORY: usize = 8 * 1024 * 1024 * 1024; // 8GB
+#[cfg(test)]
+pub const TEST_FREE_MEMORY: usize = 8 * 1024 * 1024 * 1024; // 8GB (match total for tests)
+#[cfg(test)]
+pub const TEST_COMPUTE_CAPABILITY_MAJOR: i32 = 7;
+#[cfg(test)]
+pub const TEST_COMPUTE_CAPABILITY_MINOR: i32 = 5;
+#[cfg(test)]
+pub const TEST_MAX_THREADS_PER_BLOCK: i32 = 1024;
+#[cfg(test)]
+pub const TEST_MAX_SHARED_MEMORY_PER_BLOCK: i32 = 48 * 1024; // 48KB
+#[cfg(test)]
+pub const TEST_MEMORY_BUS_WIDTH: i32 = 256;
+#[cfg(test)]
+pub const TEST_L2_CACHE_SIZE: i32 = 4 * 1024 * 1024; // 4MB
+#[cfg(test)]
+pub const TEST_GPU_MEMORY_PERCENT: u8 = 80;
+#[cfg(test)]
+pub const TEST_BYTES_PER_RECORD: usize = 500;
+#[cfg(test)]
+pub const TEST_MIN_BATCH_SIZE: usize = 1000;
+#[cfg(test)]
+pub const TEST_MAX_BATCH_SIZE: usize = 10000;
+#[cfg(test)]
+pub const TEST_URL_BUFFER_SIZE: usize = 256;
+#[cfg(test)]
+pub const TEST_USERNAME_BUFFER_SIZE: usize = 64;
+#[cfg(test)]
+pub const TEST_THREADS_PER_BLOCK: usize = 256;
+#[cfg(test)]
+pub const TEST_BATCH_SIZE_SMALL: usize = 3;
+#[cfg(test)]
+pub const TEST_BATCH_SIZE_MEDIUM: usize = 5;
+#[cfg(test)]
+pub const TEST_BATCH_SIZE_LARGE: usize = 8;
+#[cfg(test)]
+pub const TEST_BATCH_SIZE_XLARGE: usize = 10;
+#[cfg(test)]
+pub const TEST_TOTAL_MEMORY_8GB: usize = 8 * 1024 * 1024 * 1024;
+#[cfg(test)]
+pub const TEST_TOTAL_MEMORY_SMALL: usize = 500 * 1024; // 500KB
+#[cfg(test)]
+pub const TEST_USABLE_MEMORY_8GB: usize = 6_528_350_289; // match calculation in test
+#[cfg(test)]
+pub const TEST_USABLE_MEMORY_SMALL: usize = 389_120; // 500KB * 0.8 * 0.95
+#[cfg(test)]
+pub const TEST_CALCULATED_BATCH_SIZE_8GB: usize = 13_056_700; // match calculation in test
+#[cfg(test)]
+pub const TEST_CALCULATED_BATCH_SIZE_SMALL: usize = 778; // 389,120 / 500
+#[cfg(test)]
+pub const TEST_OPTIMAL_BATCH_SIZE_SMALL: usize = 3;

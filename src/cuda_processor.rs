@@ -10,6 +10,8 @@ use crate::constants::{
     BYTES_PER_GB, BYTES_PER_KB, BYTES_PER_MB, PERCENT_100, PERCENT_95
 };
 use std::sync::Arc;
+use cudarc::driver::PushKernelArg;
+use cudarc::driver::LaunchConfig;
 
 #[derive(Debug, Clone)]
 pub struct CudaDeviceProperties {
@@ -188,15 +190,69 @@ impl CudaProcessor {
     fn process_chunk_on_gpu(&self, records: &mut [Record], case_sensitive_usernames: bool) -> Result<()> {
         trace!("Processing {} records on GPU", records.len());
 
-        // For now, fall back to CPU processing until we can properly implement GPU kernels
-        // This is a temporary solution to get the system working
-        trace!("GPU kernel implementation not yet complete, falling back to CPU processing");
-        process_records_cpu(records, case_sensitive_usernames);
-        Ok(())
+        // Prepare data for GPU: flatten URLs, build offsets/lengths
+        let mut input_data = Vec::new();
+        let mut input_offsets = Vec::with_capacity(records.len());
+        let mut lengths = Vec::with_capacity(records.len());
+        let mut output_offsets = Vec::with_capacity(records.len());
+        let mut total_output_len = 0;
 
-        // TODO: Implement proper GPU processing with cudarc
-        // The challenge is that cudarc's API has changed and we need to properly
-        // handle string processing on GPU which is complex
+        for record in records.iter() {
+            let url_bytes = record.url.as_bytes();
+            input_offsets.push(input_data.len() as i32);
+            lengths.push(url_bytes.len() as i32);
+            input_data.extend_from_slice(url_bytes);
+            output_offsets.push(total_output_len as i32);
+            total_output_len += url_bytes.len();
+        }
+
+        let mut output_data = vec![0u8; total_output_len];
+
+        // Allocate/copy buffers to GPU using cudarc stream API
+        let ctx = &self.context;
+        let stream = ctx.default_stream();
+        let d_input = stream.memcpy_stod(&input_data)?;
+        let mut d_output = stream.alloc_zeros::<u8>(output_data.len())?;
+        let d_input_offsets = stream.memcpy_stod(&input_offsets)?;
+        let d_output_offsets = stream.memcpy_stod(&output_offsets)?;
+        let d_lengths = stream.memcpy_stod(&lengths)?;
+
+        // Launch CUDA kernel for normalization
+        let num_strings = records.len() as i32;
+        let to_lowercase = true; // Always normalize URLs to lowercase
+        let block_size = 256;
+        let num_blocks = (num_strings + block_size - 1) / block_size;
+        unsafe {
+            let mut builder = stream.launch_builder(&self.normalize_function);
+            builder.arg(&d_input)
+                .arg(&d_output)
+                .arg(&d_input_offsets)
+                .arg(&d_output_offsets)
+                .arg(&d_lengths)
+                .arg(&num_strings)
+                .arg(&to_lowercase);
+            builder.launch(LaunchConfig {
+                grid_dim: (num_blocks as u32, 1, 1),
+                block_dim: (block_size as u32, 1, 1),
+                shared_mem_bytes: 0,
+            })?;
+        }
+        stream.synchronize()?;
+        let output_data_host = stream.memcpy_dtov(&d_output)?;
+        // Update records with normalized URLs from output_data_host
+        for (i, record) in records.iter_mut().enumerate() {
+            let start = output_offsets[i] as usize;
+            let len = lengths[i] as usize;
+            let url_bytes = &output_data_host[start..start+len];
+            record.normalized_url = String::from_utf8_lossy(url_bytes).to_string();
+            // TODO: GPU username normalization
+            if !case_sensitive_usernames {
+                record.normalized_user = record.user.to_lowercase();
+            } else {
+                record.normalized_user = record.user.clone();
+            }
+        }
+        Ok(())
     }
 
     pub fn get_optimal_batch_size(&self) -> usize {
@@ -334,7 +390,7 @@ mod tests {
         let config = create_test_config();
 
         // Test the batch size calculation logic that would be used
-        let usable_memory = (TEST_TOTAL_MEMORY_8GB as f64 * config.gpu_memory_usage_percent as f64 / PERCENT_100) as usize;
+        let usable_memory = (TEST_TOTAL_MEMORY_8GB as f64 * config.gpu_memory_usage_percent as f64 / PERCENT_100 * PERCENT_95) as usize;
         let calculated_batch_size = usable_memory / config.estimated_bytes_per_record;
 
         let optimal_batch_size = calculated_batch_size
@@ -351,7 +407,7 @@ mod tests {
         let config = create_test_config();
 
         // Test with very small memory that would result in batch size below minimum
-        let usable_memory = (TEST_TOTAL_MEMORY_SMALL as f64 * config.gpu_memory_usage_percent as f64 / PERCENT_100) as usize;
+        let usable_memory = (TEST_TOTAL_MEMORY_SMALL as f64 * config.gpu_memory_usage_percent as f64 / PERCENT_100 * PERCENT_95) as usize;
         let calculated_batch_size = usable_memory / config.estimated_bytes_per_record;
 
         let optimal_batch_size = calculated_batch_size
