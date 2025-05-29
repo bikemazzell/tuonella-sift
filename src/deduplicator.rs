@@ -362,7 +362,7 @@ impl Deduplicator {
 
         Ok(Self {
             config: config.clone(),
-            field_detector: FieldDetector::from_config(&config.field_detection),
+            field_detector: FieldDetector::new(),
             temp_dir,
             checkpoint_path,
             #[cfg(feature = "cuda")]
@@ -1008,7 +1008,7 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
     use std::io::Write;
-    use crate::config::{Config, FieldDetectionConfig, UrlNormalizationConfig, DeduplicationConfig, IoConfig, LoggingConfig, ProcessingConfig, CudaConfig, MemoryConfig, RecoveryConfig};
+    use crate::config::{Config, UrlNormalizationConfig, DeduplicationConfig, IoConfig, LoggingConfig, ProcessingConfig, CudaConfig, MemoryConfig, RecoveryConfig};
 
     // Helper function to create a dummy Deduplicator for testing
     async fn create_dummy_deduplicator() -> Deduplicator {
@@ -1021,7 +1021,6 @@ mod tests {
             recovery: RecoveryConfig::default(),
             cuda: CudaConfig::default(),
             url_normalization: UrlNormalizationConfig::default(),
-            field_detection: FieldDetectionConfig::default(),
         };
         Deduplicator::new(config).await.unwrap()
     }
@@ -1149,7 +1148,6 @@ mod tests {
             recovery: RecoveryConfig::default(),
             cuda: CudaConfig::default(),
             url_normalization: UrlNormalizationConfig::default(),
-            field_detection: FieldDetectionConfig::default(),
         };
 
         let _deduplicator = Deduplicator::new(config).await.unwrap();
@@ -1187,7 +1185,6 @@ mod tests {
             recovery: RecoveryConfig::default(),
             cuda: CudaConfig::default(),
             url_normalization: UrlNormalizationConfig::default(),
-            field_detection: FieldDetectionConfig::default(),
         };
 
         let deduplicator = Deduplicator::new(config).await.unwrap();
@@ -1220,7 +1217,6 @@ mod tests {
             recovery: RecoveryConfig::default(),
             cuda: CudaConfig::default(),
             url_normalization: UrlNormalizationConfig::default(),
-            field_detection: FieldDetectionConfig::default(),
         };
 
         let deduplicator = Deduplicator::new(config).await.unwrap();

@@ -12,18 +12,18 @@ pub static PATH_PATTERN: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"/.*$").unwrap()
 });
 
-
 pub static EMAIL_PATTERN: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$").unwrap()
 });
 
 
 pub static PASSWORD_PATTERN: Lazy<Regex> = Lazy::new(|| {
-
     Regex::new(r"^[a-zA-Z0-9!#$%^&*()_+=\-\[\]{};':,<>/?]{4,}$").unwrap()
 });
 
-
+pub static IP_ADDRESS_PATTERN: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}").unwrap()
+});
 
 
 pub fn normalize_url_fast(url: &str) -> String {
@@ -147,6 +147,20 @@ mod tests {
         assert!(!PASSWORD_PATTERN.is_match("abc")); // Too short
         assert!(!PASSWORD_PATTERN.is_match("")); // Empty
         assert!(!PASSWORD_PATTERN.is_match("pass word")); // Contains space
+    }
+
+    #[test]
+    fn test_ip_address_pattern() {
+        // IP_ADDRESS_PATTERN matches IPv4-like patterns (1-3 digits separated by dots)
+        assert!(IP_ADDRESS_PATTERN.is_match("192.168.1.1"));
+        assert!(IP_ADDRESS_PATTERN.is_match("10.0.0.1"));
+        assert!(IP_ADDRESS_PATTERN.is_match("127.0.0.1"));
+        assert!(IP_ADDRESS_PATTERN.is_match("255.255.255.255"));
+        assert!(IP_ADDRESS_PATTERN.is_match("192.168.1.1:8080")); // With port
+        assert!(IP_ADDRESS_PATTERN.is_match("999.999.999.999")); // Pattern allows this (not strict IP validation)
+        assert!(!IP_ADDRESS_PATTERN.is_match("example.com"));
+        assert!(!IP_ADDRESS_PATTERN.is_match("not-an-ip"));
+        assert!(!IP_ADDRESS_PATTERN.is_match("1234.1.1.1")); // More than 3 digits
     }
 
     #[test]

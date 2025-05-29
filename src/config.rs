@@ -4,9 +4,7 @@ use std::path::Path;
 use sysinfo::System;
 use tokio::fs;
 use tracing::{info, warn};
-use regex::Regex;
-use serde::de::Deserializer;
-use std::sync::Arc;
+
 use crate::constants::BYTES_PER_GB;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -19,10 +17,8 @@ pub struct Config {
     pub recovery: RecoveryConfig,
     #[serde(default)]
     pub cuda: CudaConfig,
-    #[serde(skip_serializing, default, deserialize_with = "deserialize_url_normalization_config_from_strings")]
-    pub url_normalization: UrlNormalizationConfig,
     #[serde(default)]
-    pub field_detection: FieldDetectionConfig,
+    pub url_normalization: UrlNormalizationConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -186,96 +182,26 @@ impl Default for CudaConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UrlNormalizationConfig {
-    pub protocol_patterns: Vec<Arc<Regex>>,
-    pub subdomain_removal_patterns: Vec<Arc<Regex>>,
-    pub path_cleanup_patterns: Vec<Arc<Regex>>,
     pub remove_query_params: bool,
     pub remove_fragments: bool,
     pub normalize_case: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct UrlNormalizationConfigStrings {
-    pub protocol_patterns: Vec<String>,
-    pub subdomain_removal_patterns: Vec<String>,
-    pub path_cleanup_patterns: Vec<String>,
-    pub remove_query_params: bool,
-    pub remove_fragments: bool,
-    pub normalize_case: bool,
-}
 
-impl From<UrlNormalizationConfigStrings> for UrlNormalizationConfig {
-    fn from(str_config: UrlNormalizationConfigStrings) -> Self {
-        Self {
-            protocol_patterns: str_config.protocol_patterns.into_iter()
-                .map(|s| Arc::new(Regex::new(&s).expect("Invalid protocol regex pattern")))
-                .collect(),
-            subdomain_removal_patterns: str_config.subdomain_removal_patterns.into_iter()
-                .map(|s| Arc::new(Regex::new(&s).expect("Invalid subdomain regex pattern")))
-                .collect(),
-            path_cleanup_patterns: str_config.path_cleanup_patterns.into_iter()
-                .map(|s| Arc::new(Regex::new(&s).expect("Invalid path cleanup regex pattern")))
-                .collect(),
-            remove_query_params: str_config.remove_query_params,
-            remove_fragments: str_config.remove_fragments,
-            normalize_case: str_config.normalize_case,
-        }
-    }
-}
-
-fn deserialize_url_normalization_config_from_strings<'de, D>(deserializer: D) -> Result<UrlNormalizationConfig, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let str_config = UrlNormalizationConfigStrings::deserialize(deserializer)?;
-    Ok(UrlNormalizationConfig::from(str_config))
-}
 
 impl Default for UrlNormalizationConfig {
     fn default() -> Self {
-        let defaults_str = UrlNormalizationConfigStrings {
-            protocol_patterns: vec![
-                r"^[a-zA-Z][a-zA-Z0-9+.-]*://".to_string(),
-            ],
-            subdomain_removal_patterns: vec![
-                r"^([a-zA-Z0-9-]+)\.([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})$".to_string(),
-            ],
-            path_cleanup_patterns: vec![
-                "/.*$".to_string(),
-            ],
+        Self {
             remove_query_params: true,
             remove_fragments: true,
             normalize_case: true,
-        };
-        UrlNormalizationConfig::from(defaults_str)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FieldDetectionConfig {
-    pub url_patterns: Vec<String>,
-    pub email_patterns: Vec<String>,
-    pub password_patterns: Vec<String>,
-}
-
-impl Default for FieldDetectionConfig {
-    fn default() -> Self {
-        Self {
-            url_patterns: vec![
-                "^[a-zA-Z][a-zA-Z0-9+.-]*://".to_string(),
-                "\\.[a-zA-Z]{2,}".to_string(),
-            ],
-            email_patterns: vec![
-                "@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$".to_string(),
-            ],
-            password_patterns: vec![
-                "^[a-zA-Z0-9!@#$%^&*()_+=\\-\\[\\]{};':,.<>/?]{4,}$".to_string(),
-            ],
         }
     }
 }
+
+
 
 impl Config {
     pub async fn load<P: AsRef<Path>>(path: P) -> Result<Self> {

@@ -1,12 +1,10 @@
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use unicode_normalization::UnicodeNormalization;
 use url::Url;
-use crate::config::{UrlNormalizationConfig, FieldDetectionConfig};
-use crate::patterns::{PROTOCOL_PATTERN, SUBDOMAIN_PATTERN, PATH_PATTERN, EMAIL_PATTERN, PASSWORD_PATTERN, normalize_url_fast};
-use std::sync::Arc;
+use crate::config::UrlNormalizationConfig;
+use crate::patterns::{PROTOCOL_PATTERN, SUBDOMAIN_PATTERN, PATH_PATTERN, EMAIL_PATTERN, PASSWORD_PATTERN, IP_ADDRESS_PATTERN, normalize_url_fast};
 use crate::constants::DEFAULT_MAX_URL_LENGTH_FOR_FAST_NORMALIZATION;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,7 +41,7 @@ impl Record {
 
         // Require at least username and password to be present
         // URL-only records are not valid and should be skipped
-        if user.is_empty() || password.is_empty() || 
+        if user.is_empty() || password.is_empty() ||
            user.chars().all(|c| c == ',' || c.is_whitespace()) ||
            password.chars().all(|c| c == ',' || c.is_whitespace()) {
             return None;
@@ -58,7 +56,7 @@ impl Record {
         } else {
             String::new()
         };
-        
+
         let normalized_user = if case_sensitive_usernames {
             user.clone()
         } else {
@@ -145,41 +143,11 @@ impl PartialEq for Record {
 impl Eq for Record {}
 
 #[derive(Clone)]
-pub struct FieldDetector {
-    url_patterns: Vec<Arc<Regex>>,
-    email_patterns: Vec<Arc<Regex>>,
-    password_patterns: Vec<Arc<Regex>>,
-    use_fast_patterns: bool,
-}
+pub struct FieldDetector;
 
 impl FieldDetector {
-    #[allow(dead_code)]
     pub fn new() -> Self {
-        Self::from_config(&FieldDetectionConfig::default())
-    }
-
-    pub fn from_config(config: &FieldDetectionConfig) -> Self {
-        let url_patterns = config.url_patterns
-            .iter()
-            .map(|pattern_str| Arc::new(Regex::new(pattern_str).expect("Invalid URL regex pattern in config")))
-            .collect();
-
-        let email_patterns = config.email_patterns
-            .iter()
-            .map(|pattern_str| Arc::new(Regex::new(pattern_str).expect("Invalid email regex pattern in config")))
-            .collect();
-
-        let password_patterns = config.password_patterns
-            .iter()
-            .map(|pattern_str| Arc::new(Regex::new(pattern_str).expect("Invalid password regex pattern in config")))
-            .collect();
-
-        Self {
-            url_patterns,
-            email_patterns,
-            password_patterns,
-            use_fast_patterns: true,
-        }
+        Self
     }
 
     pub fn detect_fields(&self, sample_records: &[Vec<String>]) -> (usize, usize, usize) {
@@ -203,39 +171,20 @@ impl FieldDetector {
                     continue;
                 }
 
-                if self.use_fast_patterns {
-                    if PROTOCOL_PATTERN.is_match(field) || SUBDOMAIN_PATTERN.is_match(field) || PATH_PATTERN.is_match(field) {
-                        url_scores[i] += 1;
-                    }
+                // Check URL patterns (protocol, subdomain, path, IP address)
+                if PROTOCOL_PATTERN.is_match(field) || SUBDOMAIN_PATTERN.is_match(field) ||
+                   PATH_PATTERN.is_match(field) || IP_ADDRESS_PATTERN.is_match(field) {
+                    url_scores[i] += 1;
+                }
 
-                    if EMAIL_PATTERN.is_match(field) {
-                        email_scores[i] += 1;
-                    }
+                // Check email pattern
+                if EMAIL_PATTERN.is_match(field) {
+                    email_scores[i] += 1;
+                }
 
-                    if PASSWORD_PATTERN.is_match(field) {
-                        password_scores[i] += 1;
-                    }
-                } else {
-                    for pattern_arc in &self.url_patterns {
-                        if pattern_arc.is_match(field) {
-                            url_scores[i] += 1;
-                            break;
-                        }
-                    }
-
-                    for pattern_arc in &self.email_patterns {
-                        if pattern_arc.is_match(field) {
-                            email_scores[i] += 1;
-                            break;
-                        }
-                    }
-
-                    for pattern_arc in &self.password_patterns {
-                        if pattern_arc.is_match(field) {
-                            password_scores[i] += 1;
-                            break;
-                        }
-                    }
+                // Check password pattern
+                if PASSWORD_PATTERN.is_match(field) {
+                    password_scores[i] += 1;
                 }
             }
         }
@@ -280,11 +229,8 @@ pub fn normalize_url_with_config(url_str: &str, config: &UrlNormalizationConfig)
 
     let mut url_to_parse = result.clone();
     let mut has_known_protocol = false;
-    for pattern in &config.protocol_patterns {
-        if pattern.is_match(&url_to_parse) {
-            has_known_protocol = true;
-            break;
-        }
+    if PROTOCOL_PATTERN.is_match(&url_to_parse) {
+        has_known_protocol = true;
     }
     if !has_known_protocol {
         url_to_parse = format!("http://{}", url_to_parse);
@@ -297,15 +243,14 @@ pub fn normalize_url_with_config(url_str: &str, config: &UrlNormalizationConfig)
             if config.normalize_case {
                 host = host.to_lowercase();
             }
-            
+
             host = apply_subdomain_patterns(&host, config);
 
             let mut path = parsed_url.path().to_string();
-            
-            for regex_arc in &config.path_cleanup_patterns {
-                path = regex_arc.replace_all(&path, "").to_string();
-            }
-            
+
+            // Use hardcoded path cleanup pattern
+            path = PATH_PATTERN.replace_all(&path, "").to_string();
+
             return if path.is_empty() || path == "/" {
                 host
             } else {
@@ -313,34 +258,32 @@ pub fn normalize_url_with_config(url_str: &str, config: &UrlNormalizationConfig)
             };
         }
     }
-    
+
     {
         let mut fallback_result = result;
-        
-        for regex_arc in &config.protocol_patterns {
-            let temp_result = regex_arc.replace_all(&fallback_result, "").to_string();
-            if temp_result != fallback_result && !temp_result.is_empty() {
-                fallback_result = temp_result;
-                break; 
-            }
+
+        // Use hardcoded protocol cleanup pattern
+        let temp_result = PROTOCOL_PATTERN.replace_all(&fallback_result, "").to_string();
+        if temp_result != fallback_result && !temp_result.is_empty() {
+            fallback_result = temp_result;
         }
 
         if config.normalize_case {
             fallback_result = fallback_result.to_lowercase();
         }
-        
+
         if config.remove_query_params {
             if let Some(pos) = fallback_result.find('?') {
                 fallback_result.truncate(pos);
             }
         }
-        
+
         if config.remove_fragments {
             if let Some(pos) = fallback_result.find('#') {
                 fallback_result.truncate(pos);
             }
         }
-        
+
         let host_part_for_subdomain = if let Some(slash_pos) = fallback_result.find('/') {
             &fallback_result[..slash_pos]
         } else {
@@ -354,25 +297,22 @@ pub fn normalize_url_with_config(url_str: &str, config: &UrlNormalizationConfig)
             }
         }
         fallback_result = processed_host;
-        
-        for regex_arc in &config.path_cleanup_patterns {
-            fallback_result = regex_arc.replace_all(&fallback_result, "").to_string();
-        }
-        
+
+        // Use hardcoded path cleanup pattern
+        fallback_result = PATH_PATTERN.replace_all(&fallback_result, "").to_string();
+
         fallback_result
     }
 }
 
-fn apply_subdomain_patterns(host: &str, config: &UrlNormalizationConfig) -> String {
+fn apply_subdomain_patterns(host: &str, _config: &UrlNormalizationConfig) -> String {
     let mut result = host.to_string();
-    
+
     if result.contains('.') {
-        for regex_arc in &config.subdomain_removal_patterns {
-            if let Some(captures) = regex_arc.captures(&result) {
-                if let Some(main_domain) = captures.get(2) {
-                    result = main_domain.as_str().to_string();
-                    break; 
-                }
+        // Use hardcoded subdomain removal pattern
+        if let Some(captures) = SUBDOMAIN_PATTERN.captures(&result) {
+            if let Some(main_domain) = captures.get(2) {
+                result = main_domain.as_str().to_string();
             }
         }
     }
@@ -399,7 +339,7 @@ impl DeduplicationMap {
 
     pub fn insert(&mut self, record: Record) -> bool {
         let key = record.dedup_key();
-        
+
         match self.records.get(&key) {
             Some(existing) => {
                 if record.is_more_complete_than(existing) {
@@ -439,21 +379,11 @@ mod tests {
 
     #[test]
     fn test_configurable_url_normalization() {
-        let config_strings = crate::config::UrlNormalizationConfigStrings {
-            protocol_patterns: vec![
-                "^[a-zA-Z][a-zA-Z0-9+.-]*://".to_string(),
-            ],
-            subdomain_removal_patterns: vec![
-                "^([a-zA-Z0-9-]+)\\.([a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})$".to_string(),
-            ],
-            path_cleanup_patterns: vec![
-                "/.*$".to_string(),
-            ],
+        let config = UrlNormalizationConfig {
             remove_query_params: true,
             remove_fragments: true,
             normalize_case: true,
         };
-        let config: UrlNormalizationConfig = config_strings.into();
 
         // Test basic URL normalization
         assert_eq!(
@@ -500,21 +430,11 @@ mod tests {
 
     #[test]
     fn test_real_world_url_normalization() {
-        let config_strings = crate::config::UrlNormalizationConfigStrings {
-            protocol_patterns: vec![
-                "^[a-zA-Z][a-zA-Z0-9+.-]*://".to_string(),
-            ],
-            subdomain_removal_patterns: vec![
-                "^([a-zA-Z0-9-]+)\\.([a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})$".to_string(),
-            ],
-            path_cleanup_patterns: vec![
-                "/.*$".to_string(),
-            ],
+        let config = UrlNormalizationConfig {
             remove_query_params: true,
             remove_fragments: true,
             normalize_case: true,
         };
-        let config: UrlNormalizationConfig = config_strings.into();
 
         // Test cases from real sample data
         let test_cases = vec![
@@ -539,7 +459,7 @@ mod tests {
             println!("Result:   {}", result);
             println!("Match:    {}", if result == expected { "✓" } else { "✗" });
             println!("---");
-            
+
             // Note: Some of these might not match exactly due to complex URL structures
             // but we can verify the basic functionality is working
         }
@@ -547,21 +467,11 @@ mod tests {
 
     #[test]
     fn test_regex_pattern_url_normalization() {
-        let config_strings = crate::config::UrlNormalizationConfigStrings {
-            protocol_patterns: vec![
-                "^[a-zA-Z][a-zA-Z0-9+.-]*://".to_string(),
-            ],
-            subdomain_removal_patterns: vec![
-                "^([a-zA-Z0-9-]+)\\.([a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})$".to_string(),
-            ],
-            path_cleanup_patterns: vec![
-                "/.*$".to_string(),
-            ],
+        let config = UrlNormalizationConfig {
             remove_query_params: true,
             remove_fragments: true,
             normalize_case: true,
         };
-        let config: UrlNormalizationConfig = config_strings.into();
 
         println!("\n=== Regex Pattern URL Normalization Tests ===");
 
@@ -612,7 +522,7 @@ mod tests {
             vec!["user@example.com".to_string(), "password123".to_string(), "https://example.com".to_string()],
             vec!["test@test.com".to_string(), "secret".to_string(), "google.com".to_string()],
         ];
-        
+
         let (email_idx, password_idx, url_idx) = detector.detect_fields(&samples);
         assert_eq!(email_idx, 0);  // First field contains emails
         assert_eq!(password_idx, 1); // Second field contains passwords
@@ -622,9 +532,9 @@ mod tests {
     #[test]
     fn test_real_world_data_normalization() {
         let config = UrlNormalizationConfig::default();
-        
+
         println!("\n=== Real-World Data Normalization Tests ===");
-        
+
         // Test cases from actual sample data
         let test_cases = vec![
             ("android://bwlVSGhydwa-iRUqn_d2cJG62B0CdxN5u9GAzIcL9NtTmO1oGBbxa0sofwESKF1br4I0Qyj4F4O3AF0_nmEQSg==@tw.com.pkcard/", "com.pkcard"),
@@ -638,7 +548,7 @@ mod tests {
             ("https://mrslot.casino-pp.net/", "casino-pp.net"),
             ("http://tplinkrepeater.net/", "tplinkrepeater.net"),
         ];
-        
+
         for (input, expected) in test_cases {
             let result = normalize_url_with_config(input, &config);
             println!("Input:    {}", input);
@@ -646,7 +556,7 @@ mod tests {
             println!("Result:   {}", result);
             println!("Match:    {}", if result == expected { "✓" } else { "✗" });
             println!("---");
-            
+
             // For now, we'll just print results to see what needs fixing
             // assert_eq!(result, expected, "Failed to normalize: {}", input);
         }
@@ -655,35 +565,35 @@ mod tests {
     #[test]
     fn test_record_creation_edge_cases() {
         let config = UrlNormalizationConfig::default();
-        
+
         // Test empty fields
         let empty_fields = vec!["".to_string(), "".to_string(), "".to_string()];
         let record = Record::new(
             empty_fields, 0, 1, 2, "test.csv".to_string(), 1, false, &config
         );
         assert!(record.is_none(), "Should reject records with empty user/password");
-        
+
         // Test whitespace-only fields
         let whitespace_fields = vec!["   ".to_string(), "\t\n".to_string(), "url.com".to_string()];
         let record = Record::new(
             whitespace_fields, 0, 1, 2, "test.csv".to_string(), 1, false, &config
         );
         assert!(record.is_none(), "Should reject records with whitespace-only user/password");
-        
+
         // Test insufficient fields
         let short_fields = vec!["user".to_string(), "pass".to_string()];
         let record = Record::new(
             short_fields, 0, 1, 2, "test.csv".to_string(), 1, false, &config
         );
         assert!(record.is_none(), "Should reject records with insufficient fields");
-        
+
         // Test valid record
         let valid_fields = vec!["user@example.com".to_string(), "password123".to_string(), "https://example.com".to_string()];
         let record = Record::new(
             valid_fields, 0, 1, 2, "test.csv".to_string(), 1, false, &config
         );
         assert!(record.is_some(), "Should accept valid records");
-        
+
         let record = record.unwrap();
         assert_eq!(record.user, "user@example.com");
         assert_eq!(record.password, "password123");
@@ -695,52 +605,52 @@ mod tests {
     fn test_deduplication_map() {
         let config = UrlNormalizationConfig::default();
         let mut dedup_map = DeduplicationMap::new();
-        
+
         // Create first record
         let record1 = Record::new(
             vec!["user@example.com".to_string(), "password123".to_string(), "https://example.com/login".to_string()],
             0, 1, 2, "test1.csv".to_string(), 1, false, &config
         ).unwrap();
-        
+
         // Create duplicate record (same normalized user+url)
         let record2 = Record::new(
             vec!["user@example.com".to_string(), "differentpass".to_string(), "https://example.com/login".to_string()],
             0, 1, 2, "test2.csv".to_string(), 1, false, &config
         ).unwrap();
-        
+
         // Create different record
         let record3 = Record::new(
             vec!["other@example.com".to_string(), "password123".to_string(), "https://example.com/login".to_string()],
             0, 1, 2, "test3.csv".to_string(), 1, false, &config
         ).unwrap();
-        
+
         // Insert records
         let is_duplicate1 = dedup_map.insert(record1);
         let is_duplicate2 = dedup_map.insert(record2);
         let is_duplicate3 = dedup_map.insert(record3);
-        
+
         assert!(!is_duplicate1, "First record should not be duplicate");
         assert!(is_duplicate2, "Second record should be duplicate");
         assert!(!is_duplicate3, "Third record should not be duplicate");
-        
+
         assert_eq!(dedup_map.len(), 2, "Should have 2 unique records");
     }
 
     #[test]
     fn test_field_detection_edge_cases() {
         let detector = FieldDetector::new();
-        
+
         // Test empty samples
         let empty_samples: Vec<Vec<String>> = vec![];
         let (email_idx, password_idx, url_idx) = detector.detect_fields(&empty_samples);
         assert_eq!((email_idx, password_idx, url_idx), (0, 1, 2), "Should return default indices for empty samples");
-        
+
         // Test samples with mixed field orders
         let mixed_samples = vec![
             vec!["https://example.com".to_string(), "user@example.com".to_string(), "password123".to_string()],
             vec!["https://test.com".to_string(), "test@test.com".to_string(), "secret".to_string()],
         ];
-        
+
         let (email_idx, password_idx, url_idx) = detector.detect_fields(&mixed_samples);
         assert_eq!(url_idx, 0, "Should detect URL in first field");
         assert_eq!(email_idx, 1, "Should detect email in second field");
@@ -750,21 +660,21 @@ mod tests {
     #[test]
     fn test_phone_number_and_special_usernames() {
         let config = UrlNormalizationConfig::default();
-        
+
         // Test phone number as username
         let phone_record = Record::new(
             vec!["+1234567890".to_string(), "password123".to_string(), "https://example.com".to_string()],
             0, 1, 2, "test.csv".to_string(), 1, false, &config
         );
         assert!(phone_record.is_some(), "Should accept phone numbers as usernames");
-        
+
         // Test numeric username
         let numeric_record = Record::new(
             vec!["123456789".to_string(), "password123".to_string(), "https://example.com".to_string()],
             0, 1, 2, "test.csv".to_string(), 1, false, &config
         );
         assert!(numeric_record.is_some(), "Should accept numeric usernames");
-        
+
         // Test special characters in username
         let special_record = Record::new(
             vec!["user-name_123".to_string(), "password123".to_string(), "https://example.com".to_string()],

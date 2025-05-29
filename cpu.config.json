@@ -52,31 +52,8 @@
     }
   },
   "url_normalization": {
-    "protocol_patterns": [
-      "^[a-zA-Z][a-zA-Z0-9+.-]*://"
-    ],
-    "subdomain_removal_patterns": [
-      "^([a-zA-Z0-9-]+)\\.([a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})$"
-    ],
-    "path_cleanup_patterns": [
-      "/.*$"
-    ],
-    "android_uri_cleanup": true,
     "remove_query_params": true,
     "remove_fragments": true,
     "normalize_case": true
-  },
-  "field_detection": {
-    "url_patterns": [
-      "^[a-zA-Z][a-zA-Z0-9+.-]*://",
-      "\\.[a-zA-Z]{2,}",
-      "^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}"
-    ],
-    "email_patterns": [
-      "@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"
-    ],
-    "password_patterns": [
-      "^[a-zA-Z0-9!@#$%^&*()_+=\\-\\[\\]{};':,.<>/?]{4,}$"
-    ]
   }
 }
