@@ -103,3 +103,6 @@ $RECYCLE.BIN/
 # Profiling
 flamegraph.svg
 perf.data* 
+
+# Binaries
+tuonella-sift

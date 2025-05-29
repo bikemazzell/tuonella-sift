@@ -55,7 +55,7 @@ The CUDA processor automatically manages GPU memory:
 
 ### Enabling CUDA
 
-Use the `cuda_optimized` profile in your configuration:
+Use the dedicated CUDA configuration file:
 
 ```json
 {
@@ -157,7 +157,7 @@ For optimal CUDA performance:
 - Verify installation: `nvcc --version`
 
 **"Out of GPU memory"**
-- Use `cuda_optimized` profile with appropriate batch sizes
+- Use `cuda.config.json` with appropriate batch sizes
 - Close other GPU-using applications
 - Monitor GPU memory: `nvidia-smi`
 
@@ -186,13 +186,13 @@ cargo test --release --features cuda test_combined_gpu_normalization -- --nocapt
 
 ```bash
 # Run with CUDA acceleration
-RUST_LOG=debug ./target/release/tuonella-sift -i test_data -o test_output --profile cuda_optimized --verbose
+RUST_LOG=debug ./tuonella-sift -i test_data -o test_output -c cuda.config.json --verbose
 ```
 
 ## Best Practices
 
 1. **Batch Size Optimization**: Use 1000+ records per batch for optimal GPU utilization
-2. **Profile Selection**: Use `cuda_optimized` profile for maximum performance
+2. **Configuration Selection**: Use `cuda.config.json` for maximum performance
 3. **Memory Monitoring**: Monitor GPU memory usage with `nvidia-smi`
 4. **Storage Optimization**: Use fast storage (NVMe SSD) for temp directory
 5. **Thermal Management**: Ensure adequate GPU cooling for sustained performance
@@ -208,4 +208,4 @@ The CUDA implementation is seamlessly integrated with the core deduplication sys
 - **Error Handling**: Consistent error handling and logging with the rest of the system
 - **Configuration**: Managed through the same JSON configuration system with profiles
 
-This ensures that CUDA acceleration enhances performance without compromising the reliability and maintainability of the core system. 
+This ensures that CUDA acceleration enhances performance without compromising the reliability and maintainability of the core system.

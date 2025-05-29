@@ -48,6 +48,12 @@ pub struct ProcessingConfig {
     pub enable_cuda: bool,
     pub chunk_size_mb: usize,
     pub max_output_file_size_gb: f64,
+    #[serde(default = "default_record_chunk_size")]
+    pub record_chunk_size: usize,
+}
+
+fn default_record_chunk_size() -> usize {
+    5000
 }
 
 impl Default for ProcessingConfig {
@@ -57,6 +63,7 @@ impl Default for ProcessingConfig {
             enable_cuda: false,
             chunk_size_mb: 16,
             max_output_file_size_gb: 1.0,
+            record_chunk_size: default_record_chunk_size(),
         }
     }
 }
@@ -274,21 +281,21 @@ impl Config {
     pub async fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = fs::read_to_string(path).await?;
         let mut config: Config = serde_json::from_str(&content)?;
-        
+
         config.auto_configure_memory().await?;
         config.validate()?;
-        
+
         Ok(config)
     }
 
     pub async fn get_memory_info(&self) -> Result<(f64, f64, f64)> {
         let mut system = System::new_all();
         system.refresh_memory();
-        
+
         let total_memory_gb = system.total_memory() as f64 / BYTES_PER_GB;
         let available_memory_gb = system.available_memory() as f64 / BYTES_PER_GB;
         let max_usable_gb = available_memory_gb * (self.memory.max_ram_usage_percent as f64 / 100.0);
-        
+
         Ok((total_memory_gb, available_memory_gb, max_usable_gb))
     }
 
@@ -299,17 +306,17 @@ impl Config {
 
         let mut system = System::new_all();
         system.refresh_memory();
-        
+
         let total_memory_gb = system.total_memory() as f64 / BYTES_PER_GB;
         let available_memory_gb = system.available_memory() as f64 / BYTES_PER_GB;
-        
-        info!("Detected system memory: {:.2} GB total, {:.2} GB available", 
+
+        info!("Detected system memory: {:.2} GB total, {:.2} GB available",
               total_memory_gb, available_memory_gb);
 
         let max_usable_gb = available_memory_gb * (self.memory.max_ram_usage_percent as f64 / 100.0);
-        
+
         if self.memory.batch_size_gb > max_usable_gb {
-            warn!("Configured batch size ({:.2} GB) exceeds available memory, adjusting to {:.2} GB", 
+            warn!("Configured batch size ({:.2} GB) exceeds available memory, adjusting to {:.2} GB",
                   self.memory.batch_size_gb, max_usable_gb * 0.8);
             self.memory.batch_size_gb = max_usable_gb * 0.8;
         }
@@ -331,12 +338,12 @@ impl Config {
             anyhow::bail!("batch_size_gb must be at least 0.1 GB");
         }
 
-        if !matches!(self.deduplication.completeness_strategy.as_str(), 
+        if !matches!(self.deduplication.completeness_strategy.as_str(),
                     "character_count" | "field_count") {
             anyhow::bail!("completeness_strategy must be 'character_count' or 'field_count'");
         }
 
-        if self.deduplication.field_detection_sample_percent <= 0.0 || 
+        if self.deduplication.field_detection_sample_percent <= 0.0 ||
            self.deduplication.field_detection_sample_percent > 100.0 {
             anyhow::bail!("field_detection_sample_percent must be between 0.1 and 100.0");
         }
@@ -378,10 +385,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_config_loading_with_cuda() {
-        // Test that the unified config.json loads correctly
-        let config_result = Config::load("config.json").await;
-        assert!(config_result.is_ok(), "Should be able to load config.json");
-        
+        // Test that the CUDA config loads correctly
+        let config_result = Config::load("cuda.config.json").await;
+        assert!(config_result.is_ok(), "Should be able to load cuda.config.json");
+
         if let Ok(config) = config_result {
             // Verify CUDA settings are loaded
             assert_eq!(config.cuda.gpu_memory_usage_percent, 80);
@@ -391,13 +398,13 @@ mod tests {
             assert_eq!(config.cuda.max_url_buffer_size, 256);
             assert_eq!(config.cuda.max_username_buffer_size, 64);
             assert_eq!(config.cuda.threads_per_block, 256);
-            
-            println!("✓ Unified config.json loaded successfully");
-            println!("✓ CUDA settings: {}% GPU memory, {} bytes/record", 
-                     config.cuda.gpu_memory_usage_percent, 
+
+            println!("✓ CUDA config loaded successfully");
+            println!("✓ CUDA settings: {}% GPU memory, {} bytes/record",
+                     config.cuda.gpu_memory_usage_percent,
                      config.cuda.estimated_bytes_per_record);
-            println!("✓ Batch size range: {} - {}", 
-                     config.cuda.min_batch_size, 
+            println!("✓ Batch size range: {} - {}",
+                     config.cuda.min_batch_size,
                      config.cuda.max_batch_size);
         }
     }
@@ -443,11 +450,11 @@ mod tests {
                 "checkpoint_interval_records": 100000
             }
         }"#;
-        
+
         let config_result: Result<Config> = serde_json::from_str(minimal_config)
             .map_err(|e| anyhow::anyhow!("Failed to parse config: {}", e));
         assert!(config_result.is_ok(), "Should be able to load config without CUDA section");
-        
+
         if let Ok(config) = config_result {
             // Verify CUDA settings use defaults when not specified
             assert_eq!(config.cuda.gpu_memory_usage_percent, 80); // Default value
@@ -457,14 +464,14 @@ mod tests {
             assert_eq!(config.cuda.max_url_buffer_size, 256); // Default value
             assert_eq!(config.cuda.max_username_buffer_size, 64); // Default value
             assert_eq!(config.cuda.threads_per_block, 256); // Default value
-            
+
             // Verify other settings are loaded correctly
             assert_eq!(config.processing.enable_cuda, false);
             assert_eq!(config.logging.verbosity, "normal");
-            
+
             println!("✓ Config without CUDA section loaded successfully");
-            println!("✓ CUDA defaults applied: {}% GPU memory, {} bytes/record", 
-                     config.cuda.gpu_memory_usage_percent, 
+            println!("✓ CUDA defaults applied: {}% GPU memory, {} bytes/record",
+                     config.cuda.gpu_memory_usage_percent,
                      config.cuda.estimated_bytes_per_record);
             println!("✓ CUDA disabled: {}", !config.processing.enable_cuda);
         }

@@ -21,14 +21,7 @@ use crate::constants::{
     DEFAULT_SAMPLE_SIZE,
     DEFAULT_CPU_SEGMENT_MIN_MB,
 };
-#[cfg(feature = "cuda")]
-use crate::constants::{
-    DEFAULT_GPU_BUS_WIDTH_NORMALIZATION,
-    DEFAULT_GPU_L2_CACHE_NORMALIZATION_MB,
-    DEFAULT_GPU_SEGMENT_BASE_SIZE_MB,
-    DEFAULT_GPU_MEMORY_USAGE_PERCENT,
-    DEFAULT_GPU_COMPUTE_CAPABILITY_FACTOR,
-};
+
 use crate::utils::{estimate_remaining_time, format_duration, format_bytes, discover_csv_files};
 #[cfg(feature = "cuda")]
 use crate::cuda_processor::CudaProcessor;
@@ -76,17 +69,19 @@ impl SwappableDeduplicationMap {
         if let Some(proc) = &cuda_processor {
             if let Ok(props) = proc.get_properties() {
                 // Adapted logic from former GpuCapabilities::optimal_segment_size
-                let memory_factor = props.memory_bus_width as f64 / DEFAULT_GPU_BUS_WIDTH_NORMALIZATION;
-                let cache_factor = (props.l2_cache_size as f64 / (DEFAULT_GPU_L2_CACHE_NORMALIZATION_MB * 1024.0 * 1024.0)).min(1.0);
-                let base_size_bytes = (DEFAULT_GPU_SEGMENT_BASE_SIZE_MB * 1024 * 1024) as f64;
+                let memory_factor = props.memory_bus_width as f64 / 256.0; // DEFAULT_GPU_BUS_WIDTH_NORMALIZATION
+                let cache_factor = (props.l2_cache_size as f64 / (2.0 * 1024.0 * 1024.0)).min(1.0); // DEFAULT_GPU_L2_CACHE_NORMALIZATION_MB
+                let base_size_bytes = (128 * 1024 * 1024) as f64; // DEFAULT_GPU_SEGMENT_BASE_SIZE_MB
                 let adjusted_size_bytes = base_size_bytes * memory_factor * cache_factor;
 
-                let max_size_bytes = (props.free_memory as f64 * DEFAULT_GPU_MEMORY_USAGE_PERCENT) as usize; // Removed 1024*1024 as free_memory is already in bytes.
+                let max_size_bytes = (props.free_memory as f64 * 0.2) as usize; // DEFAULT_GPU_MEMORY_USAGE_PERCENT
                 segment_size_mb = ((adjusted_size_bytes.round() as usize).min(max_size_bytes) / (1024 * 1024)).max(1);
             }
         }
 
-        let max_memory_entries = (max_memory_mb * 1024 * 1024) / DEFAULT_RECORD_ESTIMATED_BYTES;
+        // Use 3x the estimated bytes per record to account for overhead and variations
+        let conservative_bytes_per_record = DEFAULT_RECORD_ESTIMATED_BYTES * 3;
+        let max_memory_entries = (max_memory_mb * 1024 * 1024) / conservative_bytes_per_record;
 
         Ok(Self {
             in_memory_map: DeduplicationMap::new(),
@@ -188,19 +183,19 @@ impl SwappableDeduplicationMap {
         let mut parallel_segments = 1;
 
         if let Ok(props) = cuda_proc.get_properties() {
-            let memory_factor = props.memory_bus_width as f64 / DEFAULT_GPU_BUS_WIDTH_NORMALIZATION;
-            let cache_factor = (props.l2_cache_size as f64 / (DEFAULT_GPU_L2_CACHE_NORMALIZATION_MB * 1024.0 * 1024.0)).min(1.0);
-            let base_size_bytes = (DEFAULT_GPU_SEGMENT_BASE_SIZE_MB * 1024 * 1024) as f64;
+            let memory_factor = props.memory_bus_width as f64 / 256.0; // DEFAULT_GPU_BUS_WIDTH_NORMALIZATION
+            let cache_factor = (props.l2_cache_size as f64 / (2.0 * 1024.0 * 1024.0)).min(1.0); // DEFAULT_GPU_L2_CACHE_NORMALIZATION_MB
+            let base_size_bytes = (128 * 1024 * 1024) as f64; // DEFAULT_GPU_SEGMENT_BASE_SIZE_MB
             let adjusted_size_bytes = base_size_bytes * memory_factor * cache_factor;
             let current_free_memory_bytes = props.free_memory;
-            let max_size_bytes = (current_free_memory_bytes as f64 * DEFAULT_GPU_MEMORY_USAGE_PERCENT) as usize;
+            let max_size_bytes = (current_free_memory_bytes as f64 * 0.2) as usize; // DEFAULT_GPU_MEMORY_USAGE_PERCENT
             let optimal_segment_size_bytes = (adjusted_size_bytes.round() as usize).min(max_size_bytes).max(1024 * 1024);
 
             if optimal_segment_size_bytes > 0 {
                 let memory_headroom_bytes = (current_free_memory_bytes as f64 * 0.8) as usize;
                 let max_segments_by_mem = memory_headroom_bytes / optimal_segment_size_bytes;
 
-                let capability_factor = (props.compute_capability_major as f64 * DEFAULT_GPU_COMPUTE_CAPABILITY_FACTOR) as usize;
+                let capability_factor = (props.compute_capability_major as f64 * 2.0) as usize; // DEFAULT_GPU_COMPUTE_CAPABILITY_FACTOR
                 parallel_segments = max_segments_by_mem.min(capability_factor).max(1);
             }
         }
@@ -327,13 +322,6 @@ impl SwappableDeduplicationMap {
         }
         writer.flush()?;
         Ok(stats)
-    }
-
-    fn cleanup(&self) -> Result<()> {
-        if self.swap_dir.exists() {
-            fs::remove_dir_all(&self.swap_dir)?;
-        }
-        Ok(())
     }
 }
 
@@ -599,7 +587,9 @@ impl Deduplicator {
             }
         };
 
-        // Process files
+        // Process files with chunked loading to prevent memory overflow
+        let chunk_size = self.config.processing.record_chunk_size;
+
         for file_path in batch_files {
             let file = File::open(&file_path)?;
             let reader = BufReader::new(file);
@@ -612,6 +602,8 @@ impl Deduplicator {
             let (user_idx, password_idx, url_idx) = self.field_detector.detect_fields(&sample_records);
 
             let mut line_number = 0;
+            let mut record_chunk = Vec::with_capacity(chunk_size);
+
             for result in csv_reader.records() {
                 line_number += 1;
                 match result {
@@ -627,11 +619,7 @@ impl Deduplicator {
                             self.config.deduplication.case_sensitive_usernames,
                             &self.config.url_normalization,
                         ) {
-                            if swappable_map.insert(processed_record)? {
-                                stats.duplicates_removed += 1;
-                            } else {
-                                stats.unique_records += 1;
-                            }
+                            record_chunk.push(processed_record);
                             stats.total_records += 1;
                         } else {
                             stats.invalid_records += 1;
@@ -642,7 +630,20 @@ impl Deduplicator {
                         stats.error_records += 1;
                     }
                 }
+
+                // Process chunk when it's full
+                if record_chunk.len() >= chunk_size {
+                    self.process_record_chunk(&mut record_chunk, &mut swappable_map, &mut stats)?;
+                    record_chunk.clear();
+                }
             }
+
+            // Process remaining records in the chunk
+            if !record_chunk.is_empty() {
+                self.process_record_chunk(&mut record_chunk, &mut swappable_map, &mut stats)?;
+                record_chunk.clear();
+            }
+
             progress_counter.fetch_add(1, Ordering::Relaxed);
         }
 
@@ -650,8 +651,6 @@ impl Deduplicator {
         let batch_output_path = self.temp_dir.join(format!("batch_{}.csv", batch_idx));
         let _batch_output_stats = swappable_map.merge_and_write_output(&batch_output_path).await?;
 
-        // Don't overwrite the processing stats - they already contain the correct duplicate counts
-        // The merge_and_write_output method just writes the deduplicated records to disk
 
         stats.processing_time_seconds = start_time.elapsed().as_secs_f64();
         stats.files_processed = progress_counter.load(Ordering::Relaxed);
@@ -659,48 +658,28 @@ impl Deduplicator {
         Ok(stats)
     }
 
-    #[cfg(feature = "cuda")]
-    fn process_record_batch(
+    fn process_record_chunk(
         &self,
         records: &mut Vec<Record>,
         map: &mut SwappableDeduplicationMap,
         stats: &mut ProcessingStats,
     ) -> Result<()> {
-        if let Some(cuda_proc) = &self.cuda_processor {
-            // Process batch with CUDA
-            cuda_proc.process_batch(records, self.config.deduplication.case_sensitive_usernames)?;
-
-            // Insert processed records
-            for record in records.drain(..) {
-                if map.insert(record)? {
-                    stats.unique_records += 1;
-                } else {
-                    stats.duplicates_removed += 1;
-                }
-                stats.total_records += 1;
-            }
-        } else {
-            // CPU fallback
-            for record in records.drain(..) {
-                if map.insert(record)? {
-                    stats.unique_records += 1;
-                } else {
-                    stats.duplicates_removed += 1;
-                }
-                stats.total_records += 1;
+        #[cfg(feature = "cuda")]
+        {
+            if let Some(cuda_proc) = &self.cuda_processor {
+                // Process batch with CUDA
+                cuda_proc.process_batch(records, self.config.deduplication.case_sensitive_usernames)?;
             }
         }
-        Ok(())
-    }
 
-    #[cfg(not(feature = "cuda"))]
-    fn process_record_batch(
-        &self,
-        _records: &mut Vec<Record>,
-        _map: &mut SwappableDeduplicationMap,
-        _stats: &mut ProcessingStats,
-    ) -> Result<()> {
-        // ... existing CPU implementation ...
+        // Insert processed records into the deduplication map
+        for record in records.drain(..) {
+            if map.insert(record)? {
+                stats.duplicates_removed += 1;
+            } else {
+                stats.unique_records += 1;
+            }
+        }
         Ok(())
     }
 

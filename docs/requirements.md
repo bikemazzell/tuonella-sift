@@ -76,7 +76,7 @@
 ```rust
 // Examples of optimized normalization:
 "https://www.facebook.com/user123/" → "facebook.com/user123"
-"http://m.facebook.com/user123" → "facebook.com/user123"  
+"http://m.facebook.com/user123" → "facebook.com/user123"
 "facebook.com/user123?ref=123" → "facebook.com/user123"
 ```
 - **Hardcoded Patterns**: Pre-compiled regex patterns for maximum performance
@@ -95,7 +95,7 @@
 - **JSON Configuration**: All settings externalized and configurable with profiles
 - **Validation**: Input validation with sensible defaults
 - **Memory Optimization**: Dynamic adjustment based on available resources
-- **Profile Support**: Multiple configuration profiles (production, testing, cuda_optimized)
+- **Configuration Files**: Separate optimized configurations for CPU and CUDA processing
 
 #### 5. Performance Optimization Infrastructure
 
@@ -132,63 +132,48 @@
 
 ### Configuration Options
 
+**cpu.config.json** (Conservative configuration):
 ```json
 {
-  "profiles": {
-    "production": {
-      "memory": {
-        "max_ram_usage_percent": 50,
-        "batch_size_gb": 8,
-        "auto_detect_memory": true
-      },
-      "processing": {
-        "max_threads": 0,
-        "enable_cuda": true,
-        "max_output_file_size_gb": 32
-      },
-      "deduplication": {
-        "case_sensitive_usernames": false,
-        "normalize_urls": true,
-        "strip_url_params": true,
-        "strip_url_prefixes": true,
-        "completeness_strategy": "character_count",
-        "field_detection_sample_percent": 5.0,
-        "min_sample_size": 50,
-        "max_sample_size": 1000
-      },
-      "logging": {
-        "verbosity": "normal",
-        "progress_interval_seconds": 30
-      }
-    },
-    "testing": {
-      "memory": {
-        "max_ram_usage_percent": 30,
-        "batch_size_gb": 2
-      },
-      "deduplication": {
-        "field_detection_sample_percent": 10.0,
-        "min_sample_size": 20,
-        "max_sample_size": 100
-      },
-      "logging": {
-        "verbosity": "verbose",
-        "progress_interval_seconds": 10
-      }
-    },
-    "cuda_optimized": {
-      "processing": {
-        "enable_cuda": true,
-        "max_threads": 8
-      },
-      "memory": {
-        "batch_size_gb": 16
-      },
-      "logging": {
-        "verbosity": "normal",
-        "progress_interval_seconds": 60
-      }
-    }
+  "memory": {
+    "max_ram_usage_percent": 30,
+    "batch_size_gb": 1,
+    "auto_detect_memory": true
+  },
+  "processing": {
+    "max_threads": 0,
+    "enable_cuda": false,
+    "chunk_size_mb": 32,
+    "max_output_file_size_gb": 16,
+    "record_chunk_size": 2000
+  },
+  "logging": {
+    "verbosity": "normal",
+    "progress_interval_seconds": 30,
+    "log_file": "tuonella-sift.log"
+  }
+}
+```
+
+**cuda.config.json** (High-performance configuration):
+```json
+{
+  "memory": {
+    "max_ram_usage_percent": 70,
+    "batch_size_gb": 32,
+    "auto_detect_memory": true
+  },
+  "processing": {
+    "max_threads": 0,
+    "enable_cuda": true,
+    "chunk_size_mb": 256,
+    "max_output_file_size_gb": 128,
+    "record_chunk_size": 20000
+  },
+  "logging": {
+    "verbosity": "verbose",
+    "progress_interval_seconds": 20,
+    "log_file": "tuonella-sift-cuda.log"
   }
 }
 ```
@@ -224,11 +209,11 @@
 # Basic usage with optimized defaults
 ./tuonella-sift -i /path/to/csv/files -o /path/to/output
 
-# Use production profile
-./tuonella-sift -i input_dir -o output_dir -c config.json --profile production
+# Use CPU configuration (conservative)
+./tuonella-sift -i input_dir -o output_dir -c cpu.config.json
 
-# Use CUDA-optimized profile
-./tuonella-sift -i input_dir -o output_dir -c config.json --profile cuda_optimized
+# Use CUDA configuration for maximum performance
+./tuonella-sift -i input_dir -o output_dir -c cuda.config.json
 
 # Verbose output with progress
 ./tuonella-sift -i input_dir -o output_dir --verbose
@@ -307,10 +292,7 @@ This ensures accurate field detection even for large files that may have been cr
 
 The modular architecture supports future enhancements:
 - **CUDA Acceleration**: GPU processing for massive datasets (already implemented)
-- **Distributed Processing**: Multi-machine coordination (if needed)
 - **Advanced Fuzzy Matching**: Levenshtein distance for usernames
 - **Custom Field Detection**: User-defined column mapping
 - **Output Formats**: Support for other formats beyond CSV
 - **Real-time Processing**: Streaming data processing capabilities
-
-This solution provides a production-ready, high-performance tool optimized for the specific requirements of large-scale CSV deduplication while maintaining flexibility for future needs and providing a solid foundation for performance optimization and maintenance.

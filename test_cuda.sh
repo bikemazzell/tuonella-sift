@@ -41,17 +41,17 @@ echo "- test_data/sample2.csv (4 records)"
 # Build with CUDA support
 echo ""
 echo "Building with CUDA support..."
-if cargo build --release --features cuda; then
+if make cuda; then
     echo "✓ Build successful"
 else
     echo "✗ Build failed"
     exit 1
 fi
 
-# Test CUDA processing
+# Test CUDA processing using the dedicated CUDA config
 echo ""
 echo "Testing CUDA processing..."
-if ./target/release/tuonella-sift -i test_data -o output_cuda -c config_cuda.json -v; then
+if ./tuonella-sift -i test_data -o output_cuda -c cuda.config.json -v; then
     echo "✓ CUDA processing completed successfully"
 else
     echo "✗ CUDA processing failed"
@@ -64,7 +64,7 @@ echo "Checking output..."
 if [ -d "output_cuda" ] && [ "$(ls -A output_cuda)" ]; then
     echo "✓ Output files generated:"
     ls -la output_cuda/
-    
+
     echo ""
     echo "Sample output content:"
     head -5 output_cuda/*.csv
@@ -76,16 +76,13 @@ fi
 # Compare with CPU-only processing
 echo ""
 echo "Comparing with CPU-only processing..."
-cp config_cuda.json config_cpu.json
-sed -i 's/"enable_cuda": true/"enable_cuda": false/' config_cpu.json
-
-if ./target/release/tuonella-sift -i test_data -o output_cpu -c config_cpu.json; then
+if ./tuonella-sift -i test_data -o output_cpu -c cpu.config.json; then
     echo "✓ CPU processing completed"
-    
+
     # Compare record counts
     cuda_count=$(wc -l output_cuda/*.csv | tail -1 | awk '{print $1}')
     cpu_count=$(wc -l output_cpu/*.csv | tail -1 | awk '{print $1}')
-    
+
     if [ "$cuda_count" -eq "$cpu_count" ]; then
         echo "✓ CUDA and CPU processing produced same number of records: $cuda_count"
     else
@@ -98,8 +95,8 @@ fi
 # Cleanup
 echo ""
 echo "Cleaning up..."
-rm -rf test_data output_cuda output_cpu temp config_cpu.json
+rm -rf test_data output_cuda output_cpu temp
 echo "✓ Cleanup completed"
 
 echo ""
-echo "CUDA test completed successfully! 🎉" 
+echo "CUDA test completed successfully! 🎉"

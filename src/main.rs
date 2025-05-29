@@ -26,7 +26,7 @@ struct Args {
     #[arg(short, long, help = "Output directory for deduplicated files")]
     output: Option<PathBuf>,
 
-    #[arg(short, long, default_value = "config.json", help = "Configuration file path")]
+    #[arg(short, long, default_value = "cpu.config.json", help = "Configuration file path")]
     config: PathBuf,
 
     #[arg(short, long, help = "Verbose output")]
@@ -117,7 +117,7 @@ mod tests {
 
         assert_eq!(args.input, PathBuf::from("/input/path"));
         assert_eq!(args.output, Some(PathBuf::from("/output/path")));
-        assert_eq!(args.config, PathBuf::from("config.json")); // default
+        assert_eq!(args.config, PathBuf::from("cpu.config.json")); // default
         assert!(!args.verbose);
         assert!(!args.resume);
     }
@@ -199,7 +199,7 @@ mod tests {
         let verbose_args = Args {
             input: PathBuf::from("/input"),
             output: None,
-            config: PathBuf::from("config.json"),
+            config: PathBuf::from("cpu.config.json"),
             verbose: true,
             resume: false,
         };
@@ -207,7 +207,7 @@ mod tests {
         let non_verbose_args = Args {
             input: PathBuf::from("/input"),
             output: None,
-            config: PathBuf::from("config.json"),
+            config: PathBuf::from("cpu.config.json"),
             verbose: false,
             resume: false,
         };
@@ -228,7 +228,7 @@ mod tests {
         let args_with_output = Args {
             input: PathBuf::from("/input"),
             output: Some(PathBuf::from("/custom/output")),
-            config: PathBuf::from("config.json"),
+            config: PathBuf::from("cpu.config.json"),
             verbose: false,
             resume: false,
         };
@@ -236,7 +236,7 @@ mod tests {
         let args_without_output = Args {
             input: PathBuf::from("/input"),
             output: None,
-            config: PathBuf::from("config.json"),
+            config: PathBuf::from("cpu.config.json"),
             verbose: false,
             resume: false,
         };

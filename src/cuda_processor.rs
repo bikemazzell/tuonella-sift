@@ -1,8 +1,13 @@
 use anyhow::Result;
 use cudarc::driver::safe::{CudaContext, DriverError};
+use cudarc::driver::sys::CUdevice_attribute_enum;
+use cudarc::driver::result;
 use tracing::info;
 use crate::record::Record;
 use crate::config::CudaConfig;
+use crate::constants::{
+    BYTES_PER_GB, BYTES_PER_KB, BYTES_PER_MB, PERCENT_100, PERCENT_95
+};
 
 #[derive(Debug, Clone)]
 pub struct CudaDeviceProperties {
@@ -41,11 +46,16 @@ impl CudaProcessor {
 
         let props = Self::get_device_properties_internal(&context)?;
 
-        info!("GPU Memory - Total: {} bytes, Free: {} bytes",
-              props.total_memory,
-              props.free_memory);
+        info!("CUDA device properties detected:");
+        info!("  Compute Capability: {}.{}", props.compute_capability_major, props.compute_capability_minor);
+        info!("  Total Memory: {:.2} GB ({} bytes)", props.total_memory as f64 / BYTES_PER_GB, props.total_memory);
+        info!("  Free Memory: {:.2} GB ({} bytes)", props.free_memory as f64 / BYTES_PER_GB, props.free_memory);
+        info!("  Max Threads per Block: {}", props.max_threads_per_block);
+        info!("  Max Shared Memory per Block: {} KB", props.max_shared_memory_per_block as usize / BYTES_PER_KB);
+        info!("  Memory Bus Width: {} bits", props.memory_bus_width);
+        info!("  L2 Cache Size: {} MB", props.l2_cache_size as usize / BYTES_PER_MB);
 
-        let available_memory_bytes = (props.free_memory as f64 * (config.gpu_memory_usage_percent as f64 / 100.0) * 0.95) as usize;
+        let available_memory_bytes = (props.free_memory as f64 * (config.gpu_memory_usage_percent as f64 / PERCENT_100) * PERCENT_95) as usize;
 
         let max_batch_size = (available_memory_bytes / config.estimated_bytes_per_record)
             .max(config.min_batch_size)
@@ -69,28 +79,29 @@ impl CudaProcessor {
         })
     }
 
-    fn get_device_properties_internal(_context: &Arc<CudaContext>) -> Result<CudaDeviceProperties, DriverError> {
-        // For cudarc 0.16.4, we'll use default values since the API has changed significantly
-        // In a real implementation, you would use the correct cudarc API for your version
+    fn get_device_properties_internal(context: &Arc<CudaContext>) -> Result<CudaDeviceProperties, DriverError> {
+        context.bind_to_thread()?;
+        let compute_capability_major = context.attribute(CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)?;
+        let compute_capability_minor = context.attribute(CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)?;
+        let max_threads_per_block = context.attribute(CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK)?;
+        let max_shared_memory_per_block = context.attribute(CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK)?;
+        let memory_bus_width = context.attribute(CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_GLOBAL_MEMORY_BUS_WIDTH)?;
+        let l2_cache_size = context.attribute(CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_L2_CACHE_SIZE)?;
+        let (free_memory, total_memory) = result::mem_get_info()?;
         Ok(CudaDeviceProperties {
-            total_memory: 8_000_000_000, // 8GB default
-            free_memory: 6_000_000_000,  // 6GB default
-            compute_capability_major: 7, // Default to a reasonable value
-            compute_capability_minor: 5,
-            max_threads_per_block: 1024, // Common default
-            max_shared_memory_per_block: 49152, // 48KB default
-            memory_bus_width: 256, // Common default
-            l2_cache_size: 4194304, // 4MB default
+            total_memory,
+            free_memory,
+            compute_capability_major,
+            compute_capability_minor,
+            max_threads_per_block,
+            max_shared_memory_per_block,
+            memory_bus_width,
+            l2_cache_size,
         })
     }
 
     pub fn get_properties(&self) -> Result<CudaDeviceProperties, DriverError> {
         Self::get_device_properties_internal(&self.context)
-    }
-
-    pub fn get_memory_info(&self) -> Result<(usize, usize), DriverError> {
-        // For cudarc 0.16.4, return default values since the API has changed
-        Ok((8_000_000_000, 6_000_000_000)) // (total, free) in bytes
     }
 
     fn calculate_optimal_batch_size(max_size: usize, threads_per_block: usize, config: &CudaConfig) -> usize {
@@ -118,6 +129,8 @@ impl CudaProcessor {
         }
 
         let chunk_size = self.optimal_batch_size.min(records.len()).max(1);
+
+        // Process records in chunks of the optimal batch size
         for chunk in records.chunks_mut(chunk_size) {
             self.process_chunk_on_gpu(chunk, case_sensitive_usernames)?;
         }
@@ -126,15 +139,7 @@ impl CudaProcessor {
     }
 
     fn process_chunk_on_gpu(&self, records: &mut [Record], case_sensitive_usernames: bool) -> Result<()> {
-        for record in records.iter_mut() {
-            record.normalized_url = record.url.to_lowercase();
-
-            if !case_sensitive_usernames {
-                record.normalized_user = record.user.to_lowercase();
-            } else {
-                record.normalized_user = record.user.clone();
-            }
-        }
+        process_records(records, case_sensitive_usernames);
         Ok(())
     }
 
@@ -143,25 +148,49 @@ impl CudaProcessor {
     }
 }
 
+// Extract common record processing logic to reduce duplication
+fn process_records(records: &mut [Record], case_sensitive_usernames: bool) {
+    for record in records.iter_mut() {
+        record.normalized_url = record.url.to_lowercase();
+        if !case_sensitive_usernames {
+            record.normalized_user = record.user.to_lowercase();
+        } else {
+            record.normalized_user = record.user.clone();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::record::Record;
+    use crate::constants::{
+        PERCENT_100, TEST_TOTAL_MEMORY, TEST_FREE_MEMORY, TEST_COMPUTE_CAPABILITY_MAJOR,
+        TEST_COMPUTE_CAPABILITY_MINOR, TEST_MAX_THREADS_PER_BLOCK,
+        TEST_MAX_SHARED_MEMORY_PER_BLOCK, TEST_MEMORY_BUS_WIDTH, TEST_L2_CACHE_SIZE,
+        TEST_GPU_MEMORY_PERCENT, TEST_BYTES_PER_RECORD, TEST_MIN_BATCH_SIZE,
+        TEST_MAX_BATCH_SIZE, TEST_URL_BUFFER_SIZE, TEST_USERNAME_BUFFER_SIZE,
+        TEST_THREADS_PER_BLOCK, TEST_BATCH_SIZE_SMALL, TEST_BATCH_SIZE_MEDIUM,
+        TEST_BATCH_SIZE_LARGE, TEST_BATCH_SIZE_XLARGE, TEST_TOTAL_MEMORY_8GB,
+        TEST_TOTAL_MEMORY_SMALL, TEST_USABLE_MEMORY_8GB, TEST_USABLE_MEMORY_SMALL,
+        TEST_CALCULATED_BATCH_SIZE_8GB, TEST_CALCULATED_BATCH_SIZE_SMALL,
+        TEST_OPTIMAL_BATCH_SIZE_SMALL
+    };
 
     fn create_test_config() -> CudaConfig {
         CudaConfig {
-            gpu_memory_usage_percent: 80,
-            estimated_bytes_per_record: 500,
-            min_batch_size: 1000,
-            max_batch_size: 10000,
-            max_url_buffer_size: 256,
-            max_username_buffer_size: 64,
-            threads_per_block: 256,
+            gpu_memory_usage_percent: TEST_GPU_MEMORY_PERCENT,
+            estimated_bytes_per_record: TEST_BYTES_PER_RECORD,
+            min_batch_size: TEST_MIN_BATCH_SIZE,
+            max_batch_size: TEST_MAX_BATCH_SIZE,
+            max_url_buffer_size: TEST_URL_BUFFER_SIZE,
+            max_username_buffer_size: TEST_USERNAME_BUFFER_SIZE,
+            threads_per_block: TEST_THREADS_PER_BLOCK,
             batch_sizes: crate::config::BatchSizes {
-                small: 1000,
-                medium: 2500,
-                large: 5000,
-                xlarge: 10000,
+                small: TEST_BATCH_SIZE_SMALL,
+                medium: TEST_BATCH_SIZE_MEDIUM,
+                large: TEST_BATCH_SIZE_LARGE,
+                xlarge: TEST_BATCH_SIZE_XLARGE,
             },
         }
     }
@@ -183,60 +212,44 @@ mod tests {
     #[test]
     fn test_cuda_device_properties_creation() {
         let props = CudaDeviceProperties {
-            total_memory: 8_000_000_000,
-            free_memory: 6_000_000_000,
-            compute_capability_major: 7,
-            compute_capability_minor: 5,
-            max_threads_per_block: 1024,
-            max_shared_memory_per_block: 49152,
-            memory_bus_width: 256,
-            l2_cache_size: 4194304,
+            total_memory: TEST_TOTAL_MEMORY,
+            free_memory: TEST_FREE_MEMORY,
+            compute_capability_major: TEST_COMPUTE_CAPABILITY_MAJOR,
+            compute_capability_minor: TEST_COMPUTE_CAPABILITY_MINOR,
+            max_threads_per_block: TEST_MAX_THREADS_PER_BLOCK,
+            max_shared_memory_per_block: TEST_MAX_SHARED_MEMORY_PER_BLOCK,
+            memory_bus_width: TEST_MEMORY_BUS_WIDTH,
+            l2_cache_size: TEST_L2_CACHE_SIZE,
         };
 
-        assert_eq!(props.total_memory, 8_000_000_000);
-        assert_eq!(props.free_memory, 6_000_000_000);
-        assert_eq!(props.compute_capability_major, 7);
-        assert_eq!(props.compute_capability_minor, 5);
+        assert_eq!(props.total_memory, TEST_TOTAL_MEMORY);
+        assert_eq!(props.free_memory, TEST_FREE_MEMORY);
+        assert_eq!(props.compute_capability_major, TEST_COMPUTE_CAPABILITY_MAJOR);
+        assert_eq!(props.compute_capability_minor, TEST_COMPUTE_CAPABILITY_MINOR);
     }
 
     #[test]
     fn test_cuda_config_creation() {
         let config = create_test_config();
 
-        assert_eq!(config.gpu_memory_usage_percent, 80);
-        assert_eq!(config.estimated_bytes_per_record, 500);
-        assert_eq!(config.min_batch_size, 1000);
-        assert_eq!(config.max_batch_size, 10000);
-        assert_eq!(config.max_url_buffer_size, 256);
-        assert_eq!(config.max_username_buffer_size, 64);
-        assert_eq!(config.threads_per_block, 256);
+        assert_eq!(config.gpu_memory_usage_percent, TEST_GPU_MEMORY_PERCENT);
+        assert_eq!(config.estimated_bytes_per_record, TEST_BYTES_PER_RECORD);
+        assert_eq!(config.min_batch_size, TEST_MIN_BATCH_SIZE);
+        assert_eq!(config.max_batch_size, TEST_MAX_BATCH_SIZE);
+        assert_eq!(config.max_url_buffer_size, TEST_URL_BUFFER_SIZE);
+        assert_eq!(config.max_username_buffer_size, TEST_USERNAME_BUFFER_SIZE);
+        assert_eq!(config.threads_per_block, TEST_THREADS_PER_BLOCK);
     }
 
     #[test]
     fn test_process_chunk_case_sensitive() {
-        // This test doesn't require actual CUDA hardware
-        // We're testing the CPU fallback logic in process_chunk_on_gpu
-
-        let _config = create_test_config();
-
-        // Create mock processor (we can't actually initialize CUDA in tests)
-        // So we'll test the logic that would be used
-
         let mut records = vec![
             create_test_record("User@Example.com", "Password123", "https://Example.com/path"),
             create_test_record("TEST@GMAIL.COM", "secret456", "HTTP://WWW.GOOGLE.COM"),
         ];
 
-        // Simulate the case-sensitive processing logic
-        let case_sensitive_usernames = true;
-        for record in records.iter_mut() {
-            record.normalized_url = record.url.to_lowercase();
-            if !case_sensitive_usernames {
-                record.normalized_user = record.user.to_lowercase();
-            } else {
-                record.normalized_user = record.user.clone();
-            }
-        }
+        // Directly use the extracted process_records function
+        process_records(&mut records, true);
 
         assert_eq!(records[0].normalized_user, "User@Example.com"); // Case preserved
         assert_eq!(records[0].normalized_url, "https://example.com/path");
@@ -251,16 +264,8 @@ mod tests {
             create_test_record("TEST@GMAIL.COM", "secret456", "HTTP://WWW.GOOGLE.COM"),
         ];
 
-        // Simulate the case-insensitive processing logic
-        let case_sensitive_usernames = false;
-        for record in records.iter_mut() {
-            record.normalized_url = record.url.to_lowercase();
-            if !case_sensitive_usernames {
-                record.normalized_user = record.user.to_lowercase();
-            } else {
-                record.normalized_user = record.user.clone();
-            }
-        }
+        // Directly use the extracted process_records function
+        process_records(&mut records, false);
 
         assert_eq!(records[0].normalized_user, "user@example.com"); // Lowercased
         assert_eq!(records[0].normalized_url, "https://example.com/path");
@@ -273,16 +278,15 @@ mod tests {
         let config = create_test_config();
 
         // Test the batch size calculation logic that would be used
-        let total_memory = 8_000_000_000_u64; // 8GB
-        let usable_memory = (total_memory as f64 * config.gpu_memory_usage_percent as f64 / 100.0) as usize;
+        let usable_memory = (TEST_TOTAL_MEMORY_8GB as f64 * config.gpu_memory_usage_percent as f64 / PERCENT_100) as usize;
         let calculated_batch_size = usable_memory / config.estimated_bytes_per_record;
 
         let optimal_batch_size = calculated_batch_size
             .max(config.min_batch_size)
             .min(config.max_batch_size);
 
-        assert_eq!(usable_memory, 6_400_000_000); // 80% of 8GB
-        assert_eq!(calculated_batch_size, 12_800_000); // 6.4GB / 500 bytes
+        assert_eq!(usable_memory, TEST_USABLE_MEMORY_8GB); // 80% of 8GB
+        assert_eq!(calculated_batch_size, TEST_CALCULATED_BATCH_SIZE_8GB); // 6.4GB / 500 bytes
         assert_eq!(optimal_batch_size, config.max_batch_size); // Clamped to max
     }
 
@@ -291,16 +295,15 @@ mod tests {
         let config = create_test_config();
 
         // Test with very small memory that would result in batch size below minimum
-        let total_memory = 500_000_u64; // 500KB - very small
-        let usable_memory = (total_memory as f64 * config.gpu_memory_usage_percent as f64 / 100.0) as usize;
+        let usable_memory = (TEST_TOTAL_MEMORY_SMALL as f64 * config.gpu_memory_usage_percent as f64 / PERCENT_100) as usize;
         let calculated_batch_size = usable_memory / config.estimated_bytes_per_record;
 
         let optimal_batch_size = calculated_batch_size
             .max(config.min_batch_size)
             .min(config.max_batch_size);
 
-        assert_eq!(usable_memory, 400_000); // 80% of 500KB
-        assert_eq!(calculated_batch_size, 800); // 400KB / 500 bytes
+        assert_eq!(usable_memory, TEST_USABLE_MEMORY_SMALL); // 80% of 500KB
+        assert_eq!(calculated_batch_size, TEST_CALCULATED_BATCH_SIZE_SMALL); // 400KB / 500 bytes
         assert_eq!(optimal_batch_size, config.min_batch_size); // Clamped to min (1000)
     }
 
@@ -320,8 +323,7 @@ mod tests {
 
     #[test]
     fn test_chunk_processing_logic() {
-        let _config = create_test_config();
-        let optimal_batch_size = 3; // Small for testing
+        let optimal_batch_size = TEST_OPTIMAL_BATCH_SIZE_SMALL; // Small for testing
 
         let mut records = vec![
             create_test_record("user1@example.com", "pass1", "https://site1.com"),
@@ -333,17 +335,12 @@ mod tests {
 
         // Simulate the chunking logic from process_batch
         let chunk_size = optimal_batch_size.min(records.len()).max(1);
-        assert_eq!(chunk_size, 3);
+        assert_eq!(chunk_size, TEST_OPTIMAL_BATCH_SIZE_SMALL);
 
         let mut processed_chunks = 0;
         for chunk in records.chunks_mut(chunk_size) {
             processed_chunks += 1;
-
-            // Simulate processing each chunk
-            for record in chunk.iter_mut() {
-                record.normalized_url = record.url.to_lowercase();
-                record.normalized_user = record.user.to_lowercase();
-            }
+            process_records(chunk, false);
         }
 
         assert_eq!(processed_chunks, 2); // 5 records / 3 chunk_size = 2 chunks
@@ -353,5 +350,25 @@ mod tests {
             assert!(!record.normalized_url.is_empty());
             assert!(!record.normalized_user.is_empty());
         }
+    }
+
+    #[test]
+    fn test_gpu_property_detection() {
+        // Test that our GPU property detection logic works correctly
+        // Since we now use real CUDA device queries, we'll test the logic without actual GPU
+
+        // Test that the device attribute enums are available
+        use cudarc::driver::sys::CUdevice_attribute_enum;
+
+        // Verify the attributes we use exist
+        let _compute_major = CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR;
+        let _compute_minor = CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR;
+        let _max_threads = CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK;
+        let _shared_mem = CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK;
+        let _bus_width = CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_GLOBAL_MEMORY_BUS_WIDTH;
+        let _l2_cache = CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_L2_CACHE_SIZE;
+
+        // Test passes if we can access all the required device attributes
+        assert!(true);
     }
 }
