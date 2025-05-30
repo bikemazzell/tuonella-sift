@@ -1,5 +1,11 @@
 use anyhow::Result;
-use crate::constants::{DYNAMIC_MEMORY_CHECK_INTERVAL_RECORDS, BYTES_PER_MB};
+use crate::constants::{
+    DYNAMIC_MEMORY_CHECK_INTERVAL_RECORDS, BYTES_PER_MB,
+    MEMORY_PRESSURE_THRESHOLD_PERCENT, MEMORY_CRITICAL_THRESHOLD_PERCENT,
+    CHUNK_SIZE_REDUCTION_FACTOR, CHUNK_SIZE_INCREASE_FACTOR,
+    MIN_CHUNK_SIZE_REDUCTION_LIMIT, MAX_CHUNK_SIZE_INCREASE_LIMIT,
+    CHUNK_SIZE_ADJUSTMENT_COOLDOWN_RECORDS
+};
 use crate::utils::system::SystemResources;
 
 #[cfg(feature = "cuda")]
@@ -41,6 +47,16 @@ pub struct MemoryManager {
 
     /// Flag indicating if buffers are initialized
     buffers_initialized: bool,
+
+    /// Dynamic chunk sizing state (Section 4: Memory Management)
+    /// Original chunk size for baseline calculations
+    original_chunk_size_bytes: usize,
+
+    /// Current adaptive chunk size
+    current_chunk_size_bytes: usize,
+
+    /// Last record count when chunk size was adjusted
+    last_chunk_adjustment_record: usize,
 }
 
 impl MemoryManager {
@@ -82,6 +98,9 @@ impl MemoryManager {
             None
         };
 
+        // Initialize dynamic chunk sizing with RAM buffer size as baseline
+        let initial_chunk_size = ram_buffer_capacity;
+
         Ok(Self {
             resources,
             ram_buffer,
@@ -93,6 +112,9 @@ impl MemoryManager {
             gpu_context,
             record_counter: 0,
             buffers_initialized: true,
+            original_chunk_size_bytes: initial_chunk_size,
+            current_chunk_size_bytes: initial_chunk_size,
+            last_chunk_adjustment_record: 0,
         })
     }
 
@@ -173,10 +195,78 @@ impl MemoryManager {
         Ok(is_pressure)
     }
 
+    /// Get current adaptive chunk size
+    ///
+    /// This implements dynamic chunk sizing from Section 4: Memory Management
+    pub fn get_current_chunk_size(&self) -> usize {
+        self.current_chunk_size_bytes
+    }
+
+    /// Adjust chunk size based on memory pressure
+    ///
+    /// This implements: "Dynamically adjust chunk sizes if memory usage approaches limits"
+    /// - Increase chunk size if memory usage is low
+    /// - Decrease chunk size if memory usage is high
+    pub fn adjust_chunk_size_if_needed(&mut self) -> Result<bool> {
+        // Check if enough records have been processed since last adjustment
+        if self.record_counter - self.last_chunk_adjustment_record < CHUNK_SIZE_ADJUSTMENT_COOLDOWN_RECORDS {
+            return Ok(false);
+        }
+
+        let (_current_usage, usage_percent) = self.resources.get_current_memory_usage()?;
+        let mut adjusted = false;
+
+        if usage_percent >= MEMORY_CRITICAL_THRESHOLD_PERCENT {
+            // Critical memory pressure - reduce chunk size significantly
+            let new_size = (self.current_chunk_size_bytes as f64 * CHUNK_SIZE_REDUCTION_FACTOR) as usize;
+            let min_allowed = (self.original_chunk_size_bytes as f64 * MIN_CHUNK_SIZE_REDUCTION_LIMIT) as usize;
+
+            if new_size >= min_allowed && new_size < self.current_chunk_size_bytes {
+                self.current_chunk_size_bytes = new_size;
+                self.last_chunk_adjustment_record = self.record_counter;
+                println!("🔽 Critical memory pressure ({:.1}%) - reducing chunk size to {:.2} MB",
+                        usage_percent, new_size as f64 / BYTES_PER_MB as f64);
+                adjusted = true;
+            }
+        } else if usage_percent >= MEMORY_PRESSURE_THRESHOLD_PERCENT {
+            // Moderate memory pressure - reduce chunk size moderately
+            let new_size = (self.current_chunk_size_bytes as f64 * CHUNK_SIZE_REDUCTION_FACTOR) as usize;
+            let min_allowed = (self.original_chunk_size_bytes as f64 * MIN_CHUNK_SIZE_REDUCTION_LIMIT) as usize;
+
+            if new_size >= min_allowed && new_size < self.current_chunk_size_bytes {
+                self.current_chunk_size_bytes = new_size;
+                self.last_chunk_adjustment_record = self.record_counter;
+                println!("🔽 Memory pressure ({:.1}%) - reducing chunk size to {:.2} MB",
+                        usage_percent, new_size as f64 / BYTES_PER_MB as f64);
+                adjusted = true;
+            }
+        } else if usage_percent < MEMORY_PRESSURE_THRESHOLD_PERCENT * 0.6 {
+            // Low memory usage - increase chunk size if possible
+            let new_size = (self.current_chunk_size_bytes as f64 * CHUNK_SIZE_INCREASE_FACTOR) as usize;
+            let max_allowed = (self.original_chunk_size_bytes as f64 * MAX_CHUNK_SIZE_INCREASE_LIMIT) as usize;
+
+            if new_size <= max_allowed && new_size > self.current_chunk_size_bytes {
+                self.current_chunk_size_bytes = new_size;
+                self.last_chunk_adjustment_record = self.record_counter;
+                println!("🔼 Low memory usage ({:.1}%) - increasing chunk size to {:.2} MB",
+                        usage_percent, new_size as f64 / BYTES_PER_MB as f64);
+                adjusted = true;
+            }
+        }
+
+        Ok(adjusted)
+    }
+
     /// Get current memory statistics
     pub fn get_memory_stats(&self) -> Result<MemoryStats> {
         let (current_usage, usage_percent) = self.resources.get_current_memory_usage()?;
         let is_pressure = self.resources.is_memory_pressure()?;
+
+        let chunk_adjustment_factor = if self.original_chunk_size_bytes > 0 {
+            self.current_chunk_size_bytes as f64 / self.original_chunk_size_bytes as f64
+        } else {
+            1.0
+        };
 
         Ok(MemoryStats {
             total_ram_bytes: self.resources.total_ram_bytes,
@@ -189,6 +279,9 @@ impl MemoryManager {
             memory_pressure: is_pressure,
             #[cfg(feature = "cuda")]
             gpu_buffer_capacity_bytes: self.gpu_buffer_capacity,
+            original_chunk_size_bytes: self.original_chunk_size_bytes,
+            current_chunk_size_bytes: self.current_chunk_size_bytes,
+            chunk_size_adjustment_factor: chunk_adjustment_factor,
         })
     }
 
@@ -221,6 +314,10 @@ pub struct MemoryStats {
     pub memory_pressure: bool,
     #[cfg(feature = "cuda")]
     pub gpu_buffer_capacity_bytes: usize,
+    /// Dynamic chunk sizing information (Section 4: Memory Management)
+    pub original_chunk_size_bytes: usize,
+    pub current_chunk_size_bytes: usize,
+    pub chunk_size_adjustment_factor: f64,
 }
 
 impl MemoryStats {
@@ -252,6 +349,13 @@ impl MemoryStats {
                 self.gpu_buffer_capacity_bytes as f64 / BYTES_PER_MB as f64
             ));
 
+            summary.push_str(&format!(
+                "\nDynamic Chunk Sizing: {:.2} MB original → {:.2} MB current (factor: {:.2}x)",
+                self.original_chunk_size_bytes as f64 / BYTES_PER_MB as f64,
+                self.current_chunk_size_bytes as f64 / BYTES_PER_MB as f64,
+                self.chunk_size_adjustment_factor
+            ));
+
             summary
         }
 
@@ -264,7 +368,8 @@ impl MemoryStats {
                  RAM Limit: {:.2} GB\n\
                  RAM Buffer: {:.2} MB capacity, {:.2} MB used ({:.1}%)\n\
                  Process Usage: {:.2} GB ({:.1}%)\n\
-                 Memory Pressure: {}",
+                 Memory Pressure: {}\n\
+                 Dynamic Chunk Sizing: {:.2} MB original → {:.2} MB current (factor: {:.2}x)",
                 self.total_ram_bytes as f64 / crate::constants::BYTES_PER_GB as f64,
                 self.available_ram_bytes as f64 / crate::constants::BYTES_PER_GB as f64,
                 self.ram_limit_bytes as f64 / crate::constants::BYTES_PER_GB as f64,
@@ -273,7 +378,10 @@ impl MemoryStats {
                 (self.ram_buffer_used_bytes as f64 / self.ram_buffer_capacity_bytes as f64) * 100.0,
                 self.current_process_usage_bytes as f64 / crate::constants::BYTES_PER_GB as f64,
                 self.usage_percent,
-                if self.memory_pressure { "YES" } else { "NO" }
+                if self.memory_pressure { "YES" } else { "NO" },
+                self.original_chunk_size_bytes as f64 / BYTES_PER_MB as f64,
+                self.current_chunk_size_bytes as f64 / BYTES_PER_MB as f64,
+                self.chunk_size_adjustment_factor
             )
         }
     }
@@ -327,5 +435,35 @@ mod tests {
 
         let summary = stats.format_summary();
         assert!(summary.contains("Memory Statistics"), "Summary should contain header");
+    }
+
+    #[test]
+    fn test_dynamic_chunk_sizing() {
+        let mut manager = MemoryManager::new(Some(1)).unwrap(); // 1GB limit for testing
+
+        // Test initial chunk size
+        let initial_size = manager.get_current_chunk_size();
+        assert!(initial_size > 0, "Initial chunk size should be positive");
+        assert_eq!(initial_size, manager.original_chunk_size_bytes, "Initial size should equal original size");
+
+        // Test that adjustment doesn't happen too early (cooldown period)
+        let adjusted = manager.adjust_chunk_size_if_needed().unwrap();
+        assert!(!adjusted, "Should not adjust chunk size during cooldown period");
+
+        // Simulate processing enough records to allow adjustment
+        manager.record_counter = CHUNK_SIZE_ADJUSTMENT_COOLDOWN_RECORDS + 1;
+
+        // Test chunk size adjustment (this may or may not adjust based on actual memory usage)
+        let result = manager.adjust_chunk_size_if_needed();
+        assert!(result.is_ok(), "Chunk size adjustment should not fail");
+
+        // Test memory stats include chunk sizing information
+        let stats = manager.get_memory_stats().unwrap();
+        assert_eq!(stats.original_chunk_size_bytes, manager.original_chunk_size_bytes);
+        assert_eq!(stats.current_chunk_size_bytes, manager.current_chunk_size_bytes);
+        assert!(stats.chunk_size_adjustment_factor > 0.0, "Adjustment factor should be positive");
+
+        let summary = stats.format_summary();
+        assert!(summary.contains("Dynamic Chunk Sizing"), "Summary should contain chunk sizing info");
     }
 }

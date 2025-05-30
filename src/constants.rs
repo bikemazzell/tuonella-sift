@@ -48,6 +48,15 @@ pub const DYNAMIC_MEMORY_CHECK_INTERVAL_RECORDS: usize = 1000;  // Check memory 
 pub const MAX_RAM_BUFFER_SIZE_GB: f64 = 8.0;  // Maximum 8GB RAM buffer
 pub const MAX_GPU_BUFFER_SIZE_GB: f64 = 4.0;  // Maximum 4GB GPU buffer
 
+// Dynamic chunk size adjustment constants (Section 4: Memory Management)
+pub const MEMORY_PRESSURE_THRESHOLD_PERCENT: f64 = 80.0;  // Consider 80% as pressure threshold
+pub const MEMORY_CRITICAL_THRESHOLD_PERCENT: f64 = 90.0;  // Consider 90% as critical threshold
+pub const CHUNK_SIZE_REDUCTION_FACTOR: f64 = 0.75;  // Reduce chunk size by 25% under pressure
+pub const CHUNK_SIZE_INCREASE_FACTOR: f64 = 1.25;  // Increase chunk size by 25% when memory is available
+pub const MIN_CHUNK_SIZE_REDUCTION_LIMIT: f64 = 0.25;  // Don't reduce below 25% of original size
+pub const MAX_CHUNK_SIZE_INCREASE_LIMIT: f64 = 2.0;  // Don't increase above 200% of original size
+pub const CHUNK_SIZE_ADJUSTMENT_COOLDOWN_RECORDS: usize = 5000;  // Wait N records between adjustments
+
 // GPU processing constants for algorithm step 2.2
 pub const GPU_CHUNK_PROCESSING_BATCH_SIZE: usize = 10000;  // Records per GPU batch
 pub const GPU_TEMP_FILE_READ_CHUNK_SIZE_MB: usize = 64;    // MB to read from temp files at once

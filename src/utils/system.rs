@@ -2,7 +2,7 @@ use sysinfo::{System, Pid};
 use std::time::{Duration, Instant};
 use crate::constants::{
     BYTES_PER_GB, ALGORITHM_RAM_ALLOCATION_PERCENT, MEMORY_SAFETY_MARGIN,
-    MAX_RAM_BUFFER_SIZE_GB
+    MAX_RAM_BUFFER_SIZE_GB, MEMORY_PRESSURE_THRESHOLD_PERCENT
 };
 
 #[cfg(feature = "cuda")]
@@ -130,7 +130,7 @@ impl SystemResources {
     /// Check if we're approaching memory limits
     pub fn is_memory_pressure(&self) -> Result<bool> {
         let (_, usage_percent) = self.get_current_memory_usage()?;
-        Ok(usage_percent > 80.0)  // Consider 80% as pressure threshold
+        Ok(usage_percent > MEMORY_PRESSURE_THRESHOLD_PERCENT)
     }
 
     /// Get formatted resource summary for logging
