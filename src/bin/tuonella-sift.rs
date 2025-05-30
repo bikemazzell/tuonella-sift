@@ -54,7 +54,7 @@ async fn main() -> Result<()> {
     let cuda_processor = if !args.force_cpu && config.processing.enable_cuda {
         match CudaProcessor::new(config.cuda.clone(), 0) {
             Ok(processor) => {
-                println!("🚀 GPU powers activated! Deduplication will be MUCH faster!");
+                println!("🚀 GPU powers activated!");
                 Some(processor)
             }
             Err(e) => {
@@ -73,7 +73,7 @@ async fn main() -> Result<()> {
     };
 
     if args.verbose {
-        println!("\n🔎 Examining the scrolls (CSV files) for worthiness...");
+        println!("\n🔎 Examining data for worthiness...");
     }
 
     let temp_files = process_csv_files_with_validation(
@@ -130,9 +130,9 @@ async fn main() -> Result<()> {
     let fun_comment = if processing_rate > 100000.0 {
         "🚀 By Odin's Eye! That is fast!"
     } else if processing_rate > 50000.0 {
-        "⚡ Lightning fast! Minor Gods would be impressed."
+        "⚡ Lightning fast!"
     } else if processing_rate > 10000.0 {
-        "🏃 Pretty speedy! Worthy of a hero."
+        "🏃 Pretty speedy!"
     } else if processing_rate > 1000.0 {
         "🐎 Galloping along nicely."
     } else {

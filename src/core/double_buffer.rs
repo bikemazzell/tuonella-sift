@@ -11,7 +11,8 @@ use crate::cuda::processor::CudaRecord;
 #[cfg(feature = "cuda")]
 use crate::constants::{
     BUFFER_SWAP_THRESHOLD_PERCENT, ASYNC_IO_TIMEOUT_SECONDS,
-    BYTES_PER_MB
+    BYTES_PER_MB, ZERO_DURATION_SECS, ZERO_DURATION_NANOS, ZERO_FLOAT, ZERO_COUNT,
+    BUFFER_SIZE_RESET_VALUE, PERCENTAGE_MULTIPLIER, INITIAL_BUFFER_A_ACTIVE
 };
 
 #[cfg(feature = "cuda")]
@@ -27,7 +28,7 @@ pub struct DoubleBuffer {
 
 #[cfg(feature = "cuda")]
 #[derive(Debug, Clone)]
-struct BufferState {    
+struct BufferState {
     data: Vec<CudaRecord>,
     size_bytes: usize,
     ready_for_processing: bool,
@@ -52,7 +53,7 @@ impl Default for BufferState {
     fn default() -> Self {
         Self {
             data: Vec::new(),
-            size_bytes: 0,
+            size_bytes: BUFFER_SIZE_RESET_VALUE,
             ready_for_processing: false,
             being_processed: false,
             ready_for_io: true,
@@ -64,13 +65,13 @@ impl Default for BufferState {
 impl Default for DoubleBufferMetrics {
     fn default() -> Self {
         Self {
-            total_records: 0,
-            total_processing_time: Duration::new(0, 0),
-            total_io_time: Duration::new(0, 0),
-            buffer_swaps: 0,
-            average_throughput: 0.0,
-            gpu_utilization_percent: 0.0,
-            io_wait_percent: 0.0,
+            total_records: ZERO_COUNT,
+            total_processing_time: Duration::new(ZERO_DURATION_SECS, ZERO_DURATION_NANOS),
+            total_io_time: Duration::new(ZERO_DURATION_SECS, ZERO_DURATION_NANOS),
+            buffer_swaps: ZERO_COUNT,
+            average_throughput: ZERO_FLOAT,
+            gpu_utilization_percent: ZERO_FLOAT,
+            io_wait_percent: ZERO_FLOAT,
         }
     }
 }
@@ -84,7 +85,7 @@ impl DoubleBuffer {
             buffer_a: Arc::new(Mutex::new(BufferState::default())),
             buffer_b: Arc::new(Mutex::new(BufferState::default())),
             buffer_ready: Arc::new(Condvar::new()),
-            active_buffer: Arc::new(Mutex::new(true)), // Start with buffer A
+            active_buffer: Arc::new(Mutex::new(INITIAL_BUFFER_A_ACTIVE)), // Start with buffer A
             buffer_capacity,
             metrics: Arc::new(Mutex::new(DoubleBufferMetrics::default())),
         })
@@ -112,7 +113,7 @@ impl DoubleBuffer {
         buffer.data.extend(records);
         buffer.size_bytes += estimated_size;
 
-        let usage_percent = (buffer.size_bytes as f64 / self.buffer_capacity as f64) * 100.0;
+        let usage_percent = (buffer.size_bytes as f64 / self.buffer_capacity as f64) * PERCENTAGE_MULTIPLIER;
         if usage_percent >= BUFFER_SWAP_THRESHOLD_PERCENT {
             buffer.ready_for_processing = true;
             buffer.ready_for_io = false;
@@ -181,7 +182,7 @@ impl DoubleBuffer {
         }
 
         let records = std::mem::take(&mut buffer.data);
-        buffer.size_bytes = 0;
+        buffer.size_bytes = BUFFER_SIZE_RESET_VALUE;
         buffer.ready_for_processing = false;
         buffer.being_processed = false;
         buffer.ready_for_io = true;
@@ -219,7 +220,7 @@ impl DoubleBuffer {
         metrics.total_records += record_count;
 
         let total_time_secs = (metrics.total_processing_time + metrics.total_io_time).as_secs_f64();
-        if total_time_secs > 0.0 {
+        if total_time_secs > ZERO_FLOAT {
             metrics.average_throughput = metrics.total_records as f64 / total_time_secs;
         }
 
@@ -228,11 +229,11 @@ impl DoubleBuffer {
 
     fn calculate_utilization(&self, metrics: &mut DoubleBufferMetrics) {
         let total_time = metrics.total_processing_time + metrics.total_io_time;
-        if total_time.as_secs_f64() > 0.0 {
+        if total_time.as_secs_f64() > ZERO_FLOAT {
             metrics.gpu_utilization_percent =
-                (metrics.total_processing_time.as_secs_f64() / total_time.as_secs_f64()) * 100.0;
+                (metrics.total_processing_time.as_secs_f64() / total_time.as_secs_f64()) * PERCENTAGE_MULTIPLIER;
             metrics.io_wait_percent =
-                (metrics.total_io_time.as_secs_f64() / total_time.as_secs_f64()) * 100.0;
+                (metrics.total_io_time.as_secs_f64() / total_time.as_secs_f64()) * PERCENTAGE_MULTIPLIER;
         }
     }
 
@@ -244,7 +245,7 @@ impl DoubleBuffer {
             let mut buffer = buffer_ref.lock().unwrap();
             if !buffer.data.is_empty() {
                 all_records.extend(std::mem::take(&mut buffer.data));
-                buffer.size_bytes = 0;
+                buffer.size_bytes = BUFFER_SIZE_RESET_VALUE;
                 buffer.ready_for_processing = false;
                 buffer.being_processed = false;
                 buffer.ready_for_io = true;

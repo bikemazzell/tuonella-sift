@@ -11,7 +11,6 @@ use crate::constants::{
     CHUNK_SPLIT_FACTOR, MIN_CHUNK_SIZE_RECORDS, ERROR_LOG_BUFFER_SIZE
 };
 
-/// Comprehensive error types for the deduplication system
 #[derive(Error, Debug)]
 pub enum DeduplicationError {
     #[error("Memory exhaustion: {message}")]
@@ -36,7 +35,6 @@ pub enum DeduplicationError {
     ChunkProcessingFailed { message: String },
 }
 
-/// Error severity levels for prioritized handling
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorSeverity {
     Low,      // Recoverable errors (invalid lines, minor format issues)
@@ -45,7 +43,6 @@ pub enum ErrorSeverity {
     Critical, // System-level errors (GPU failures, file system issues)
 }
 
-/// Error context information for detailed logging and recovery
 #[derive(Debug, Clone)]
 pub struct ErrorContext {
     pub error_type: String,
@@ -58,7 +55,6 @@ pub struct ErrorContext {
     pub additional_info: HashMap<String, String>,
 }
 
-/// Recovery checkpoint for resuming processing after failures
 #[derive(Debug, Clone)]
 pub struct RecoveryCheckpoint {
     pub file_index: usize,
@@ -69,7 +65,6 @@ pub struct RecoveryCheckpoint {
     pub temp_files_created: Vec<PathBuf>,
 }
 
-/// Advanced error handler implementing Section 5: Error Handling
 pub struct ErrorHandler {
     _error_log_path: PathBuf,
     error_writer: BufWriter<File>,
@@ -79,7 +74,6 @@ pub struct ErrorHandler {
     stats: ErrorStats,
 }
 
-/// Error handling statistics
 #[derive(Debug, Default, Clone)]
 pub struct ErrorStats {
     pub total_errors: usize,
@@ -94,7 +88,6 @@ pub struct ErrorStats {
 }
 
 impl ErrorHandler {
-    /// Create a new error handler with logging capabilities
     pub fn new(error_log_path: PathBuf) -> Result<Self> {
         let error_file = OpenOptions::new()
             .create(true)
@@ -114,7 +107,6 @@ impl ErrorHandler {
         })
     }
 
-    /// Log an error with context information
     pub fn log_error(&mut self, error: &DeduplicationError, context: ErrorContext) -> Result<()> {
         self.stats.total_errors += 1;
 
@@ -125,10 +117,8 @@ impl ErrorHandler {
             ErrorSeverity::Critical => self.stats.gpu_errors += 1,
         }
 
-        // Add to buffer
         self.error_buffer.push(context.clone());
 
-        // Write to log file
         let log_entry = format!(
             "[{}] {:?} - {} - File: {:?}, Line: {:?}, Chunk: {:?}, Retry: {}\n",
             chrono::Utc::now().format("%Y-%m-%d %H:%M:%S"),
@@ -142,7 +132,6 @@ impl ErrorHandler {
 
         self.error_writer.write_all(log_entry.as_bytes())?;
 
-        // Flush buffer if full
         if self.error_buffer.len() >= ERROR_LOG_BUFFER_SIZE {
             self.flush_error_buffer()?;
         }
@@ -150,30 +139,25 @@ impl ErrorHandler {
         Ok(())
     }
 
-    /// Flush error buffer to disk
     pub fn flush_error_buffer(&mut self) -> Result<()> {
         self.error_writer.flush()?;
         self.error_buffer.clear();
         Ok(())
     }
 
-    /// Create a recovery checkpoint
     pub fn create_checkpoint(&mut self, checkpoint: RecoveryCheckpoint) {
         self.recovery_checkpoints.push(checkpoint.clone());
         self.current_checkpoint = Some(checkpoint);
 
-        // Keep only recent checkpoints to avoid memory bloat
         if self.recovery_checkpoints.len() > 10 {
             self.recovery_checkpoints.remove(0);
         }
     }
 
-    /// Get the latest recovery checkpoint
     pub fn get_latest_checkpoint(&self) -> Option<&RecoveryCheckpoint> {
         self.current_checkpoint.as_ref()
     }
 
-    /// Retry operation with exponential backoff
     pub async fn retry_with_backoff<T, F, Fut>(&mut self, operation: F) -> Result<T>
     where
         F: Fn() -> Fut,
@@ -195,7 +179,6 @@ impl ErrorHandler {
                         return Err(e);
                     }
 
-                    // Log retry attempt
                     let context = ErrorContext {
                         error_type: "RetryAttempt".to_string(),
                         severity: ErrorSeverity::Medium,
@@ -213,7 +196,6 @@ impl ErrorHandler {
 
                     self.log_error(&retry_error, context)?;
 
-                    // Wait before retry
                     tokio::time::sleep(delay).await;
                     delay = Duration::from_millis(
                         (delay.as_millis() as f64 * RETRY_BACKOFF_MULTIPLIER) as u64
@@ -225,13 +207,11 @@ impl ErrorHandler {
         unreachable!()
     }
 
-    /// Split chunk size for recovery from memory errors
     pub fn calculate_recovery_chunk_size(&self, original_size: usize) -> usize {
         let new_size = (original_size as f64 * CHUNK_SPLIT_FACTOR) as usize;
         new_size.max(MIN_CHUNK_SIZE_RECORDS)
     }
 
-    /// Check if error is recoverable
     pub fn is_recoverable_error(&self, error: &DeduplicationError) -> bool {
         match error {
             DeduplicationError::MemoryExhaustion { .. } => true,
@@ -244,12 +224,10 @@ impl ErrorHandler {
         }
     }
 
-    /// Get error handling statistics
     pub fn get_stats(&self) -> &ErrorStats {
         &self.stats
     }
 
-    /// Format error statistics for display
     pub fn format_error_stats(&self) -> String {
         format!(
             "Error Handling Statistics:\n\

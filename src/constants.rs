@@ -180,3 +180,19 @@ pub const EFFICIENCY_COMPONENTS_COUNT: f64 = 3.0;             // Number of effic
 pub const TEST_BATCH_SIZE: usize = 3;                         // Test batch size
 pub const TEST_COMPLETENESS_SCORE: f32 = 3.0;                 // Test completeness score
 pub const TEST_FIELD_COUNT: usize = 3;                        // Test field count
+
+// Double buffer constants
+pub const BUFFER_SIZE_RESET_VALUE: usize = 0;                 // Value to reset buffer size
+pub const PERCENTAGE_MULTIPLIER: f64 = 100.0;                 // Multiplier to convert to percentage
+pub const INITIAL_BUFFER_A_ACTIVE: bool = true;               // Initial state: buffer A is active
+
+// Memory manager constants
+pub const INITIAL_BUFFER_POSITION: usize = 0;                 // Initial buffer position
+pub const INITIAL_RECORD_COUNTER: usize = 0;                  // Initial record counter
+pub const INITIAL_ADJUSTMENT_RECORD: usize = 0;               // Initial chunk adjustment record
+pub const LOW_MEMORY_THRESHOLD_FACTOR: f64 = 0.6;             // Factor for low memory threshold (60% of pressure threshold)
+pub const DEFAULT_CHUNK_ADJUSTMENT_FACTOR: f64 = 1.0;         // Default chunk size adjustment factor
+pub const MIN_CHUNK_SIZE_LIMIT: usize = 1;                    // Minimum chunk size limit
+pub const DEFAULT_GPU_MEMORY_FREE: usize = 0;                 // Default GPU memory free bytes
+pub const DEFAULT_GPU_MEMORY_TOTAL: usize = 0;                // Default GPU memory total bytes
+pub const DEFAULT_GPU_PRESSURE: bool = false;                 // Default GPU memory pressure state

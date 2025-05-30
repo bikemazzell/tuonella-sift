@@ -11,67 +11,40 @@ use crate::constants::{
     BYTES_PER_MB
 };
 
-/// Parallel processing system for streaming and concurrent file operations
-///
-/// This implements Section 6: Streaming optimizations and parallel processing
 #[derive(Debug)]
 pub struct ParallelProcessor {
-    /// Number of worker threads
     thread_count: usize,
-    /// Streaming chunk size in bytes
     streaming_chunk_size: usize,
-    /// I/O queue size for parallel operations
     io_queue_size: usize,
-    /// Performance metrics
     metrics: ParallelProcessingMetrics,
 }
 
-/// Work item for parallel processing
 #[derive(Debug, Clone)]
 pub struct WorkItem {
-    /// File path to process
     pub file_path: PathBuf,
-    /// Chunk offset within the file
     pub chunk_offset: usize,
-    /// Chunk size in bytes
     pub chunk_size: usize,
-    /// Priority (higher = more urgent)
     pub priority: u8,
 }
 
-/// Result of processing a work item
 #[derive(Debug)]
 pub struct ProcessingResult {
-    /// Work item that was processed
     pub work_item: WorkItem,
-    /// Records extracted from the chunk
     pub records: Vec<Record>,
-    /// Processing time
     pub processing_time: Duration,
-    /// Any errors encountered
     pub errors: Vec<String>,
 }
 
-/// Performance metrics for parallel processing
 #[derive(Debug, Clone)]
 pub struct ParallelProcessingMetrics {
-    /// Total files processed
     pub total_files_processed: usize,
-    /// Total chunks processed
     pub total_chunks_processed: usize,
-    /// Total records processed
     pub total_records_processed: usize,
-    /// Total processing time across all threads
     pub total_processing_time: Duration,
-    /// Average processing time per chunk
     pub average_chunk_processing_time: Duration,
-    /// Average records per chunk
     pub average_records_per_chunk: f64,
-    /// Thread utilization percentage
     pub thread_utilization: f64,
-    /// I/O queue utilization percentage
     pub io_queue_utilization: f64,
-    /// Parallel efficiency (speedup factor)
     pub parallel_efficiency: f64,
 }
 
@@ -91,14 +64,10 @@ impl Default for ParallelProcessingMetrics {
     }
 }
 
-/// Thread-safe work queue for parallel processing
 #[derive(Debug)]
 struct WorkQueue {
-    /// Queue of work items
     items: Arc<Mutex<VecDeque<WorkItem>>>,
-    /// Maximum queue size
     max_size: usize,
-    /// Queue utilization tracking
     utilization_samples: Arc<Mutex<VecDeque<f64>>>,
 }
 
@@ -117,12 +86,10 @@ impl WorkQueue {
             return Err(anyhow::anyhow!("Work queue is full"));
         }
 
-        // Insert based on priority (higher priority first)
         let insert_pos = queue.iter().position(|existing| existing.priority < item.priority)
             .unwrap_or(queue.len());
         queue.insert(insert_pos, item);
 
-        // Track utilization
         let utilization = queue.len() as f64 / self.max_size as f64;
         let mut samples = self.utilization_samples.lock().unwrap();
         samples.push_back(utilization);
@@ -159,12 +126,10 @@ impl WorkQueue {
 }
 
 impl ParallelProcessor {
-    /// Create a new parallel processor
     pub fn new() -> Self {
         Self::with_thread_count(PARALLEL_FILE_PROCESSING_THREADS)
     }
 
-    /// Create a new parallel processor with custom thread count
     pub fn with_thread_count(thread_count: usize) -> Self {
         Self {
             thread_count: thread_count.max(1).min(32), // Reasonable bounds
@@ -174,7 +139,6 @@ impl ParallelProcessor {
         }
     }
 
-    /// Process multiple files in parallel with streaming
     pub fn process_files_parallel<F>(
         &mut self,
         file_paths: &[PathBuf],
@@ -188,7 +152,6 @@ impl ParallelProcessor {
         let work_queue = Arc::new(WorkQueue::new(self.io_queue_size));
         let results_queue = Arc::new(Mutex::new(VecDeque::new()));
 
-        // Create work items for all files
         for file_path in file_paths {
             let work_items = self.create_work_items_for_file(file_path)?;
             for item in work_items {
@@ -196,7 +159,6 @@ impl ParallelProcessor {
             }
         }
 
-        // Spawn worker threads
         let processor_fn = Arc::new(processor_fn);
         let mut handles = Vec::new();
 
@@ -211,12 +173,10 @@ impl ParallelProcessor {
             handles.push(handle);
         }
 
-        // Collect results and write them
         let mut total_records = 0;
         let mut active_threads = self.thread_count;
 
         while active_threads > 0 || !results_queue.lock().unwrap().is_empty() {
-            // Process available results
             {
                 let mut results = results_queue.lock().unwrap();
                 while let Some(mut result) = results.pop_front() {
@@ -226,21 +186,17 @@ impl ParallelProcessor {
                 }
             }
 
-            // Check if threads are still working
             active_threads = handles.iter().filter(|h| !h.is_finished()).count();
 
-            // Small delay to avoid busy waiting
             thread::sleep(Duration::from_millis(10));
         }
 
-        // Wait for all threads to complete
         for handle in handles {
             if let Err(e) = handle.join() {
                 eprintln!("Worker thread panicked: {:?}", e);
             }
         }
 
-        // Final flush of any remaining results
         {
             let mut results = results_queue.lock().unwrap();
             while let Some(mut result) = results.pop_front() {
@@ -250,7 +206,6 @@ impl ParallelProcessor {
             }
         }
 
-        // Update final metrics
         self.metrics.total_files_processed = file_paths.len();
         self.metrics.total_records_processed = total_records;
         self.metrics.io_queue_utilization = work_queue.get_average_utilization();
@@ -261,7 +216,6 @@ impl ParallelProcessor {
         Ok(())
     }
 
-    /// Create work items for a single file (streaming chunks)
     fn create_work_items_for_file(&self, file_path: &Path) -> Result<Vec<WorkItem>> {
         let file_size = std::fs::metadata(file_path)?.len() as usize;
         let mut work_items = Vec::new();
@@ -273,7 +227,7 @@ impl ParallelProcessor {
                 file_path: file_path.to_path_buf(),
                 chunk_offset: offset,
                 chunk_size,
-                priority: 1, // Default priority
+                priority: 1,
             });
             offset += chunk_size;
         }
@@ -281,7 +235,6 @@ impl ParallelProcessor {
         Ok(work_items)
     }
 
-    /// Worker thread function
     fn worker_thread<F>(
         _thread_id: usize,
         work_queue: Arc<WorkQueue>,
@@ -293,7 +246,6 @@ impl ParallelProcessor {
         while let Some(work_item) = work_queue.pop() {
             let start_time = Instant::now();
 
-            // Read chunk from file
             let chunk_data = match Self::read_file_chunk(&work_item) {
                 Ok(data) => data,
                 Err(e) => {
@@ -308,7 +260,6 @@ impl ParallelProcessor {
                 }
             };
 
-            // Process chunk
             let records = match processor_fn(&chunk_data, &work_item.file_path) {
                 Ok(records) => records,
                 Err(e) => {
@@ -334,7 +285,6 @@ impl ParallelProcessor {
         }
     }
 
-    /// Read a chunk from a file
     fn read_file_chunk(work_item: &WorkItem) -> Result<Vec<u8>> {
         use std::fs::File;
         use std::io::{Read, Seek, SeekFrom};
@@ -349,7 +299,6 @@ impl ParallelProcessor {
         Ok(buffer)
     }
 
-    /// Update metrics from a processing result
     fn update_metrics_from_result(&mut self, result: &ProcessingResult) {
         self.metrics.total_chunks_processed += 1;
         self.metrics.total_processing_time += result.processing_time;
@@ -363,7 +312,6 @@ impl ParallelProcessor {
         }
     }
 
-    /// Calculate parallel efficiency
     fn calculate_parallel_efficiency(&mut self, total_wall_time: Duration) {
         if total_wall_time.as_secs_f64() > 0.0 && self.thread_count > 1 {
             let total_cpu_time = self.metrics.total_processing_time.as_secs_f64();
@@ -375,18 +323,14 @@ impl ParallelProcessor {
         }
     }
 
-    /// Get current metrics
     pub fn get_metrics(&self) -> &ParallelProcessingMetrics {
         &self.metrics
     }
 
-    /// Optimize thread count based on performance
     pub fn optimize_thread_count(&mut self) -> usize {
         if self.metrics.parallel_efficiency < 0.7 && self.thread_count > 1 {
-            // Poor efficiency, reduce threads
             self.thread_count = (self.thread_count - 1).max(1);
         } else if self.metrics.parallel_efficiency > 0.9 && self.thread_count < 16 {
-            // Good efficiency, try more threads
             self.thread_count += 1;
         }
 
@@ -395,7 +339,6 @@ impl ParallelProcessor {
 }
 
 impl ParallelProcessingMetrics {
-    /// Format metrics for display
     pub fn format_summary(&self) -> String {
         format!(
             "Parallel Processing Performance:\n\

@@ -9,8 +9,8 @@ pub struct Record {
     pub normalized_user: String,
     pub normalized_url: String,
     pub completeness_score: f32,
-    pub field_count: usize,  // Track number of fields for completeness comparison
-    pub all_fields: Vec<String>,  // Store all original fields to preserve extra data
+    pub field_count: usize,
+    pub all_fields: Vec<String>,
 }
 
 impl Record {
@@ -24,7 +24,6 @@ impl Record {
         Self::new_from_fields_with_count(all_fields, 0, 1, 2, case_sensitive, field_count)
     }
 
-    /// Create a Record from all CSV fields, preserving extra data
     pub fn new_from_fields(
         all_fields: Vec<String>,
         user_idx: usize,
@@ -66,7 +65,6 @@ impl Record {
         })
     }
 
-    /// Create a Record from all CSV fields with explicit field count
     pub fn new_from_fields_with_count(
         all_fields: Vec<String>,
         user_idx: usize,
@@ -109,9 +107,6 @@ impl Record {
     }
 
     pub fn dedup_key(&self) -> String {
-        // Use composite key: normalized_email|password|normalized_url
-        // Records are duplicates if core fields (email, password, URL) are identical
-        // Field count differences are handled by completeness comparison
         format!("{}|{}|{}",
                 self.normalized_user,
                 self.password,
@@ -127,11 +122,6 @@ impl Record {
     }
 }
 
-/// Calculates a completeness score for a record based on its fields
-///
-/// The score increases with:
-/// - The presence of non-empty fields
-/// - The length of each field
 pub fn calculate_completeness(user: &str, password: &str, url: &str) -> f32 {
     let mut score = 0.0;
 
@@ -150,12 +140,6 @@ pub fn calculate_completeness(user: &str, password: &str, url: &str) -> f32 {
     score
 }
 
-/// Calculates a completeness score for a record based on all its fields
-///
-/// The score increases with:
-/// - The presence of non-empty fields
-/// - The length of each field
-/// - The total number of fields (more fields = more complete)
 pub fn calculate_completeness_with_all_fields(all_fields: &[String]) -> f32 {
     let mut score = 0.0;
 
@@ -174,7 +158,6 @@ mod tests {
 
     #[test]
     fn test_record_creation() {
-        // Valid record
         let record = Record::new(
             "user@example.com".to_string(),
             "password123".to_string(),
@@ -187,7 +170,6 @@ mod tests {
         assert_eq!(record.password, "password123");
         assert_eq!(record.normalized_user, "user@example.com");
 
-        // Invalid record - empty user
         let record = Record::new(
             "".to_string(),
             "password123".to_string(),
@@ -196,7 +178,6 @@ mod tests {
         );
         assert!(record.is_none());
 
-        // Invalid record - empty password
         let record = Record::new(
             "user@example.com".to_string(),
             "".to_string(),
@@ -244,17 +225,12 @@ mod tests {
                 "Record with higher completeness score should be more complete");
         assert_eq!(record2.compare_completeness(&record1), Ordering::Greater);
 
-        // With composite key, these records should have DIFFERENT dedup keys
-        // because they have different passwords
         assert_ne!(record1.dedup_key(), record2.dedup_key(),
                    "Records with different passwords should have different dedup keys");
     }
 
     #[test]
-    fn test_composite_dedup_key() {
-        // Test the new composite key logic - core fields only
-
-        // Example 1: Same email, different URLs
+    fn test_composite_dedup_key() { 
         let record1 = Record {
             user: "user@email.com".to_string(),
             password: "123".to_string(),
@@ -280,7 +256,6 @@ mod tests {
         assert_ne!(record1.dedup_key(), record2.dedup_key(),
                    "Records with same email but different URLs should have different keys");
 
-        // Example 2: Same email, different passwords
         let record3 = Record {
             user: "user@email.com".to_string(),
             password: "444".to_string(),
@@ -295,7 +270,6 @@ mod tests {
         assert_ne!(record1.dedup_key(), record3.dedup_key(),
                    "Records with same email but different passwords should have different keys");
 
-        // Example 3: Same core fields, different field counts - SAME KEY (handled by completeness)
         let record4 = Record {
             user: "user@email.com".to_string(),
             password: "444".to_string(),
@@ -303,7 +277,7 @@ mod tests {
             normalized_user: "user@email.com".to_string(),
             normalized_url: "first.com".to_string(),
             completeness_score: 4.0,
-            field_count: 4,  // Has extra field
+            field_count: 4,
             all_fields: vec!["user@email.com".to_string(), "444".to_string(), "first.com".to_string(), "extra".to_string()],
         };
 
@@ -312,7 +286,6 @@ mod tests {
         assert!(record4.is_more_complete_than(&record3),
                 "Record with more fields should be more complete");
 
-        // Example 4: Exact duplicates should have same key
         let record5 = Record {
             user: "user@email.com".to_string(),
             password: "444".to_string(),
