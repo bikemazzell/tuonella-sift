@@ -78,6 +78,10 @@ path = "examples/test_gpu_processing.rs"
 name = "complete_algorithm_demo"
 path = "examples/complete_algorithm_demo.rs"
 
+[[example]]
+name = "test_composite_deduplication"
+path = "examples/test_composite_deduplication.rs"
+
 [lib]
 name = "tuonella_sift"
 path = "src/lib.rs"

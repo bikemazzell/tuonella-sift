@@ -188,6 +188,8 @@ pub struct CudaRecord {
     pub url: String,
     pub normalized_user: String,
     pub normalized_url: String,
+    pub field_count: usize,  // Track original field count for completeness comparison
+    pub all_fields: Vec<String>,  // Store all original fields to preserve extra data
 }
 
 #[cfg(feature = "cuda")]

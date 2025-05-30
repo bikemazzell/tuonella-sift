@@ -27,27 +27,27 @@ pub fn normalize_url(url: &str) -> String {
     }
 
     let mut normalized = url.to_lowercase();
-    
+
     // Handle Android URLs specially
     if normalized.starts_with("android://") {
         // Extract domain after @ symbol for Android URLs
         if let Some(at_pos) = normalized.rfind('@') {
             normalized = normalized[at_pos + 1..].to_string();
-            
+
             // Remove trailing slash and anything after it
             if let Some(slash_pos) = normalized.find('/') {
                 normalized = normalized[..slash_pos].to_string();
             }
-            
+
             // Remove trailing slash if still present
             if normalized.ends_with('/') {
                 normalized.pop();
             }
-            
+
             return normalized;
         }
     }
-    
+
     // Remove all protocol prefixes (https://, http://, ftp://, mailto://, etc.)
     for prefix in &["https://", "http://", "android://", "ftp://", "mailto://"] {
         if normalized.starts_with(prefix) {
@@ -55,38 +55,38 @@ pub fn normalize_url(url: &str) -> String {
             break;
         }
     }
-    
+
     // Remove www. prefix
     if normalized.starts_with("www.") {
         normalized = normalized[4..].to_string();
     }
-    
+
     // Extract domain (and port if present) before any path, query parameters, or fragments
     if let Some(slash_pos) = normalized.find('/') {
         normalized = normalized[..slash_pos].to_string();
     }
-    
+
     if let Some(query_pos) = normalized.find('?') {
         normalized = normalized[..query_pos].to_string();
     }
-    
+
     if let Some(fragment_pos) = normalized.find('#') {
         normalized = normalized[..fragment_pos].to_string();
     }
-    
+
     // Remove trailing slash if present
     if normalized.ends_with('/') {
         normalized.pop();
     }
-    
+
     normalized
 }
 
 /// Parses a CSV line into fields
 ///
 /// Handles:
-/// - Quoted fields
-/// - Escaped quotes
+/// - Quoted fields (removes outer quotes)
+/// - Escaped quotes (converts "" to ")
 /// - Different delimiters (comma, semicolon, tab, pipe)
 pub fn parse_csv_line(line: &str) -> Vec<String> {
     let mut fields = Vec::new();
@@ -98,10 +98,11 @@ pub fn parse_csv_line(line: &str) -> Vec<String> {
         match ch {
             '"' => {
                 if in_quotes && chars.peek() == Some(&'"') {
-                    // Escaped quote
+                    // Escaped quote - add single quote to field
                     current_field.push('"');
                     chars.next();
                 } else {
+                    // Toggle quote state but don't add quote to field
                     in_quotes = !in_quotes;
                 }
             }
@@ -216,17 +217,17 @@ pub fn is_valid_line(line: &str) -> bool {
     if !line.chars().any(|c| c.is_ascii_graphic()) {
         return false;
     }
-    
+
     // Skip if no delimiter
     if !DELIMITER_REGEX.is_match(line) {
         return false;
     }
-    
+
     // Skip if no email address
     if !EMAIL_REGEX.is_match(line) {
         return false;
     }
-    
+
     true
 }
 
@@ -292,8 +293,8 @@ mod tests {
         let line = "\"user,with,commas\"@example.com,\"pass\"\"word\",http://site.com";
         let fields = parse_csv_line(line);
         assert_eq!(fields.len(), 3);
-        assert_eq!(fields[0], "\"user,with,commas\"@example.com");
-        assert_eq!(fields[1], "\"pass\"\"word\"");
+        assert_eq!(fields[0], "user,with,commas@example.com");
+        assert_eq!(fields[1], "pass\"word");
         assert_eq!(fields[2], "http://site.com");
     }
 
@@ -326,11 +327,11 @@ mod tests {
     fn test_line_validation() {
         // Valid line
         assert!(is_valid_line("user@example.com,password123,https://example.com"));
-        
+
         // Invalid lines
         assert!(!is_valid_line(""));  // Empty
         assert!(!is_valid_line("   "));  // Whitespace only
         assert!(!is_valid_line("not an email,password,site.com"));  // No email
         assert!(!is_valid_line("user@example.com password site.com"));  // No delimiter
     }
-} 
+}

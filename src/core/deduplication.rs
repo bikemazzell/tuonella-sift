@@ -384,8 +384,8 @@ pub fn deduplicate_records(
     let output_file = File::create(output_path)?;
     let mut writer = BufWriter::new(output_file);
 
-    // Write CSV header
-    writeln!(writer, "username,password,normalized_url")?;
+    // Write CSV header - we'll determine the header from the first record
+    let mut header_written = false;
 
     if verbose {
         println!("Memory limit: {} records", config.processing.max_memory_records);
@@ -447,9 +447,42 @@ pub fn deduplicate_records(
     }
 
     // Write all unique records to output
-    for record in dedup_map.values() {
-        // Use normalized URL for output, not the original URL
-        writeln!(writer, "{},{},{}", record.user, record.password, record.normalized_url)?;
+    for (i, record) in dedup_map.values().enumerate() {
+        // Write header based on first record
+        if i == 0 && !header_written {
+            // Create header based on the number of fields in the first record
+            let mut header_fields = vec!["username".to_string(), "password".to_string()];
+
+            // Add additional field names for extra fields beyond the core 3
+            if record.all_fields.len() > 3 {
+                for j in 3..record.all_fields.len() {
+                    header_fields.push(format!("field_{}", j + 1));
+                }
+            } else {
+                header_fields.push("url".to_string());
+            }
+
+            writeln!(writer, "{}", header_fields.join(","))?;
+            header_written = true;
+        }
+
+        // Write record with all fields preserved, but use normalized URL for the URL field
+        let mut output_fields = vec![record.user.clone(), record.password.clone()];
+
+        if record.all_fields.len() > 2 {
+            // Replace the URL field (index 2) with normalized URL, keep extra fields as-is
+            output_fields.push(record.normalized_url.clone());
+
+            // Add any extra fields beyond the core 3
+            for j in 3..record.all_fields.len() {
+                output_fields.push(record.all_fields[j].clone());
+            }
+        } else {
+            // Fallback: just add normalized URL
+            output_fields.push(record.normalized_url.clone());
+        }
+
+        writeln!(writer, "{}", output_fields.join(","))?;
     }
 
     writer.flush()?;
@@ -485,8 +518,8 @@ pub fn process_temp_files_with_gpu(
     let output_file = File::create(output_path)?;
     let mut writer = BufWriter::new(output_file);
 
-    // Write CSV header
-    writeln!(writer, "username,password,normalized_url")?;
+    // Write CSV header - we'll determine the header from the first record
+    let mut header_written = false;
 
     if verbose {
         println!("🚀 Processing {} temporary files with GPU acceleration...", temp_files.len());
@@ -519,8 +552,42 @@ pub fn process_temp_files_with_gpu(
     }
 
     // Write all unique records to output
-    for record in dedup_map.values() {
-        writeln!(writer, "{},{},{}", record.user, record.password, record.normalized_url)?;
+    for (i, record) in dedup_map.values().enumerate() {
+        // Write header based on first record
+        if i == 0 && !header_written {
+            // Create header based on the number of fields in the first record
+            let mut header_fields = vec!["username".to_string(), "password".to_string()];
+
+            // Add additional field names for extra fields beyond the core 3
+            if record.all_fields.len() > 3 {
+                for j in 3..record.all_fields.len() {
+                    header_fields.push(format!("field_{}", j + 1));
+                }
+            } else {
+                header_fields.push("url".to_string());
+            }
+
+            writeln!(writer, "{}", header_fields.join(","))?;
+            header_written = true;
+        }
+
+        // Write record with all fields preserved, but use normalized URL for the URL field
+        let mut output_fields = vec![record.user.clone(), record.password.clone()];
+
+        if record.all_fields.len() > 2 {
+            // Replace the URL field (index 2) with normalized URL, keep extra fields as-is
+            output_fields.push(record.normalized_url.clone());
+
+            // Add any extra fields beyond the core 3
+            for j in 3..record.all_fields.len() {
+                output_fields.push(record.all_fields[j].clone());
+            }
+        } else {
+            // Fallback: just add normalized URL
+            output_fields.push(record.normalized_url.clone());
+        }
+
+        writeln!(writer, "{}", output_fields.join(","))?;
     }
 
     writer.flush()?;
@@ -639,6 +706,8 @@ fn parse_line_to_cuda_record(line: &str, _config: &DeduplicationConfig) -> Optio
         url: fields[url_idx].clone(),
         normalized_user: String::new(), // Will be filled by GPU
         normalized_url: String::new(),  // Will be filled by GPU
+        field_count: fields.len(),      // Track original field count from CSV
+        all_fields: fields.clone(),     // Store all original fields
     })
 }
 
@@ -673,16 +742,35 @@ fn process_cuda_records_chunk(
             normalized_user: cuda_record.normalized_user,
             normalized_url: cuda_record.normalized_url,
             completeness_score,
+            field_count: cuda_record.field_count,  // Include field count for completeness comparison
+            all_fields: cuda_record.all_fields,    // Preserve all original fields
         };
 
         let key = record.dedup_key();
+        if verbose && record.user.contains("user@email.com") && record.password == "444" {
+            println!("    🔍 Debug: Processing record: {},{},{} ({}f) -> key: {}",
+                    record.user, record.password, record.url, record.field_count, key);
+        }
         match dedup_map.get(&key) {
             Some(existing) => {
+                if verbose && record.user.contains("user@email.com") && record.password == "444" {
+                    println!("      🔄 Found existing record with same key, comparing completeness...");
+                }
                 if record.is_more_complete_than(existing) {
+                    if verbose && record.user.contains("user@email.com") && record.password == "444" {
+                        println!("      ✅ New record is more complete, replacing");
+                    }
                     dedup_map.insert(key, record);
+                } else {
+                    if verbose && record.user.contains("user@email.com") && record.password == "444" {
+                        println!("      ❌ Existing record is more complete, keeping existing");
+                    }
                 }
             }
             None => {
+                if verbose && record.user.contains("user@email.com") && record.password == "444" {
+                    println!("      ✅ New unique record, inserting");
+                }
                 dedup_map.insert(key, record);
             }
         }
@@ -696,6 +784,7 @@ fn process_cuda_records_chunk(
 fn calculate_completeness_score(record: &CudaRecord) -> f32 {
     let mut score = 0.0;
 
+    // Score for core fields
     if !record.user.is_empty() {
         score += 1.0 + (record.user.len() as f32 * 0.01);
     }
@@ -704,6 +793,15 @@ fn calculate_completeness_score(record: &CudaRecord) -> f32 {
     }
     if !record.url.is_empty() {
         score += 1.0 + (record.url.len() as f32 * 0.01);
+    }
+
+    // Add bonus for extra fields beyond the core 3
+    if record.all_fields.len() > 3 {
+        for field in record.all_fields.iter().skip(3) {
+            if !field.trim().is_empty() {
+                score += 1.0 + (field.len() as f32 * 0.01);
+            }
+        }
     }
 
     score
@@ -969,10 +1067,11 @@ fn parse_line_to_record(line: &str, config: &DeduplicationConfig) -> Option<Reco
         return None; // Skip if detected user field is not an email
     }
 
-    Record::new(
-        fields[user_idx].clone(),
-        fields[password_idx].clone(),
-        fields[url_idx].clone(),
+    Record::new_from_fields(
+        fields.clone(),  // Pass all fields to preserve extra data
+        user_idx,
+        password_idx,
+        url_idx,
         config.case_sensitive_usernames,
     )
 }
@@ -1003,6 +1102,8 @@ fn process_record_batch(
                     url: r.url.clone(),
                     normalized_user: String::new(),
                     normalized_url: String::new(),
+                    field_count: r.field_count,  // Include field count
+                    all_fields: r.all_fields.clone(),  // Include all fields
                 }
             })
             .collect();
@@ -1070,7 +1171,23 @@ fn flush_records_to_disk(
 ) -> Result<()> {
     // Write all current records to output and clear the map to free memory
     for record in dedup_map.values() {
-        writeln!(writer, "{},{},{}", record.user, record.password, record.normalized_url)?;
+        // Write record with all fields preserved, but use normalized URL for the URL field
+        let mut output_fields = vec![record.user.clone(), record.password.clone()];
+
+        if record.all_fields.len() > 2 {
+            // Replace the URL field (index 2) with normalized URL, keep extra fields as-is
+            output_fields.push(record.normalized_url.clone());
+
+            // Add any extra fields beyond the core 3
+            for j in 3..record.all_fields.len() {
+                output_fields.push(record.all_fields[j].clone());
+            }
+        } else {
+            // Fallback: just add normalized URL
+            output_fields.push(record.normalized_url.clone());
+        }
+
+        writeln!(writer, "{}", output_fields.join(","))?;
     }
     writer.flush()?;
     dedup_map.clear();
@@ -1147,9 +1264,9 @@ mod tests {
                 config.case_sensitive_usernames,
             ).unwrap(),
             Record::new(
-                "user1@example.com".to_string(), // Same user (duplicate)
-                "betterpass".to_string(),        // Better password (longer = higher score)
-                "http://example.com/login".to_string(),
+                "user1@example.com".to_string(), // Same user, same password, same URL (exact duplicate)
+                "pass1".to_string(),             // Same password
+                "https://example.com".to_string(), // Same URL
                 config.case_sensitive_usernames,
             ).unwrap(),
             Record::new(
@@ -1173,13 +1290,13 @@ mod tests {
         )?;
 
         // Check results
-        assert_eq!(dedup_map.len(), 2); // Should be 2 unique users
-        assert!(dedup_map.contains_key("user1@example.com"));
-        assert!(dedup_map.contains_key("user2@example.com"));
+        assert_eq!(dedup_map.len(), 2); // Should be 2 unique records (duplicate removed)
+        assert!(dedup_map.contains_key("user1@example.com|pass1|example.com"));
+        assert!(dedup_map.contains_key("user2@example.com|pass2|another.com"));
 
-        // Check that the better record was kept for user1
-        let user1_record = dedup_map.get("user1@example.com").unwrap();
-        assert_eq!(user1_record.password, "betterpass");
+        // Check that one of the duplicate records was kept for user1
+        let user1_record = dedup_map.get("user1@example.com|pass1|example.com").unwrap();
+        assert_eq!(user1_record.password, "pass1");
 
         Ok(())
     }
@@ -1227,6 +1344,8 @@ mod tests {
             url: "https://example.com".to_string(),
             normalized_user: "user@example.com".to_string(),
             normalized_url: "example.com".to_string(),
+            field_count: 3,
+            all_fields: vec!["user@example.com".to_string(), "password123".to_string(), "https://example.com".to_string()],
         };
 
         let score = calculate_completeness_score(&record);
@@ -1238,6 +1357,8 @@ mod tests {
             url: "".to_string(),
             normalized_user: "".to_string(),
             normalized_url: "".to_string(),
+            field_count: 3,
+            all_fields: vec!["".to_string(), "".to_string(), "".to_string()],
         };
 
         let empty_score = calculate_completeness_score(&empty_record);
@@ -1260,7 +1381,7 @@ mod tests {
         ])?;
 
         create_test_csv(&file2_path, &[
-            "user1@example.com,betterpass,http://example.com/login", // Duplicate with better password
+            "user1@example.com,pass1,https://example.com", // Exact duplicate - should be removed
             "user3@example.com,pass3,https://third.com", // New user
         ])?;
 
@@ -1314,7 +1435,7 @@ mod tests {
 
         assert_eq!(lines.len(), 4); // Header + 3 unique records
         assert!(lines[0].contains("username") && lines[0].contains("password")); // Header
-        assert!(lines.iter().any(|l| l.contains("user1@example.com") && l.contains("betterpass")));
+        assert!(lines.iter().any(|l| l.contains("user1@example.com") && l.contains("pass1")));
         assert!(lines.iter().any(|l| l.contains("user2@example.com")));
         assert!(lines.iter().any(|l| l.contains("user3@example.com")));
 
