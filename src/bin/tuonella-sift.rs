@@ -37,7 +37,7 @@ async fn main() -> Result<()> {
 
     // Load configuration
     let config_path = &args.config;
-    println!("📚 Loading magical configuration from {}", config_path.display());
+    println!("📚 Loading configuration from {}", config_path.display());
     let config = Config::load(config_path).await?;
 
     // Setup directories
@@ -94,7 +94,7 @@ async fn main() -> Result<()> {
     println!("📊 Found and processed {} CSV files. Let the judgment begin!", temp_files.len());
 
     // Deduplicate records
-    println!("\n⚔️ Commencing the great deduplication battle...");
+    println!("\n⚔️ Commencing the great deduplication cull...");
     let stats = deduplicate_records(
         &temp_files,
         &output_path,
@@ -136,18 +136,18 @@ async fn main() -> Result<()> {
     
     // Add a fun comment based on processing speed
     let fun_comment = if processing_rate > 100000.0 {
-        "🚀 That's faster than Hermes on caffeine!"
+        "🚀 By Odin's Eye! That is fast!"
     } else if processing_rate > 50000.0 {
-        "⚡ Lightning fast! Thor would be impressed."
+        "⚡ Lightning fast! Minor Gods would be impressed."
     } else if processing_rate > 10000.0 {
-        "🏃 Pretty speedy! Usain Bolt approves."
+        "🏃 Pretty speedy! Worthy of a hero."
     } else if processing_rate > 1000.0 {
         "🐎 Galloping along nicely."
     } else {
         "🐢 Slow and steady wins the race... eventually."
     };
     
-    println!("🔄 Processing rate: {:.2} records/second. {}", processing_rate, fun_comment);
+    println!("🔄 Processing rate: {:.2} records/sec. {}", processing_rate, fun_comment);
     println!("📜 The book of the worthy has been written to: {}", output_path.display());
     
     // Add a fun farewell message

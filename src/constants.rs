@@ -43,3 +43,7 @@ pub const ALGORITHM_RAM_ALLOCATION_PERCENT: f64 = 0.90;  // 90% of available RAM
 pub const ALGORITHM_GPU_ALLOCATION_PERCENT: f64 = 0.90;  // 90% of available GPU memory
 pub const MEMORY_SAFETY_MARGIN: f64 = 0.95;  // Additional safety margin
 pub const DYNAMIC_MEMORY_CHECK_INTERVAL_RECORDS: usize = 1000;  // Check memory every N records
+
+// Safety limits to prevent OOM during resource querying
+pub const MAX_RAM_BUFFER_SIZE_GB: f64 = 8.0;  // Maximum 8GB RAM buffer
+pub const MAX_GPU_BUFFER_SIZE_GB: f64 = 4.0;  // Maximum 4GB GPU buffer

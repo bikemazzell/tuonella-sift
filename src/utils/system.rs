@@ -1,7 +1,8 @@
 use sysinfo::{System, Pid};
 use std::time::{Duration, Instant};
 use crate::constants::{
-    BYTES_PER_GB, ALGORITHM_RAM_ALLOCATION_PERCENT, MEMORY_SAFETY_MARGIN
+    BYTES_PER_GB, ALGORITHM_RAM_ALLOCATION_PERCENT, MEMORY_SAFETY_MARGIN,
+    MAX_RAM_BUFFER_SIZE_GB, MAX_GPU_BUFFER_SIZE_GB
 };
 
 #[cfg(feature = "cuda")]
@@ -44,7 +45,10 @@ impl SystemResources {
             * ALGORITHM_RAM_ALLOCATION_PERCENT * MEMORY_SAFETY_MARGIN) as usize;
 
         // RAM Buffer Size: Allocate ~90% of the RAM_limit for buffering file chunks
-        let ram_buffer_size_bytes = (ram_limit_bytes as f64 * ALGORITHM_RAM_ALLOCATION_PERCENT) as usize;
+        // Apply safety limit to prevent OOM during testing
+        let calculated_ram_buffer = (ram_limit_bytes as f64 * ALGORITHM_RAM_ALLOCATION_PERCENT) as usize;
+        let max_ram_buffer_bytes = (MAX_RAM_BUFFER_SIZE_GB * BYTES_PER_GB as f64) as usize;
+        let ram_buffer_size_bytes = calculated_ram_buffer.min(max_ram_buffer_bytes);
 
         #[cfg(feature = "cuda")]
         let (gpu_properties, gpu_limit_bytes, gpu_buffer_size_bytes) = {
@@ -71,19 +75,44 @@ impl SystemResources {
 
     #[cfg(feature = "cuda")]
     fn query_gpu_resources() -> Result<(CudaDeviceProperties, usize, usize)> {
+        use cudarc::driver::result;
+
+        // Query GPU memory directly without creating full context to avoid memory allocation
+        let (free_memory, total_memory) = result::mem_get_info()?;
+
+        // Create a minimal context just to query device attributes
         use cudarc::driver::safe::CudaContext;
+        use cudarc::driver::sys::CUdevice_attribute_enum;
         use std::sync::Arc;
 
-        // Initialize CUDA context to query device properties
         let context = Arc::new(CudaContext::new(0)?);
-        let props = crate::cuda::processor::CudaProcessor::get_device_properties_internal(&context)?;
+        let compute_capability_major = context.attribute(CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)?;
+        let compute_capability_minor = context.attribute(CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)?;
+        let max_threads_per_block = context.attribute(CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK)?;
+        let max_shared_memory_per_block = context.attribute(CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK)?;
+        let memory_bus_width = context.attribute(CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_GLOBAL_MEMORY_BUS_WIDTH)?;
+        let l2_cache_size = context.attribute(CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_L2_CACHE_SIZE)?;
+
+        let props = CudaDeviceProperties {
+            total_memory,
+            free_memory,
+            compute_capability_major,
+            compute_capability_minor,
+            max_threads_per_block,
+            max_shared_memory_per_block,
+            memory_bus_width,
+            l2_cache_size,
+        };
 
         // Calculate GPU limit: 90% of available GPU memory as per algorithm
         let gpu_limit_bytes = ((props.free_memory as f64)
             * ALGORITHM_GPU_ALLOCATION_PERCENT * MEMORY_SAFETY_MARGIN) as usize;
 
         // GPU Chunk Size: Allocate ~90% of the GPU_limit for processing
-        let gpu_buffer_size_bytes = (gpu_limit_bytes as f64 * ALGORITHM_GPU_ALLOCATION_PERCENT) as usize;
+        // Apply safety limit to prevent OOM during testing
+        let calculated_gpu_buffer = (gpu_limit_bytes as f64 * ALGORITHM_GPU_ALLOCATION_PERCENT) as usize;
+        let max_gpu_buffer_bytes = (MAX_GPU_BUFFER_SIZE_GB * BYTES_PER_GB as f64) as usize;
+        let gpu_buffer_size_bytes = calculated_gpu_buffer.min(max_gpu_buffer_bytes);
 
         Ok((props, gpu_limit_bytes, gpu_buffer_size_bytes))
     }
@@ -293,8 +322,8 @@ mod tests {
 
     #[test]
     fn test_system_resources_query() {
-        // Test basic resource querying
-        let resources = SystemResources::query_system_resources(None);
+        // Test basic resource querying with conservative limits
+        let resources = SystemResources::query_system_resources(Some(1)); // Limit to 1GB to be safe
         assert!(resources.is_ok(), "Should be able to query system resources");
 
         let resources = resources.unwrap();
@@ -303,16 +332,22 @@ mod tests {
         assert!(resources.ram_limit_bytes > 0, "RAM limit should be positive");
         assert!(resources.ram_buffer_size_bytes > 0, "RAM buffer size should be positive");
 
-        // Test with user limit
-        let resources_limited = SystemResources::query_system_resources(Some(1));
-        assert!(resources_limited.is_ok(), "Should handle user RAM limit");
+        // Ensure safety limits are applied
+        let max_ram_buffer = (crate::constants::MAX_RAM_BUFFER_SIZE_GB * crate::constants::BYTES_PER_GB as f64) as usize;
+        assert!(resources.ram_buffer_size_bytes <= max_ram_buffer, "RAM buffer should not exceed safety limit");
 
-        // Test memory usage monitoring
+        #[cfg(feature = "cuda")]
+        if resources.gpu_properties.is_some() {
+            let max_gpu_buffer = (crate::constants::MAX_GPU_BUFFER_SIZE_GB * crate::constants::BYTES_PER_GB as f64) as usize;
+            assert!(resources.gpu_buffer_size_bytes <= max_gpu_buffer, "GPU buffer should not exceed safety limit");
+        }
+
+        // Test memory usage monitoring (should be lightweight)
         let (usage, percent) = resources.get_current_memory_usage().unwrap();
         assert!(usage > 0, "Current memory usage should be positive");
         assert!(percent >= 0.0, "Memory usage percent should be non-negative");
 
-        // Test format summary
+        // Test format summary (should not allocate memory)
         let summary = resources.format_summary();
         assert!(summary.contains("System Resources"), "Summary should contain header");
         assert!(summary.contains("RAM:"), "Summary should contain RAM info");

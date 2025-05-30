@@ -1,3 +1,4 @@
 pub mod record;
 pub mod deduplication;
-pub mod validation; 
+pub mod memory_manager;
+pub mod validation;
