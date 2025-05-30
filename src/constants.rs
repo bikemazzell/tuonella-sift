@@ -48,6 +48,28 @@ pub const DYNAMIC_MEMORY_CHECK_INTERVAL_RECORDS: usize = 1000;  // Check memory 
 pub const MAX_RAM_BUFFER_SIZE_GB: f64 = 8.0;  // Maximum 8GB RAM buffer
 pub const MAX_GPU_BUFFER_SIZE_GB: f64 = 4.0;  // Maximum 4GB GPU buffer
 
+// Section 6: Performance Optimization Constants
+// Double buffering for overlapping I/O and GPU processing
+pub const DOUBLE_BUFFER_SIZE_RATIO: f64 = 0.5;  // Each buffer gets 50% of available memory
+pub const BUFFER_SWAP_THRESHOLD_PERCENT: f64 = 80.0;  // Swap when buffer is 80% full
+pub const ASYNC_IO_TIMEOUT_SECONDS: u64 = 30;  // Timeout for async I/O operations
+
+// Performance monitoring and adaptive optimization
+pub const PERFORMANCE_SAMPLE_WINDOW_RECORDS: usize = 10000;  // Sample window for performance metrics
+pub const ADAPTIVE_OPTIMIZATION_INTERVAL_RECORDS: usize = 50000;  // Adjust parameters every N records
+pub const MIN_THROUGHPUT_RECORDS_PER_SECOND: f64 = 1000.0;  // Minimum acceptable throughput
+pub const THROUGHPUT_IMPROVEMENT_THRESHOLD_PERCENT: f64 = 10.0;  // Minimum improvement to keep changes
+
+// Batch processing optimizations
+pub const WRITE_BATCH_SIZE_RECORDS: usize = 5000;  // Batch multiple records for single write
+pub const WRITE_BUFFER_SIZE_MB: usize = 64;  // Write buffer size in MB
+pub const MAX_WRITE_BATCH_SIZE_RECORDS: usize = 50000;  // Maximum write batch size
+
+// Streaming and parallel processing
+pub const PARALLEL_FILE_PROCESSING_THREADS: usize = 4;  // Number of parallel file processing threads
+pub const STREAMING_CHUNK_SIZE_MB: usize = 128;  // Streaming chunk size for large files
+pub const PARALLEL_IO_QUEUE_SIZE: usize = 16;  // Queue size for parallel I/O operations
+
 // Dynamic chunk size adjustment constants (Section 4: Memory Management)
 pub const MEMORY_PRESSURE_THRESHOLD_PERCENT: f64 = 80.0;  // Consider 80% as pressure threshold
 pub const MEMORY_CRITICAL_THRESHOLD_PERCENT: f64 = 90.0;  // Consider 90% as critical threshold
