@@ -709,6 +709,234 @@ fn calculate_completeness_score(record: &CudaRecord) -> f32 {
     score
 }
 
+/// Complete Algorithm Pipeline (Sections 2.1, 2.2, 2.3, 3)
+///
+/// This function implements the complete algorithm from docs/algorithm.md:
+/// 1. Stream files and pre-validate lines (Section 2.1)
+/// 2. Transfer validated data to GPU (Section 2.2)
+/// 3. Deduplication and hash map storage (Section 2.3)
+/// 4. Final output (Section 3)
+#[cfg(feature = "cuda")]
+pub fn process_with_complete_algorithm(
+    input_dir: &Path,
+    output_path: &Path,
+    config: &Config,
+    memory_manager: &mut MemoryManager,
+    cuda_processor: &CudaProcessor,
+    verbose: bool,
+) -> Result<ProcessingStats> {
+    if verbose {
+        println!("🚀 Starting Complete Algorithm Pipeline");
+        println!("📂 Input directory: {}", input_dir.display());
+        println!("📄 Output file: {}", output_path.display());
+    }
+
+    // Section 2.1: Stream Files and Pre-Validate Lines
+    if verbose {
+        println!("\n📋 Section 2.1: Stream Files and Pre-Validate Lines");
+    }
+    let temp_files = process_csv_files_with_algorithm_streaming(
+        input_dir,
+        config,
+        memory_manager,
+        verbose
+    )?;
+
+    if verbose {
+        println!("✅ Section 2.1 Complete: Generated {} temporary files", temp_files.len());
+    }
+
+    // Sections 2.2 & 2.3: Transfer to GPU and Deduplication
+    if verbose {
+        println!("\n📋 Section 2.2 & 2.3: GPU Processing and Deduplication");
+    }
+
+    // Create a temporary file for intermediate results (Section 3 requirement)
+    let temp_output_dir = Path::new(&config.io.temp_directory);
+    let temp_output_file = temp_output_dir.join("final_deduplicated.csv");
+
+    let stats = process_temp_files_with_gpu(
+        &temp_files,
+        &temp_output_file,
+        config,
+        memory_manager,
+        cuda_processor,
+        verbose
+    )?;
+
+    if verbose {
+        println!("✅ Section 2.2 & 2.3 Complete: {} unique records processed", stats.unique_records);
+    }
+
+    // Section 3: Final Output
+    if verbose {
+        println!("\n📋 Section 3: Final Output");
+    }
+
+    finalize_output(&temp_output_file, output_path, verbose)?;
+
+    if verbose {
+        println!("✅ Section 3 Complete: Final output written to {}", output_path.display());
+        println!("\n🎉 Complete Algorithm Pipeline Finished Successfully!");
+        println!("📊 Final Statistics:");
+        println!("  📁 Files processed: {}", stats.files_processed);
+        println!("  📊 Total records: {}", stats.total_records);
+        println!("  ✨ Unique records: {}", stats.unique_records);
+        println!("  🗑️ Duplicates removed: {}", stats.duplicates_removed);
+        println!("  ❌ Invalid records: {}", stats.invalid_records);
+        println!("  ⏱️ Processing time: {:.2}s", stats.processing_time_seconds);
+    }
+
+    // Cleanup temporary files
+    cleanup_temporary_files(&temp_files, &temp_output_file, verbose)?;
+
+    Ok(stats)
+}
+
+/// CPU-only fallback for the complete algorithm pipeline
+///
+/// This function provides the same interface but uses CPU-only processing
+/// when CUDA is not available
+pub fn process_with_complete_algorithm_cpu_fallback(
+    input_dir: &Path,
+    output_path: &Path,
+    config: &Config,
+    memory_manager: &mut MemoryManager,
+    verbose: bool,
+) -> Result<ProcessingStats> {
+    if verbose {
+        println!("🔄 Starting Complete Algorithm Pipeline (CPU Fallback)");
+        println!("📂 Input directory: {}", input_dir.display());
+        println!("📄 Output file: {}", output_path.display());
+    }
+
+    // Section 2.1: Stream Files and Pre-Validate Lines
+    if verbose {
+        println!("\n📋 Section 2.1: Stream Files and Pre-Validate Lines");
+    }
+    let temp_files = process_csv_files_with_algorithm_streaming(
+        input_dir,
+        config,
+        memory_manager,
+        verbose
+    )?;
+
+    if verbose {
+        println!("✅ Section 2.1 Complete: Generated {} temporary files", temp_files.len());
+    }
+
+    // Sections 2.2 & 2.3: CPU Processing and Deduplication
+    if verbose {
+        println!("\n📋 Section 2.2 & 2.3: CPU Processing and Deduplication");
+    }
+
+    // Create a temporary file for intermediate results
+    let temp_output_dir = Path::new(&config.io.temp_directory);
+    let temp_output_file = temp_output_dir.join("final_deduplicated.csv");
+
+    let stats = deduplicate_records(
+        &temp_files,
+        &temp_output_file,
+        config,
+        #[cfg(feature = "cuda")]
+        None, // No CUDA processor for CPU fallback
+        verbose
+    )?;
+
+    if verbose {
+        println!("✅ Section 2.2 & 2.3 Complete: {} unique records processed", stats.unique_records);
+    }
+
+    // Section 3: Final Output
+    if verbose {
+        println!("\n📋 Section 3: Final Output");
+    }
+
+    finalize_output(&temp_output_file, output_path, verbose)?;
+
+    if verbose {
+        println!("✅ Section 3 Complete: Final output written to {}", output_path.display());
+        println!("\n🎉 Complete Algorithm Pipeline Finished Successfully!");
+    }
+
+    // Cleanup temporary files
+    cleanup_temporary_files(&temp_files, &temp_output_file, verbose)?;
+
+    Ok(stats)
+}
+
+/// Section 3: Final Output - Write final temporary file to user-specified output location
+///
+/// This function implements Section 3 of the algorithm:
+/// 1. Takes the final temporary file with deduplicated records
+/// 2. Writes it to the user-specified output location
+/// 3. Ensures proper formatting and error handling
+fn finalize_output(temp_output_file: &Path, final_output_path: &Path, verbose: bool) -> Result<()> {
+    if verbose {
+        println!("  📄 Moving final results from {} to {}",
+                temp_output_file.display(), final_output_path.display());
+    }
+
+    // Ensure the output directory exists
+    if let Some(parent) = final_output_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    // Copy the temporary file to the final location
+    // Using copy instead of move to preserve the temporary file for potential cleanup verification
+    fs::copy(temp_output_file, final_output_path)?;
+
+    if verbose {
+        // Verify the output file
+        let metadata = fs::metadata(final_output_path)?;
+        println!("  ✅ Final output file created: {} bytes", metadata.len());
+
+        // Show first few lines for verification
+        let content = fs::read_to_string(final_output_path)?;
+        let lines: Vec<&str> = content.lines().take(5).collect();
+        println!("  📝 First {} lines of output:", lines.len());
+        for (i, line) in lines.iter().enumerate() {
+            println!("    {}: {}", i + 1, line);
+        }
+    }
+
+    Ok(())
+}
+
+/// Cleanup temporary files after processing
+///
+/// This function removes temporary files created during processing
+/// to free up disk space and maintain cleanliness
+fn cleanup_temporary_files(temp_files: &[PathBuf], temp_output_file: &Path, verbose: bool) -> Result<()> {
+    if verbose {
+        println!("  🧹 Cleaning up {} temporary files...", temp_files.len() + 1);
+    }
+
+    // Remove temporary CSV files from Section 2.1
+    for temp_file in temp_files {
+        if temp_file.exists() {
+            fs::remove_file(temp_file)?;
+            if verbose {
+                println!("    🗑️ Removed: {}", temp_file.display());
+            }
+        }
+    }
+
+    // Remove the final temporary file
+    if temp_output_file.exists() {
+        fs::remove_file(temp_output_file)?;
+        if verbose {
+            println!("    🗑️ Removed: {}", temp_output_file.display());
+        }
+    }
+
+    if verbose {
+        println!("  ✅ Cleanup complete");
+    }
+
+    Ok(())
+}
+
 /// Parse a CSV line into a Record
 ///
 /// This function:

@@ -74,6 +74,10 @@ path = "src/bin/tuonella-sift.rs"
 name = "test_gpu_processing"
 path = "examples/test_gpu_processing.rs"
 
+[[example]]
+name = "complete_algorithm_demo"
+path = "examples/complete_algorithm_demo.rs"
+
 [lib]
 name = "tuonella_sift"
 path = "src/lib.rs"

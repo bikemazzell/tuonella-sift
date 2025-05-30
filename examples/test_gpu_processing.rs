@@ -4,7 +4,10 @@ use std::path::Path;
 use anyhow::Result;
 use tuonella_sift::config::model::Config;
 use tuonella_sift::core::memory_manager::MemoryManager;
-use tuonella_sift::core::deduplication::{process_csv_files_with_algorithm_streaming, process_temp_files_with_gpu};
+use tuonella_sift::core::deduplication::{process_csv_files_with_algorithm_streaming, process_with_complete_algorithm_cpu_fallback};
+
+#[cfg(feature = "cuda")]
+use tuonella_sift::core::deduplication::{process_temp_files_with_gpu, process_with_complete_algorithm};
 
 #[cfg(feature = "cuda")]
 use tuonella_sift::cuda::processor::CudaProcessor;
@@ -131,7 +134,10 @@ async fn main() -> Result<()> {
             Err(e) => {
                 println!("❌ Failed to initialize CUDA processor: {}", e);
                 println!("💡 This is expected if CUDA is not available on this system");
-                println!("🔄 Falling back to CPU-only processing would happen in real usage");
+                println!("🔄 Testing complete algorithm pipeline with CPU fallback...");
+
+                // Test the complete algorithm pipeline with CPU fallback
+                test_complete_algorithm_cpu_fallback(&input_dir, &output_dir, &config, &mut memory_manager)?;
             }
         }
     }
@@ -139,7 +145,10 @@ async fn main() -> Result<()> {
     #[cfg(not(feature = "cuda"))]
     {
         println!("\n⚠️ CUDA feature not enabled. Compile with --features cuda to test GPU processing.");
-        println!("💡 This example demonstrates the algorithm structure without GPU acceleration.");
+        println!("💡 Testing complete algorithm pipeline with CPU fallback...");
+
+        // Test the complete algorithm pipeline with CPU fallback
+        test_complete_algorithm_cpu_fallback(&input_dir, &output_dir, &config, &mut memory_manager)?;
     }
 
     // Cleanup
@@ -175,6 +184,53 @@ fn create_test_csv(path: &Path) -> Result<()> {
 
     writer.flush()?;
     println!("📝 Created test CSV with {} lines", line_count);
+
+    Ok(())
+}
+
+/// Test the complete algorithm pipeline with CPU fallback
+fn test_complete_algorithm_cpu_fallback(
+    input_dir: &Path,
+    output_dir: &Path,
+    config: &Config,
+    memory_manager: &mut MemoryManager,
+) -> Result<()> {
+    println!("\n🧪 Testing Complete Algorithm Pipeline (CPU Fallback)");
+
+    let output_file = output_dir.join("complete_algorithm_cpu.csv");
+
+    let stats = process_with_complete_algorithm_cpu_fallback(
+        input_dir,
+        &output_file,
+        config,
+        memory_manager,
+        true
+    )?;
+
+    println!("✅ Complete Algorithm Pipeline (CPU) finished successfully!");
+    println!("📊 Final Statistics:");
+    println!("  📁 Files processed: {}", stats.files_processed);
+    println!("  📊 Total records: {}", stats.total_records);
+    println!("  ✨ Unique records: {}", stats.unique_records);
+    println!("  🗑️ Duplicates removed: {}", stats.duplicates_removed);
+    println!("  ❌ Invalid records: {}", stats.invalid_records);
+    println!("  ⏱️ Processing time: {:.2}s", stats.processing_time_seconds);
+
+    // Verify output file
+    if output_file.exists() {
+        let content = fs::read_to_string(&output_file)?;
+        let line_count = content.lines().count();
+        println!("📄 Output file: {} ({} lines)", output_file.display(), line_count);
+
+        if line_count > 1 {
+            println!("📝 First few lines:");
+            for (i, line) in content.lines().take(3).enumerate() {
+                println!("  {}: {}", i + 1, line);
+            }
+        }
+    } else {
+        println!("❌ Output file was not created");
+    }
 
     Ok(())
 }
