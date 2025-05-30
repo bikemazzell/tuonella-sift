@@ -11,7 +11,7 @@ use tuonella_sift::cuda::processor::CudaProcessor;
 
 #[derive(Parser)]
 #[command(name = "tuonella-sift")]
-#[command(about = "GPU accelerated CSV deduplication tool")]
+#[command(about = "🧹 Tuonella Sift: The Mythical CSV Deduplicator ✨")]
 #[command(version)]
 struct Args {
     #[arg(short, long, help = "Input directory containing CSV files")]
@@ -37,7 +37,7 @@ async fn main() -> Result<()> {
 
     // Load configuration
     let config_path = &args.config;
-    println!("Loading configuration from {}", config_path.display());
+    println!("📚 Loading magical configuration from {}", config_path.display());
     let config = Config::load(config_path).await?;
 
     // Setup directories
@@ -48,36 +48,36 @@ async fn main() -> Result<()> {
         Path::new(&config.io.output_directory).join("deduplicated_output.csv")
     });
 
-    println!("Starting CSV deduplication...");
-    println!("Input directory: {}", args.input.display());
-    println!("Output file: {}", output_path.display());
+    println!("\n🧙 Tuonella Sift is awakening...");
+    println!("🔍 Preparing to judge souls from: {}", args.input.display());
+    println!("📝 The worthy shall be recorded in: {}", output_path.display());
 
     // Initialize CUDA processor if available and not disabled
     #[cfg(feature = "cuda")]
     let cuda_processor = if !args.force_cpu && config.processing.enable_cuda {
         match CudaProcessor::new(config.cuda.clone(), 0) {
             Ok(processor) => {
-                println!("CUDA processor initialized successfully");
+                println!("🚀 GPU powers activated! Deduplication will be MUCH faster!");
                 Some(processor)
             }
             Err(e) => {
-                eprintln!("Failed to initialize CUDA processor: {}", e);
-                println!("Falling back to CPU processing");
+                eprintln!("💥 GPU summoning failed: {}", e);
+                println!("🐢 Falling back to CPU processing (it's slower, but honest work)");
                 None
             }
         }
     } else {
         if args.force_cpu {
-            println!("CUDA processing disabled by --force-cpu flag");
+            println!("🧠 CPU mode forced by user. GPUs are taking the day off.");
         } else if !config.processing.enable_cuda {
-            println!("CUDA processing disabled in configuration");
+            println!("⚙️ CPU mode selected in configuration. GPUs remain dormant.");
         }
         None
     };
 
     // Process CSV files
     if args.verbose {
-        println!("Pre-processing CSV files with validation...");
+        println!("\n🔎 Examining the scrolls (CSV files) for worthiness...");
     }
 
     let temp_files = process_csv_files_with_validation(
@@ -87,13 +87,14 @@ async fn main() -> Result<()> {
     )?;
 
     if temp_files.is_empty() {
-        println!("No valid CSV files found in input directory");
+        println!("😱 Oh no! No valid CSV files found. Did the data ghosts take them?");
         return Ok(());
     }
 
-    println!("Processed {} CSV files", temp_files.len());
+    println!("📊 Found and processed {} CSV files. Let the judgment begin!", temp_files.len());
 
     // Deduplicate records
+    println!("\n⚔️ Commencing the great deduplication battle...");
     let stats = deduplicate_records(
         &temp_files,
         &output_path,
@@ -104,10 +105,13 @@ async fn main() -> Result<()> {
     )?;
 
     // Clean up temporary files
+    if args.verbose {
+        println!("🧹 Sweeping away temporary files...");
+    }
     for temp_file in &temp_files {
         if let Err(e) = std::fs::remove_file(temp_file) {
             if args.verbose {
-                println!("Warning: Failed to remove temp file {}: {}", temp_file.display(), e);
+                println!("⚠️ One escaped the broom: {} - {}", temp_file.display(), e);
             }
         }
     }
@@ -120,17 +124,34 @@ async fn main() -> Result<()> {
         stats.total_records as f64
     };
 
-    println!("\nDeduplication completed successfully!");
-    println!("---------------------------------------");
-    println!("Total records processed: {}", stats.total_records);
-    println!("Unique records: {}", stats.unique_records);
-    println!("Duplicates removed: {} ({:.2}%)",
+    println!("\n🎉 Deduplication completed successfully! 🎉");
+    println!("=======================================");
+    println!("📊 Total souls judged: {}", stats.total_records);
+    println!("✨ Unique souls preserved: {}", stats.unique_records);
+    println!("🗑️ Duplicates banished: {} ({:.2}%)",
              stats.duplicates_removed,
              100.0 * stats.duplicates_removed as f64 / stats.total_records.max(1) as f64);
-    println!("Invalid records: {}", stats.invalid_records);
-    println!("Processing time: {}", format_duration(elapsed));
-    println!("Processing rate: {:.2} records/second", processing_rate);
-    println!("Output written to: {}", output_path.display());
+    println!("⚠️ Invalid records (sent to the void): {}", stats.invalid_records);
+    println!("⏱️ Time in the underworld: {}", format_duration(elapsed));
+    
+    // Add a fun comment based on processing speed
+    let fun_comment = if processing_rate > 100000.0 {
+        "🚀 That's faster than Hermes on caffeine!"
+    } else if processing_rate > 50000.0 {
+        "⚡ Lightning fast! Thor would be impressed."
+    } else if processing_rate > 10000.0 {
+        "🏃 Pretty speedy! Usain Bolt approves."
+    } else if processing_rate > 1000.0 {
+        "🐎 Galloping along nicely."
+    } else {
+        "🐢 Slow and steady wins the race... eventually."
+    };
+    
+    println!("🔄 Processing rate: {:.2} records/second. {}", processing_rate, fun_comment);
+    println!("📜 The book of the worthy has been written to: {}", output_path.display());
+    
+    // Add a fun farewell message
+    println!("\n👋 Tuonella thanks you for your souls! Come back with more data soon!");
 
     Ok(())
 } 
