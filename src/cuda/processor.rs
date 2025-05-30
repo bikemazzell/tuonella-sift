@@ -74,7 +74,6 @@ extern "C" __global__ void normalize_emails(
     char* output = output_data + out_start;
     int out_len = 0;
 
-    // Convert email to lowercase
     for (int i = 0; i < len; i++) {
         output[out_len++] = to_lower(input[i]);
     }
@@ -107,7 +106,6 @@ extern "C" __global__ void normalize_urls(
     char* output = output_data + out_start;
     int out_len = 0;
 
-    // Step 1: Find and skip protocol (anything before "://")
     int protocol_end = 0;
     for (int i = 0; i < len - 2; i++) {
         if (input[i] == ':' && input[i+1] == '/' && input[i+2] == '/') {
@@ -116,19 +114,16 @@ extern "C" __global__ void normalize_urls(
         }
     }
 
-    // Step 2: Handle android URLs with @ symbol - extract domain after @
     int domain_start = protocol_end;
     if (protocol_end > 0) {
-        // Look for android in the protocol part
         bool is_android = false;
-        if (protocol_end >= 10) { // "android://" is 10 chars
+        if (protocol_end >= 10) {
             if (starts_with(input, protocol_end, "android://", 10)) {
                 is_android = true;
             }
         }
 
         if (is_android) {
-            // Find the last @ symbol
             int at_pos = find_last_char(input + protocol_end, len - protocol_end, '@');
             if (at_pos >= 0) {
                 domain_start = protocol_end + at_pos + 1;
@@ -136,13 +131,11 @@ extern "C" __global__ void normalize_urls(
         }
     }
 
-    // Step 3: Skip www. prefix
     int content_start = domain_start;
     if (len - domain_start >= 4 && starts_with(input + domain_start, len - domain_start, "www.", 4)) {
         content_start += 4;
     }
 
-    // Step 4: Find end of domain (before /, ?, #)
     int content_end = len;
     for (int i = content_start; i < len; i++) {
         if (input[i] == '/' || input[i] == '?' || input[i] == '#') {
@@ -151,14 +144,10 @@ extern "C" __global__ void normalize_urls(
         }
     }
 
-    // Step 5: Remove trailing slash if it's the only character after domain
     if (content_end < len && input[content_end] == '/' && content_end == len - 1) {
         content_end = len - 1;
     }
 
-    // Step 6: For Android URLs, keep full reverse domain notation
-    // For HTTP/HTTPS URLs, keep full domain including subdomains
-    // Copy and convert to lowercase
     for (int i = content_start; i < content_end && out_len < 255; i++) {
         output[out_len++] = to_lower(input[i]);
     }
@@ -188,8 +177,8 @@ pub struct CudaRecord {
     pub url: String,
     pub normalized_user: String,
     pub normalized_url: String,
-    pub field_count: usize,  // Track original field count for completeness comparison
-    pub all_fields: Vec<String>,  // Store all original fields to preserve extra data
+    pub field_count: usize,
+    pub all_fields: Vec<String>,
 }
 
 #[cfg(feature = "cuda")]
@@ -255,7 +244,6 @@ impl CudaProcessor {
               max_batch_size,
               optimal_batch_size);
 
-        // Compile CUDA kernel
         println!("Compiling CUDA kernel for string normalization...");
         let ptx = compile_ptx(CUDA_KERNEL_SOURCE)
             .map_err(|e| anyhow::anyhow!("Failed to compile CUDA kernel: {}", e))?;
@@ -366,11 +354,9 @@ impl CudaProcessor {
             input_lengths.push(url_bytes.len() as i32);
             input_data.extend_from_slice(url_bytes);
             output_offsets.push(total_output_len as i32);
-            // Allocate maximum possible output size (could be same as input)
             total_output_len += url_bytes.len().max(256); // Ensure minimum buffer size
         }
 
-        // Allocate/copy buffers to GPU using cudarc stream API
         let ctx = &self.context;
         let stream = ctx.default_stream();
         let d_input = stream.memcpy_stod(&input_data)?;
@@ -380,7 +366,6 @@ impl CudaProcessor {
         let d_input_lengths = stream.memcpy_stod(&input_lengths)?;
         let d_output_lengths = stream.alloc_zeros::<i32>(records.len())?;
 
-        // Launch CUDA kernel for URL normalization
         let num_strings = records.len() as i32;
         let block_size = 256;
         let num_blocks = (num_strings + block_size - 1) / block_size;
@@ -415,7 +400,6 @@ impl CudaProcessor {
     }
 
     fn process_emails_on_gpu(&self, records: &mut [CudaRecord]) -> Result<()> {
-        // Prepare data for GPU: flatten emails, build offsets/lengths
         let mut input_data = Vec::new();
         let mut input_offsets = Vec::with_capacity(records.len());
         let mut input_lengths = Vec::with_capacity(records.len());
@@ -428,11 +412,9 @@ impl CudaProcessor {
             input_lengths.push(email_bytes.len() as i32);
             input_data.extend_from_slice(email_bytes);
             output_offsets.push(total_output_len as i32);
-            // Allocate same size as input for email (lowercase conversion)
             total_output_len += email_bytes.len();
         }
 
-        // Allocate/copy buffers to GPU using cudarc stream API
         let ctx = &self.context;
         let stream = ctx.default_stream();
         let d_input = stream.memcpy_stod(&input_data)?;
@@ -442,7 +424,6 @@ impl CudaProcessor {
         let d_input_lengths = stream.memcpy_stod(&input_lengths)?;
         let d_output_lengths = stream.alloc_zeros::<i32>(records.len())?;
 
-        // Launch CUDA kernel for email normalization
         let num_strings = records.len() as i32;
         let block_size = 256;
         let num_blocks = (num_strings + block_size - 1) / block_size;
@@ -466,7 +447,6 @@ impl CudaProcessor {
         let output_data_host = stream.memcpy_dtov(&d_output)?;
         let output_lengths_host = stream.memcpy_dtov(&d_output_lengths)?;
 
-        // Update records with normalized emails from output_data_host
         for (i, record) in records.iter_mut().enumerate() {
             let start = output_offsets[i] as usize;
             let len = output_lengths_host[i] as usize;
@@ -480,32 +460,21 @@ impl CudaProcessor {
         self.optimal_batch_size
     }
 
-    /// Release GPU resources after processing a chunk
-    ///
-    /// This implements Section 4: "Free GPU and RAM buffers after processing each chunk to avoid memory leaks"
     pub fn release_gpu_resources(&self) -> Result<()> {
-        // Force synchronization to ensure all GPU operations are complete
         let stream = self.context.default_stream();
         stream.synchronize()?;
 
-        // The cudarc library automatically manages GPU memory through RAII
         // When GPU buffers go out of scope, they are automatically freed
         // This method ensures synchronization and can be extended for manual cleanup if needed
 
         Ok(())
     }
 
-    /// Get current GPU memory usage for monitoring
-    ///
-    /// This helps track memory pressure and resource utilization
     pub fn get_gpu_memory_usage(&self) -> Result<(usize, usize), DriverError> {
         use cudarc::driver::result;
         result::mem_get_info()
     }
 
-    /// Check if GPU memory pressure exists
-    ///
-    /// Returns true if GPU memory usage is above the pressure threshold
     pub fn check_gpu_memory_pressure(&self) -> Result<bool> {
         let (free_memory, total_memory) = self.get_gpu_memory_usage()
             .map_err(|e| anyhow::anyhow!("Failed to get GPU memory info: {}", e))?;
@@ -513,7 +482,6 @@ impl CudaProcessor {
         let used_memory = total_memory - free_memory;
         let usage_percent = (used_memory as f64 / total_memory as f64) * 100.0;
 
-        // Use the same threshold as CPU memory pressure
         Ok(usage_percent > crate::constants::MEMORY_PRESSURE_THRESHOLD_PERCENT)
     }
 }
