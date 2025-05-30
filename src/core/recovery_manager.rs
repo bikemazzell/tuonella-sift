@@ -1,13 +1,11 @@
-use anyhow::{Result, Context};
-use std::path::{Path, PathBuf};
-use std::fs::{File, OpenOptions};
-use std::io::{BufWriter, Write, BufRead, BufReader};
-use serde::{Serialize, Deserialize};
+use anyhow::Result;
+use std::path::PathBuf;
+use std::fs::OpenOptions;
+use std::io::Write;
 
-use crate::core::error_handler::{ErrorHandler, DeduplicationError, ErrorContext, ErrorSeverity, RecoveryCheckpoint};
+use crate::core::error_handler::{ErrorHandler, DeduplicationError, ErrorContext};
 use crate::core::memory_manager::MemoryManager;
-use crate::core::resource_manager::ResourceManager;
-use crate::constants::{CHUNK_SPLIT_FACTOR, MIN_CHUNK_SIZE_RECORDS};
+use crate::constants::MIN_CHUNK_SIZE_RECORDS;
 
 #[cfg(feature = "cuda")]
 use crate::cuda::processor::CudaProcessor;
@@ -42,7 +40,7 @@ pub struct RecoveryManager<'a> {
     error_handler: &'a mut ErrorHandler,
     memory_manager: &'a mut MemoryManager,
     #[cfg(feature = "cuda")]
-    cuda_processor: Option<&'a CudaProcessor>,
+    _cuda_processor: Option<&'a CudaProcessor>,
     recovery_log_path: PathBuf,
     current_strategy: Option<RecoveryStrategy>,
     degradation_level: u8, // 0 = full performance, 5 = maximum degradation
@@ -60,7 +58,7 @@ impl<'a> RecoveryManager<'a> {
         Self {
             error_handler,
             memory_manager,
-            cuda_processor,
+            _cuda_processor: cuda_processor,
             recovery_log_path,
             current_strategy: None,
             degradation_level: 0,
@@ -269,6 +267,7 @@ mod tests {
     use tempfile::tempdir;
     use std::collections::HashMap;
     use std::time::Instant;
+    use crate::core::error_handler::ErrorSeverity;
 
     #[test]
     fn test_recovery_strategy_determination() {
@@ -280,7 +279,7 @@ mod tests {
         let mut memory_manager = MemoryManager::new(Some(1)).unwrap();
 
         #[cfg(feature = "cuda")]
-        let mut recovery_manager = RecoveryManager::new(
+        let recovery_manager = RecoveryManager::new(
             &mut error_handler,
             &mut memory_manager,
             None,
@@ -288,7 +287,7 @@ mod tests {
         );
 
         #[cfg(not(feature = "cuda"))]
-        let mut recovery_manager = RecoveryManager::new(
+        let recovery_manager = RecoveryManager::new(
             &mut error_handler,
             &mut memory_manager,
             recovery_log_path,

@@ -256,6 +256,7 @@ fn process_single_csv_with_algorithm_streaming(
 /// 1. Reads the file line by line
 /// 2. Validates each line
 /// 3. Writes valid lines to a temporary file
+#[allow(dead_code)]
 fn process_single_csv_file_with_validation(
     input_path: &Path,
     output_path: &Path,

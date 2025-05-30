@@ -5,7 +5,7 @@ use tempfile::tempdir;
 
 use tuonella_sift::core::error_handler::{ErrorHandler, DeduplicationError, ErrorContext, ErrorSeverity};
 use tuonella_sift::core::memory_manager::MemoryManager;
-use tuonella_sift::core::recovery_manager::{RecoveryManager, RecoveryStrategy};
+use tuonella_sift::core::recovery_manager::RecoveryManager;
 
 
 #[cfg(feature = "cuda")]

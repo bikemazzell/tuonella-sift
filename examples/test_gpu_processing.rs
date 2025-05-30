@@ -7,12 +7,11 @@ use tuonella_sift::core::memory_manager::MemoryManager;
 use tuonella_sift::core::deduplication::{process_csv_files_with_algorithm_streaming, process_with_complete_algorithm_cpu_fallback};
 
 #[cfg(feature = "cuda")]
-use tuonella_sift::core::deduplication::{process_temp_files_with_gpu, process_with_complete_algorithm};
+use tuonella_sift::core::deduplication::process_temp_files_with_gpu;
 
 #[cfg(feature = "cuda")]
 use tuonella_sift::cuda::processor::CudaProcessor;
-#[cfg(feature = "cuda")]
-use tuonella_sift::config::model::CudaConfig;
+
 
 #[tokio::main]
 async fn main() -> Result<()> {

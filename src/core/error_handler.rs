@@ -71,7 +71,7 @@ pub struct RecoveryCheckpoint {
 
 /// Advanced error handler implementing Section 5: Error Handling
 pub struct ErrorHandler {
-    error_log_path: PathBuf,
+    _error_log_path: PathBuf,
     error_writer: BufWriter<File>,
     error_buffer: Vec<ErrorContext>,
     recovery_checkpoints: Vec<RecoveryCheckpoint>,
@@ -105,7 +105,7 @@ impl ErrorHandler {
         let error_writer = BufWriter::new(error_file);
 
         Ok(Self {
-            error_log_path,
+            _error_log_path: error_log_path,
             error_writer,
             error_buffer: Vec::with_capacity(ERROR_LOG_BUFFER_SIZE),
             recovery_checkpoints: Vec::new(),
