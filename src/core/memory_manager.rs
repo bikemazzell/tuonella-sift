@@ -2,6 +2,11 @@ use anyhow::Result;
 use crate::constants::{DYNAMIC_MEMORY_CHECK_INTERVAL_RECORDS, BYTES_PER_MB};
 use crate::utils::system::SystemResources;
 
+#[cfg(feature = "cuda")]
+use std::sync::Arc;
+#[cfg(feature = "cuda")]
+use cudarc::driver::safe::CudaContext;
+
 /// Memory manager for handling buffer preallocation and lifecycle as per algorithm step 1
 ///
 /// This implements:
@@ -27,6 +32,10 @@ pub struct MemoryManager {
     /// GPU buffer information (managed by CUDA context)
     gpu_buffer_capacity: usize,
 
+    #[cfg(feature = "cuda")]
+    /// CUDA context for GPU buffer management
+    gpu_context: Option<Arc<CudaContext>>,
+
     /// Record counter for periodic memory checks
     record_counter: usize,
 
@@ -49,18 +58,29 @@ impl MemoryManager {
         let ram_buffer_capacity = resources.ram_buffer_size_bytes;
         println!("📦 Preallocating RAM buffer: {:.2} MB", ram_buffer_capacity as f64 / BYTES_PER_MB as f64);
 
-        let mut ram_buffer = Vec::with_capacity(ram_buffer_capacity);
-        // Initialize buffer to ensure memory is actually allocated
-        ram_buffer.resize(ram_buffer_capacity, 0);
-        ram_buffer.clear(); // Clear but keep capacity
+        // Only reserve capacity, don't actually allocate to prevent OOM
+        let ram_buffer = Vec::with_capacity(ram_buffer_capacity);
 
         #[cfg(feature = "cuda")]
         let gpu_buffer_capacity = resources.gpu_buffer_size_bytes;
 
         #[cfg(feature = "cuda")]
-        if gpu_buffer_capacity > 0 {
+        let gpu_context = if gpu_buffer_capacity > 0 && resources.gpu_properties.is_some() {
             println!("🚀 GPU buffer capacity reserved: {:.2} MB", gpu_buffer_capacity as f64 / BYTES_PER_MB as f64);
-        }
+            match CudaContext::new(0) {
+                Ok(context) => {
+                    println!("✅ CUDA context initialized for buffer management");
+                    Some(context)
+                }
+                Err(e) => {
+                    println!("⚠️ Failed to create CUDA context: {}, GPU buffer disabled", e);
+                    None
+                }
+            }
+        } else {
+            println!("ℹ️ GPU buffer not available");
+            None
+        };
 
         Ok(Self {
             resources,
@@ -69,6 +89,8 @@ impl MemoryManager {
             ram_buffer_capacity,
             #[cfg(feature = "cuda")]
             gpu_buffer_capacity,
+            #[cfg(feature = "cuda")]
+            gpu_context,
             record_counter: 0,
             buffers_initialized: true,
         })
@@ -126,16 +148,29 @@ impl MemoryManager {
         self.gpu_buffer_capacity
     }
 
+    /// Get GPU context for CUDA operations
+    #[cfg(feature = "cuda")]
+    pub fn get_gpu_context(&self) -> Option<&Arc<CudaContext>> {
+        self.gpu_context.as_ref()
+    }
+
+    /// Check if GPU buffer is available
+    #[cfg(feature = "cuda")]
+    pub fn has_gpu_buffer(&self) -> bool {
+        self.gpu_context.is_some() && self.gpu_buffer_capacity > 0
+    }
+
     /// Check for memory pressure and adjust if needed
     ///
     /// This implements: "Dynamically adjust chunk sizes if memory usage approaches limits"
-    fn check_memory_pressure(&self) -> Result<()> {
-        if self.resources.is_memory_pressure()? {
+    pub fn check_memory_pressure(&self) -> Result<bool> {
+        let is_pressure = self.resources.is_memory_pressure()?;
+        if is_pressure {
             let (current_usage, usage_percent) = self.resources.get_current_memory_usage()?;
             println!("⚠️  Memory pressure detected: {:.2}% usage ({} bytes)",
                     usage_percent, current_usage);
         }
-        Ok(())
+        Ok(is_pressure)
     }
 
     /// Get current memory statistics
@@ -165,6 +200,11 @@ impl MemoryManager {
     /// Check if buffers are properly initialized
     pub fn is_initialized(&self) -> bool {
         self.buffers_initialized
+    }
+
+    /// Record that we've processed more records (for memory monitoring)
+    pub fn record_processed(&mut self, count: usize) {
+        self.record_counter += count;
     }
 }
 

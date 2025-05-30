@@ -49,6 +49,39 @@ __device__ char to_lower(char c) {
     return c;
 }
 
+extern "C" __global__ void normalize_emails(
+    char* input_data,
+    char* output_data,
+    int* input_offsets,
+    int* output_offsets,
+    int* input_lengths,
+    int* output_lengths,
+    int num_strings
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= num_strings) return;
+
+    int start = input_offsets[idx];
+    int len = input_lengths[idx];
+    int out_start = output_offsets[idx];
+
+    if (len == 0) {
+        output_lengths[idx] = 0;
+        return;
+    }
+
+    const char* input = input_data + start;
+    char* output = output_data + out_start;
+    int out_len = 0;
+
+    // Convert email to lowercase
+    for (int i = 0; i < len; i++) {
+        output[out_len++] = to_lower(input[i]);
+    }
+
+    output_lengths[idx] = out_len;
+}
+
 extern "C" __global__ void normalize_urls(
     char* input_data,
     char* output_data,
@@ -160,7 +193,8 @@ pub struct CudaRecord {
 #[cfg(feature = "cuda")]
 pub struct CudaProcessor {
     context: Arc<CudaContext>,
-    normalize_function: CudaFunction,
+    normalize_urls_function: CudaFunction,
+    normalize_emails_function: CudaFunction,
     optimal_batch_size: usize,
     max_string_length: usize,
 }
@@ -170,7 +204,8 @@ impl Clone for CudaProcessor {
     fn clone(&self) -> Self {
         Self {
             context: Arc::clone(&self.context),
-            normalize_function: self.normalize_function.clone(),
+            normalize_urls_function: self.normalize_urls_function.clone(),
+            normalize_emails_function: self.normalize_emails_function.clone(),
             optimal_batch_size: self.optimal_batch_size,
             max_string_length: self.max_string_length,
         }
@@ -226,14 +261,18 @@ impl CudaProcessor {
         let module = context.load_module(ptx)
             .map_err(|e| anyhow::anyhow!("Failed to load CUDA kernel: {}", e))?;
 
-        let normalize_function = module.load_function("normalize_urls")
-            .map_err(|e| anyhow::anyhow!("Failed to get CUDA function: {}", e))?;
+        let normalize_urls_function = module.load_function("normalize_urls")
+            .map_err(|e| anyhow::anyhow!("Failed to get CUDA normalize_urls function: {}", e))?;
 
-        println!("CUDA kernel compiled and loaded successfully");
+        let normalize_emails_function = module.load_function("normalize_emails")
+            .map_err(|e| anyhow::anyhow!("Failed to get CUDA normalize_emails function: {}", e))?;
+
+        println!("CUDA kernels compiled and loaded successfully");
 
         Ok(Self {
             context,
-            normalize_function,
+            normalize_urls_function,
+            normalize_emails_function,
             optimal_batch_size,
             max_string_length: config.max_url_buffer_size.max(config.max_username_buffer_size),
         })
@@ -298,6 +337,20 @@ impl CudaProcessor {
     }
 
     fn process_chunk_on_gpu(&self, records: &mut [CudaRecord], case_sensitive_usernames: bool) -> Result<()> {
+        // Process URLs and emails separately for better GPU utilization
+        self.process_urls_on_gpu(records)?;
+        if !case_sensitive_usernames {
+            self.process_emails_on_gpu(records)?;
+        } else {
+            // For case-sensitive usernames, just copy the original
+            for record in records.iter_mut() {
+                record.normalized_user = record.user.clone();
+            }
+        }
+        Ok(())
+    }
+
+    fn process_urls_on_gpu(&self, records: &mut [CudaRecord]) -> Result<()> {
         // Prepare data for GPU: flatten URLs, build offsets/lengths
         let mut input_data = Vec::new();
         let mut input_offsets = Vec::with_capacity(records.len());
@@ -325,12 +378,12 @@ impl CudaProcessor {
         let d_input_lengths = stream.memcpy_stod(&input_lengths)?;
         let d_output_lengths = stream.alloc_zeros::<i32>(records.len())?;
 
-        // Launch CUDA kernel for normalization
+        // Launch CUDA kernel for URL normalization
         let num_strings = records.len() as i32;
         let block_size = 256;
         let num_blocks = (num_strings + block_size - 1) / block_size;
         unsafe {
-            let mut builder = stream.launch_builder(&self.normalize_function);
+            let mut builder = stream.launch_builder(&self.normalize_urls_function);
             builder.arg(&d_input)
                 .arg(&d_output)
                 .arg(&d_input_offsets)
@@ -355,13 +408,68 @@ impl CudaProcessor {
             let len = output_lengths_host[i] as usize;
             let url_bytes = &output_data_host[start..start+len];
             record.normalized_url = String::from_utf8_lossy(url_bytes).to_string();
+        }
+        Ok(())
+    }
 
-            // Handle username normalization
-            if !case_sensitive_usernames {
-                record.normalized_user = record.user.to_lowercase();
-            } else {
-                record.normalized_user = record.user.clone();
-            }
+    fn process_emails_on_gpu(&self, records: &mut [CudaRecord]) -> Result<()> {
+        // Prepare data for GPU: flatten emails, build offsets/lengths
+        let mut input_data = Vec::new();
+        let mut input_offsets = Vec::with_capacity(records.len());
+        let mut input_lengths = Vec::with_capacity(records.len());
+        let mut output_offsets = Vec::with_capacity(records.len());
+        let mut total_output_len = 0;
+
+        for record in records.iter() {
+            let email_bytes = record.user.as_bytes();
+            input_offsets.push(input_data.len() as i32);
+            input_lengths.push(email_bytes.len() as i32);
+            input_data.extend_from_slice(email_bytes);
+            output_offsets.push(total_output_len as i32);
+            // Allocate same size as input for email (lowercase conversion)
+            total_output_len += email_bytes.len();
+        }
+
+        // Allocate/copy buffers to GPU using cudarc stream API
+        let ctx = &self.context;
+        let stream = ctx.default_stream();
+        let d_input = stream.memcpy_stod(&input_data)?;
+        let d_output = stream.alloc_zeros::<u8>(total_output_len)?;
+        let d_input_offsets = stream.memcpy_stod(&input_offsets)?;
+        let d_output_offsets = stream.memcpy_stod(&output_offsets)?;
+        let d_input_lengths = stream.memcpy_stod(&input_lengths)?;
+        let d_output_lengths = stream.alloc_zeros::<i32>(records.len())?;
+
+        // Launch CUDA kernel for email normalization
+        let num_strings = records.len() as i32;
+        let block_size = 256;
+        let num_blocks = (num_strings + block_size - 1) / block_size;
+        unsafe {
+            let mut builder = stream.launch_builder(&self.normalize_emails_function);
+            builder.arg(&d_input)
+                .arg(&d_output)
+                .arg(&d_input_offsets)
+                .arg(&d_output_offsets)
+                .arg(&d_input_lengths)
+                .arg(&d_output_lengths)
+                .arg(&num_strings);
+            builder.launch(LaunchConfig {
+                grid_dim: (num_blocks as u32, 1, 1),
+                block_dim: (block_size as u32, 1, 1),
+                shared_mem_bytes: 0,
+            })?;
+        }
+        stream.synchronize()?;
+
+        let output_data_host = stream.memcpy_dtov(&d_output)?;
+        let output_lengths_host = stream.memcpy_dtov(&d_output_lengths)?;
+
+        // Update records with normalized emails from output_data_host
+        for (i, record) in records.iter_mut().enumerate() {
+            let start = output_offsets[i] as usize;
+            let len = output_lengths_host[i] as usize;
+            let email_bytes = &output_data_host[start..start+len];
+            record.normalized_user = String::from_utf8_lossy(email_bytes).to_string();
         }
         Ok(())
     }

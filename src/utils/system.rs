@@ -2,8 +2,11 @@ use sysinfo::{System, Pid};
 use std::time::{Duration, Instant};
 use crate::constants::{
     BYTES_PER_GB, ALGORITHM_RAM_ALLOCATION_PERCENT, MEMORY_SAFETY_MARGIN,
-    MAX_RAM_BUFFER_SIZE_GB, MAX_GPU_BUFFER_SIZE_GB
+    MAX_RAM_BUFFER_SIZE_GB
 };
+
+#[cfg(feature = "cuda")]
+use crate::constants::MAX_GPU_BUFFER_SIZE_GB;
 
 #[cfg(feature = "cuda")]
 use crate::constants::ALGORITHM_GPU_ALLOCATION_PERCENT;

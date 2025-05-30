@@ -7,9 +7,11 @@ use anyhow::Result;
 use crate::config::model::{Config, DeduplicationConfig};
 use crate::core::record::Record;
 use crate::core::validation::{parse_csv_line, detect_field_positions, EMAIL_REGEX, DELIMITER_REGEX};
+use crate::core::memory_manager::MemoryManager;
+use crate::constants::{GPU_CHUNK_PROCESSING_BATCH_SIZE, GPU_TEMP_FILE_READ_CHUNK_SIZE_MB, BYTES_PER_MB};
 
 #[cfg(feature = "cuda")]
-use crate::cuda::processor::CudaProcessor;
+use crate::cuda::processor::{CudaProcessor, CudaRecord};
 
 /// Represents processing statistics
 #[derive(Debug, Default, Clone)]
@@ -22,17 +24,19 @@ pub struct ProcessingStats {
     pub invalid_records: usize,
 }
 
-/// Process CSV files with validation and write to temporary files
+/// Process CSV files with algorithm-compliant streaming and RAM buffering
 ///
-/// This function:
-/// 1. Reads each CSV file line by line
-/// 2. Validates each line using various criteria
-/// 3. Writes valid lines to temporary files
+/// This function implements the exact algorithm from docs/algorithm.md:
+/// 1. Stream files line by line with pre-validation (CPU)
+/// 2. Use RAM buffer to accumulate valid lines
+/// 3. Write to temporary files when buffer is full
+/// 4. Use MemoryManager for proper buffer allocation and monitoring
 ///
 /// Returns a list of temporary file paths
-pub fn process_csv_files_with_validation(
+pub fn process_csv_files_with_algorithm_streaming(
     input_dir: &Path,
     config: &Config,
+    memory_manager: &mut MemoryManager,
     verbose: bool,
 ) -> Result<Vec<PathBuf>> {
     let mut temp_files = Vec::new();
@@ -41,40 +45,209 @@ pub fn process_csv_files_with_validation(
     // Create temporary directory if it doesn't exist
     fs::create_dir_all(&config.io.temp_directory)?;
 
-    // Create error log file for corrupted/invalid lines
-    let error_log_path = Path::new(&config.io.temp_directory).join("invalid_lines.log");
-    let error_log_file = File::create(&error_log_path)?;
-    let mut error_writer = BufWriter::new(error_log_file);
+    // Create error log file
+    let error_log_path = Path::new(&config.io.temp_directory).join("validation_errors.log");
+    let error_file = File::create(&error_log_path)?;
+    let mut error_writer = BufWriter::new(error_file);
 
     if verbose {
-        println!("Found {} CSV files to process", csv_files.len());
-        println!("Invalid lines will be logged to: {}", error_log_path.display());
+        println!("🔄 Processing {} CSV files with algorithm-compliant streaming...", csv_files.len());
+        println!("📊 Memory Manager Status:");
+        let stats = memory_manager.get_memory_stats()?;
+        println!("{}", stats.format_summary());
     }
 
     for (i, csv_file) in csv_files.iter().enumerate() {
         if verbose {
-            println!("Processing file {}/{}: {}", i + 1, csv_files.len(), csv_file.display());
+            println!("📂 Processing file {}/{}: {}", i + 1, csv_files.len(), csv_file.display());
         }
 
         let temp_file = Path::new(&config.io.temp_directory)
             .join(format!("temp_{}.csv", i));
 
-        process_single_csv_file_with_validation(
+        process_single_csv_with_algorithm_streaming(
             csv_file,
             &temp_file,
             &mut error_writer,
-            &config.processing.chunk_size_mb,
+            memory_manager,
             verbose
         )?;
+
         temp_files.push(temp_file);
     }
 
     error_writer.flush()?;
     if verbose {
-        println!("Error log written to: {}", error_log_path.display());
+        println!("📝 Error log written to: {}", error_log_path.display());
+        println!("✅ Algorithm-compliant file processing complete!");
     }
 
     Ok(temp_files)
+}
+
+/// Legacy function for backward compatibility
+///
+/// This function maintains the old interface but uses a temporary memory manager
+pub fn process_csv_files_with_validation(
+    input_dir: &Path,
+    config: &Config,
+    verbose: bool,
+) -> Result<Vec<PathBuf>> {
+    // Create a temporary memory manager for legacy compatibility
+    let mut memory_manager = MemoryManager::new(None)?;
+
+    // Delegate to the new algorithm-compliant implementation
+    process_csv_files_with_algorithm_streaming(input_dir, config, &mut memory_manager, verbose)
+}
+
+/// Process a single CSV file with algorithm-compliant streaming and RAM buffering
+///
+/// This function implements the exact algorithm from docs/algorithm.md:
+/// 1. Stream files line by line (read one line at a time)
+/// 2. Line-by-Line Pre-Validation (CPU)
+/// 3. Store valid lines in RAM buffer
+/// 4. Write to temporary file when buffer is full
+/// 5. Use MemoryManager for proper buffer management
+fn process_single_csv_with_algorithm_streaming(
+    input_path: &Path,
+    output_path: &Path,
+    error_writer: &mut BufWriter<File>,
+    memory_manager: &mut MemoryManager,
+    verbose: bool
+) -> Result<()> {
+    if verbose {
+        println!("  📖 Streaming file: {}", input_path.display());
+    }
+
+    // Open the CSV file in streaming mode (read one line at a time)
+    let file = File::open(input_path)?;
+    let reader = BufReader::new(file);
+
+    let output_file = File::create(output_path)?;
+    let mut writer = BufWriter::new(output_file);
+
+    let mut valid_lines = 0;
+    let mut total_lines = 0;
+    let mut invalid_lines = 0;
+    let mut temp_file_count = 0;
+
+    // Clear RAM buffer before starting
+    memory_manager.clear_ram_buffer();
+
+    // Stream files line by line as per algorithm
+    for line in reader.lines() {
+        let line = line?;
+        total_lines += 1;
+
+        // Line-by-Line Pre-Validation (CPU) as per algorithm
+        let mut skip_reason = None;
+
+        // Skip the Line If: It contains no printable characters
+        if !line.chars().any(|c| c.is_ascii_graphic()) {
+            skip_reason = Some("no printable characters");
+        }
+        // Skip the Line If: It does not contain at least one delimiter
+        else if !DELIMITER_REGEX.is_match(&line) {
+            skip_reason = Some("no delimiter found");
+        }
+        // Skip the Line If: It does not contain an email address
+        else if !EMAIL_REGEX.is_match(&line) {
+            skip_reason = Some("no email address found");
+        }
+        // Perform more advanced validation on the CSV fields
+        else {
+            let fields = parse_csv_line(&line);
+
+            if fields.len() < 3 {
+                skip_reason = Some("fewer than 3 fields");
+            } else {
+                // Check if the line has valid field positions
+                let (user_idx, password_idx, url_idx) = detect_field_positions(&fields);
+
+                if user_idx >= fields.len() || password_idx >= fields.len() || url_idx >= fields.len() {
+                    skip_reason = Some("invalid field positions detected");
+                }
+                // Validate URL field - if we detect a URL protocol in a field that's not the URL field, skip it
+                else {
+                    for (i, field) in fields.iter().enumerate() {
+                        if i != url_idx &&
+                           (field.starts_with("http://") ||
+                            field.starts_with("https://") ||
+                            field.starts_with("android://") ||
+                            field.starts_with("ftp://") ||
+                            field.starts_with("mailto://")) {
+                            skip_reason = Some("URL protocol found in non-URL field");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(reason) = skip_reason {
+            // Log invalid or skipped lines
+            writeln!(error_writer, "{}:{}: {} - {}",
+                input_path.display(), total_lines, reason, line)?;
+            invalid_lines += 1;
+            continue;
+        }
+
+        // If the line passes all checks, store it in the RAM buffer (as per algorithm)
+        let line_with_newline = format!("{}\n", line);
+        let line_bytes = line_with_newline.as_bytes();
+
+        // Check if adding this line would exceed RAM buffer capacity
+        if !memory_manager.can_fit_in_ram_buffer(line_bytes.len()) {
+            // Write Filtered Lines to a Temporary File (as per algorithm)
+            if verbose && temp_file_count == 0 {
+                println!("    💾 RAM buffer full, writing to temporary file...");
+            }
+
+            let buffer_contents = memory_manager.get_ram_buffer_contents();
+            writer.write_all(buffer_contents)?;
+            memory_manager.clear_ram_buffer();
+            temp_file_count += 1;
+
+            // Check memory pressure after buffer flush
+            if memory_manager.check_memory_pressure()? {
+                if verbose {
+                    println!("    ⚠️ Memory pressure detected during processing");
+                }
+            }
+        }
+
+        // Add line to RAM buffer
+        if memory_manager.add_to_ram_buffer(line_bytes)? {
+            valid_lines += 1;
+            memory_manager.record_processed(1);
+        } else {
+            // This shouldn't happen since we checked capacity above, but handle gracefully
+            writeln!(error_writer, "{}:{}: buffer overflow - {}",
+                input_path.display(), total_lines, line)?;
+            invalid_lines += 1;
+        }
+    }
+
+    // Write remaining buffer content (as per algorithm)
+    let remaining_contents = memory_manager.get_ram_buffer_contents();
+    if !remaining_contents.is_empty() {
+        writer.write_all(remaining_contents)?;
+        if verbose && temp_file_count > 0 {
+            println!("    💾 Writing final buffer contents to temporary file");
+        }
+    }
+
+    writer.flush()?;
+
+    if verbose {
+        println!("    ✅ Processed {} lines: {} valid, {} invalid",
+                total_lines, valid_lines, invalid_lines);
+        if temp_file_count > 0 {
+            println!("    📁 Buffer flushed {} times during processing", temp_file_count);
+        }
+    }
+
+    Ok(())
 }
 
 /// Process a single CSV file with validation
@@ -124,24 +297,24 @@ fn process_single_csv_file_with_validation(
         // Perform more advanced validation on the CSV fields
         else {
             let fields = parse_csv_line(&line);
-            
+
             if fields.len() < 3 {
                 skip_reason = Some("fewer than 3 fields");
             } else {
                 // Check if the line has valid field positions
                 let (user_idx, password_idx, url_idx) = detect_field_positions(&fields);
-                
+
                 if user_idx >= fields.len() || password_idx >= fields.len() || url_idx >= fields.len() {
                     skip_reason = Some("invalid field positions detected");
                 }
                 // Validate URL field - if we detect a URL protocol in a field that's not the URL field, skip it
                 else {
                     for (i, field) in fields.iter().enumerate() {
-                        if i != url_idx && 
-                           (field.starts_with("http://") || 
-                            field.starts_with("https://") || 
-                            field.starts_with("android://") || 
-                            field.starts_with("ftp://") || 
+                        if i != url_idx &&
+                           (field.starts_with("http://") ||
+                            field.starts_with("https://") ||
+                            field.starts_with("android://") ||
+                            field.starts_with("ftp://") ||
                             field.starts_with("mailto://")) {
                             skip_reason = Some("URL protocol found in non-URL field");
                             break;
@@ -285,6 +458,255 @@ pub fn deduplicate_records(
     stats.processing_time_seconds = start_time.elapsed().as_secs_f64();
 
     Ok(stats)
+}
+
+/// Process temporary files with GPU acceleration (Algorithm Step 2.2)
+///
+/// This function implements the exact algorithm from docs/algorithm.md Section 2.2:
+/// 1. Read temporary files in chunks of RAM Buffer Size
+/// 2. Transfer chunks to GPU buffer for parallel processing
+/// 3. Use CUDA kernels for parallel processing (email and URL normalization)
+/// 4. Parse lines into Record structs
+/// 5. Pass processed records back to CPU for deduplication
+#[cfg(feature = "cuda")]
+pub fn process_temp_files_with_gpu(
+    temp_files: &[PathBuf],
+    output_path: &Path,
+    config: &Config,
+    memory_manager: &MemoryManager,
+    cuda_processor: &CudaProcessor,
+    verbose: bool,
+) -> Result<ProcessingStats> {
+    let start_time = Instant::now();
+    let mut dedup_map: HashMap<String, Record> = HashMap::new();
+    let mut stats = ProcessingStats::default();
+    stats.files_processed = temp_files.len();
+
+    let output_file = File::create(output_path)?;
+    let mut writer = BufWriter::new(output_file);
+
+    // Write CSV header
+    writeln!(writer, "username,password,normalized_url")?;
+
+    if verbose {
+        println!("🚀 Processing {} temporary files with GPU acceleration...", temp_files.len());
+        println!("📊 GPU batch size: {}", cuda_processor.get_optimal_batch_size());
+    }
+
+    // Process each temporary file generated in step 2.1
+    for (i, temp_file) in temp_files.iter().enumerate() {
+        if verbose {
+            println!("🔄 Processing temp file {}/{}: {}", i + 1, temp_files.len(), temp_file.display());
+        }
+
+        process_single_temp_file_with_gpu(
+            temp_file,
+            &mut dedup_map,
+            &mut stats,
+            config,
+            memory_manager,
+            cuda_processor,
+            verbose,
+        )?;
+
+        // Check memory limit and flush if necessary
+        if dedup_map.len() >= config.processing.max_memory_records {
+            if verbose {
+                println!("  💾 Memory limit reached ({} records), flushing to disk...", dedup_map.len());
+            }
+            flush_records_to_disk(&mut dedup_map, &mut writer)?;
+        }
+    }
+
+    // Write all unique records to output
+    for record in dedup_map.values() {
+        writeln!(writer, "{},{},{}", record.user, record.password, record.normalized_url)?;
+    }
+
+    writer.flush()?;
+    stats.unique_records = dedup_map.len();
+    stats.duplicates_removed = stats.total_records - stats.unique_records;
+    stats.processing_time_seconds = start_time.elapsed().as_secs_f64();
+
+    if verbose {
+        println!("✅ GPU processing complete!");
+        println!("📈 Final stats: {} unique, {} duplicates removed, {:.2}s processing time",
+                stats.unique_records, stats.duplicates_removed, stats.processing_time_seconds);
+    }
+
+    Ok(stats)
+}
+
+/// Process a single temporary file with GPU acceleration
+///
+/// This implements the algorithm's chunk-based GPU processing:
+/// 1. Read file in chunks of RAM Buffer Size
+/// 2. Convert lines to CudaRecord structs
+/// 3. Process chunks on GPU for normalization
+/// 4. Insert into deduplication map
+#[cfg(feature = "cuda")]
+fn process_single_temp_file_with_gpu(
+    temp_file: &Path,
+    dedup_map: &mut HashMap<String, Record>,
+    stats: &mut ProcessingStats,
+    config: &Config,
+    _memory_manager: &MemoryManager,
+    cuda_processor: &CudaProcessor,
+    verbose: bool,
+) -> Result<()> {
+    let file = File::open(temp_file)?;
+    let reader = BufReader::new(file);
+
+    let chunk_size_bytes = GPU_TEMP_FILE_READ_CHUNK_SIZE_MB * BYTES_PER_MB;
+    let mut current_chunk_size = 0;
+    let mut cuda_records = Vec::new();
+
+    for line in reader.lines() {
+        let line = line?;
+        stats.total_records += 1;
+        current_chunk_size += line.len();
+
+        // Parse line into CudaRecord for GPU processing
+        if let Some(cuda_record) = parse_line_to_cuda_record(&line, &config.deduplication) {
+            cuda_records.push(cuda_record);
+
+            // Process chunk when it reaches RAM buffer size or GPU batch size
+            if current_chunk_size >= chunk_size_bytes ||
+               cuda_records.len() >= GPU_CHUNK_PROCESSING_BATCH_SIZE {
+
+                process_cuda_records_chunk(
+                    &mut cuda_records,
+                    dedup_map,
+                    stats,
+                    cuda_processor,
+                    &config.deduplication,
+                    verbose,
+                )?;
+
+                current_chunk_size = 0;
+            }
+        } else {
+            stats.invalid_records += 1;
+        }
+    }
+
+    // Process remaining records in final chunk
+    if !cuda_records.is_empty() {
+        process_cuda_records_chunk(
+            &mut cuda_records,
+            dedup_map,
+            stats,
+            cuda_processor,
+            &config.deduplication,
+            verbose,
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Parse a CSV line into a CudaRecord for GPU processing
+#[cfg(feature = "cuda")]
+fn parse_line_to_cuda_record(line: &str, _config: &DeduplicationConfig) -> Option<CudaRecord> {
+    // Parse CSV line into fields
+    let fields: Vec<String> = parse_csv_line(line);
+
+    if fields.len() < 3 {
+        return None;
+    }
+
+    // Check if any field contains an email before proceeding
+    let has_email = fields.iter().any(|field| EMAIL_REGEX.is_match(field));
+    if !has_email {
+        return None; // Skip rows without email addresses
+    }
+
+    // Detect which fields are username, password, and URL
+    let (user_idx, password_idx, url_idx) = detect_field_positions(&fields);
+
+    if user_idx >= fields.len() || password_idx >= fields.len() || url_idx >= fields.len() {
+        return None;
+    }
+
+    // Ensure the detected user field is actually an email (double-check)
+    if !EMAIL_REGEX.is_match(&fields[user_idx]) {
+        return None; // Skip if detected user field is not an email
+    }
+
+    Some(CudaRecord {
+        user: fields[user_idx].clone(),
+        password: fields[password_idx].clone(),
+        url: fields[url_idx].clone(),
+        normalized_user: String::new(), // Will be filled by GPU
+        normalized_url: String::new(),  // Will be filled by GPU
+    })
+}
+
+/// Process a chunk of CudaRecords on GPU and insert into deduplication map
+#[cfg(feature = "cuda")]
+fn process_cuda_records_chunk(
+    cuda_records: &mut Vec<CudaRecord>,
+    dedup_map: &mut HashMap<String, Record>,
+    _stats: &mut ProcessingStats,
+    cuda_processor: &CudaProcessor,
+    config: &DeduplicationConfig,
+    verbose: bool,
+) -> Result<()> {
+    if cuda_records.is_empty() {
+        return Ok(());
+    }
+
+    if verbose && cuda_records.len() > 1000 {
+        println!("    🚀 Processing {} records on GPU...", cuda_records.len());
+    }
+
+    // Process batch with CUDA (normalizes emails and URLs)
+    cuda_processor.process_batch(cuda_records, config.case_sensitive_usernames)?;
+
+    // Convert CudaRecords to Records and insert into deduplication map
+    for cuda_record in cuda_records.drain(..) {
+        let completeness_score = calculate_completeness_score(&cuda_record);
+        let record = Record {
+            user: cuda_record.user,
+            password: cuda_record.password,
+            url: cuda_record.url,
+            normalized_user: cuda_record.normalized_user,
+            normalized_url: cuda_record.normalized_url,
+            completeness_score,
+        };
+
+        let key = record.dedup_key();
+        match dedup_map.get(&key) {
+            Some(existing) => {
+                if record.is_more_complete_than(existing) {
+                    dedup_map.insert(key, record);
+                }
+            }
+            None => {
+                dedup_map.insert(key, record);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Calculate completeness score for a CudaRecord
+#[cfg(feature = "cuda")]
+fn calculate_completeness_score(record: &CudaRecord) -> f32 {
+    let mut score = 0.0;
+
+    if !record.user.is_empty() {
+        score += 1.0 + (record.user.len() as f32 * 0.01);
+    }
+    if !record.password.is_empty() {
+        score += 1.0 + (record.password.len() as f32 * 0.01);
+    }
+    if !record.url.is_empty() {
+        score += 1.0 + (record.url.len() as f32 * 0.01);
+    }
+
+    score
 }
 
 /// Parse a CSV line into a Record
@@ -488,32 +910,26 @@ mod tests {
             normalize_urls: true,
         };
 
-        // Create test records
+        // Create test records using the proper constructor
         let mut records = vec![
-            Record {
-                user: "user1@example.com".to_string(),
-                password: "pass1".to_string(),
-                url: "https://example.com".to_string(),
-                normalized_user: String::new(),
-                normalized_url: String::new(),
-                completeness_score: 0.0,
-            },
-            Record {
-                user: "user1@example.com".to_string(), // Same user (duplicate)
-                password: "betterpass".to_string(),     // Better password
-                url: "http://example.com/login".to_string(),
-                normalized_user: String::new(),
-                normalized_url: String::new(),
-                completeness_score: 0.0,
-            },
-            Record {
-                user: "user2@example.com".to_string(),
-                password: "pass2".to_string(),
-                url: "https://another.com".to_string(),
-                normalized_user: String::new(),
-                normalized_url: String::new(),
-                completeness_score: 0.0,
-            },
+            Record::new(
+                "user1@example.com".to_string(),
+                "pass1".to_string(),
+                "https://example.com".to_string(),
+                config.case_sensitive_usernames,
+            ).unwrap(),
+            Record::new(
+                "user1@example.com".to_string(), // Same user (duplicate)
+                "betterpass".to_string(),        // Better password (longer = higher score)
+                "http://example.com/login".to_string(),
+                config.case_sensitive_usernames,
+            ).unwrap(),
+            Record::new(
+                "user2@example.com".to_string(),
+                "pass2".to_string(),
+                "https://another.com".to_string(),
+                config.case_sensitive_usernames,
+            ).unwrap(),
         ];
 
         let mut dedup_map = HashMap::new();
@@ -540,11 +956,71 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_parse_line_to_cuda_record() {
+        use crate::config::model::DeduplicationConfig;
+
+        let config = DeduplicationConfig {
+            case_sensitive_usernames: false,
+            normalize_urls: true,
+        };
+
+        // Valid line
+        let line = "user@example.com,password123,https://example.com";
+        let cuda_record = parse_line_to_cuda_record(line, &config);
+        assert!(cuda_record.is_some());
+        let cuda_record = cuda_record.unwrap();
+        assert_eq!(cuda_record.user, "user@example.com");
+        assert_eq!(cuda_record.password, "password123");
+        assert_eq!(cuda_record.url, "https://example.com");
+        assert_eq!(cuda_record.normalized_user, ""); // Will be filled by GPU
+        assert_eq!(cuda_record.normalized_url, "");  // Will be filled by GPU
+
+        // Invalid line (no email)
+        let line = "not_an_email,password123,https://example.com";
+        let cuda_record = parse_line_to_cuda_record(line, &config);
+        assert!(cuda_record.is_none());
+
+        // Invalid line (too few fields)
+        let line = "user@example.com,password123";
+        let cuda_record = parse_line_to_cuda_record(line, &config);
+        assert!(cuda_record.is_none());
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_calculate_completeness_score() {
+        use crate::cuda::processor::CudaRecord;
+
+        let record = CudaRecord {
+            user: "user@example.com".to_string(),
+            password: "password123".to_string(),
+            url: "https://example.com".to_string(),
+            normalized_user: "user@example.com".to_string(),
+            normalized_url: "example.com".to_string(),
+        };
+
+        let score = calculate_completeness_score(&record);
+        assert!(score > 3.0); // Should have base score of 3.0 plus length bonuses
+
+        let empty_record = CudaRecord {
+            user: "".to_string(),
+            password: "".to_string(),
+            url: "".to_string(),
+            normalized_user: "".to_string(),
+            normalized_url: "".to_string(),
+        };
+
+        let empty_score = calculate_completeness_score(&empty_record);
+        assert_eq!(empty_score, 0.0);
+    }
+
     #[test]
     fn test_deduplicate_records() -> Result<()> {
         // Create temporary directory
         let temp_dir = tempdir()?;
-        
+
         // Create test files
         let file1_path = temp_dir.path().join("test1.csv");
         let file2_path = temp_dir.path().join("test2.csv");
@@ -616,4 +1092,4 @@ mod tests {
 
         Ok(())
     }
-} 
+}

@@ -47,3 +47,8 @@ pub const DYNAMIC_MEMORY_CHECK_INTERVAL_RECORDS: usize = 1000;  // Check memory 
 // Safety limits to prevent OOM during resource querying
 pub const MAX_RAM_BUFFER_SIZE_GB: f64 = 8.0;  // Maximum 8GB RAM buffer
 pub const MAX_GPU_BUFFER_SIZE_GB: f64 = 4.0;  // Maximum 4GB GPU buffer
+
+// GPU processing constants for algorithm step 2.2
+pub const GPU_CHUNK_PROCESSING_BATCH_SIZE: usize = 10000;  // Records per GPU batch
+pub const GPU_TEMP_FILE_READ_CHUNK_SIZE_MB: usize = 64;    // MB to read from temp files at once
+pub const GPU_STRING_BUFFER_PADDING: usize = 256;         // Extra bytes per string for GPU processing

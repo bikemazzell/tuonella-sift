@@ -30,7 +30,7 @@ once_cell = "1.19"
 # Memory management and performance
 memmap2 = "0.9"
 crossbeam = "0.8"
-parking_lot = "0.12"
+parking_lot = "0.12.4"
 
 # System utilities
 sysinfo = "0.35.1"
@@ -71,12 +71,8 @@ name = "tuonella-sift"
 path = "src/bin/tuonella-sift.rs"
 
 [[example]]
-name = "sample_deduplicator"
-path = "examples/sample_deduplicator.rs"
-
-[[example]]
-name = "test_data_generator"
-path = "examples/test_data_generator.rs"
+name = "test_gpu_processing"
+path = "examples/test_gpu_processing.rs"
 
 [lib]
 name = "tuonella_sift"
