@@ -479,6 +479,43 @@ impl CudaProcessor {
     pub fn get_optimal_batch_size(&self) -> usize {
         self.optimal_batch_size
     }
+
+    /// Release GPU resources after processing a chunk
+    ///
+    /// This implements Section 4: "Free GPU and RAM buffers after processing each chunk to avoid memory leaks"
+    pub fn release_gpu_resources(&self) -> Result<()> {
+        // Force synchronization to ensure all GPU operations are complete
+        let stream = self.context.default_stream();
+        stream.synchronize()?;
+
+        // The cudarc library automatically manages GPU memory through RAII
+        // When GPU buffers go out of scope, they are automatically freed
+        // This method ensures synchronization and can be extended for manual cleanup if needed
+
+        Ok(())
+    }
+
+    /// Get current GPU memory usage for monitoring
+    ///
+    /// This helps track memory pressure and resource utilization
+    pub fn get_gpu_memory_usage(&self) -> Result<(usize, usize), DriverError> {
+        use cudarc::driver::result;
+        result::mem_get_info()
+    }
+
+    /// Check if GPU memory pressure exists
+    ///
+    /// Returns true if GPU memory usage is above the pressure threshold
+    pub fn check_gpu_memory_pressure(&self) -> Result<bool> {
+        let (free_memory, total_memory) = self.get_gpu_memory_usage()
+            .map_err(|e| anyhow::anyhow!("Failed to get GPU memory info: {}", e))?;
+
+        let used_memory = total_memory - free_memory;
+        let usage_percent = (used_memory as f64 / total_memory as f64) * 100.0;
+
+        // Use the same threshold as CPU memory pressure
+        Ok(usage_percent > crate::constants::MEMORY_PRESSURE_THRESHOLD_PERCENT)
+    }
 }
 
 // When CUDA is not available, provide empty stubs

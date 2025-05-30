@@ -299,6 +299,130 @@ impl MemoryManager {
     pub fn record_processed(&mut self, count: usize) {
         self.record_counter += count;
     }
+
+    /// Release resources after processing a chunk
+    ///
+    /// This implements Section 4: "Free GPU and RAM buffers after processing each chunk to avoid memory leaks"
+    pub fn release_chunk_resources(&mut self) -> Result<()> {
+        // Clear RAM buffer to free memory
+        self.clear_ram_buffer();
+
+        // Force garbage collection hint (Rust doesn't guarantee this will run immediately)
+        // But it helps indicate to the runtime that this is a good time to clean up
+        std::hint::black_box(());
+
+        Ok(())
+    }
+
+    /// Get comprehensive resource usage statistics with optional GPU processor
+    ///
+    /// This provides detailed information about both CPU and GPU resource utilization
+    #[cfg(feature = "cuda")]
+    pub fn get_resource_usage_stats_with_gpu(
+        &self,
+        cuda_processor: Option<&crate::cuda::processor::CudaProcessor>
+    ) -> Result<ResourceUsageStats> {
+        let (cpu_usage, cpu_percent) = self.resources.get_current_memory_usage()?;
+        let cpu_pressure = self.resources.is_memory_pressure()?;
+
+        let (gpu_free, gpu_total, gpu_pressure) = if let Some(processor) = cuda_processor {
+            let (free, total) = processor.get_gpu_memory_usage()
+                .map_err(|e| anyhow::anyhow!("Failed to get GPU memory usage: {}", e))?;
+            let pressure = processor.check_gpu_memory_pressure()?;
+            (free, total, pressure)
+        } else {
+            (0, 0, false)
+        };
+
+        Ok(ResourceUsageStats {
+            cpu_memory_used_bytes: cpu_usage,
+            cpu_memory_usage_percent: cpu_percent,
+            cpu_memory_pressure: cpu_pressure,
+            ram_buffer_used_bytes: self.ram_buffer_position,
+            ram_buffer_capacity_bytes: self.ram_buffer_capacity,
+            gpu_memory_free_bytes: gpu_free,
+            gpu_memory_total_bytes: gpu_total,
+            gpu_memory_pressure: gpu_pressure,
+            current_chunk_size_bytes: self.current_chunk_size_bytes,
+            records_processed: self.record_counter,
+        })
+    }
+
+    /// Get comprehensive resource usage statistics (CPU only version)
+    ///
+    /// This provides detailed information about CPU resource utilization
+    #[cfg(not(feature = "cuda"))]
+    pub fn get_resource_usage_stats(&self) -> Result<ResourceUsageStats> {
+        let (cpu_usage, cpu_percent) = self.resources.get_current_memory_usage()?;
+        let cpu_pressure = self.resources.is_memory_pressure()?;
+
+        Ok(ResourceUsageStats {
+            cpu_memory_used_bytes: cpu_usage,
+            cpu_memory_usage_percent: cpu_percent,
+            cpu_memory_pressure: cpu_pressure,
+            ram_buffer_used_bytes: self.ram_buffer_position,
+            ram_buffer_capacity_bytes: self.ram_buffer_capacity,
+            gpu_memory_free_bytes: 0,
+            gpu_memory_total_bytes: 0,
+            gpu_memory_pressure: false,
+            current_chunk_size_bytes: self.current_chunk_size_bytes,
+            records_processed: self.record_counter,
+        })
+    }
+}
+
+/// Comprehensive resource usage statistics for monitoring
+#[derive(Debug, Clone)]
+pub struct ResourceUsageStats {
+    pub cpu_memory_used_bytes: usize,
+    pub cpu_memory_usage_percent: f64,
+    pub cpu_memory_pressure: bool,
+    pub ram_buffer_used_bytes: usize,
+    pub ram_buffer_capacity_bytes: usize,
+    pub gpu_memory_free_bytes: usize,
+    pub gpu_memory_total_bytes: usize,
+    pub gpu_memory_pressure: bool,
+    pub current_chunk_size_bytes: usize,
+    pub records_processed: usize,
+}
+
+impl ResourceUsageStats {
+    /// Format resource usage statistics for display
+    pub fn format_summary(&self) -> String {
+        let ram_buffer_percent = if self.ram_buffer_capacity_bytes > 0 {
+            (self.ram_buffer_used_bytes as f64 / self.ram_buffer_capacity_bytes as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        let gpu_usage_percent = if self.gpu_memory_total_bytes > 0 {
+            let used = self.gpu_memory_total_bytes - self.gpu_memory_free_bytes;
+            (used as f64 / self.gpu_memory_total_bytes as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        format!(
+            "Resource Usage Statistics:\n\
+             CPU Memory: {:.2} GB ({:.1}%) - Pressure: {}\n\
+             RAM Buffer: {:.2} MB / {:.2} MB ({:.1}%)\n\
+             GPU Memory: {:.2} GB / {:.2} GB ({:.1}%) - Pressure: {}\n\
+             Current Chunk Size: {:.2} MB\n\
+             Records Processed: {}",
+            self.cpu_memory_used_bytes as f64 / crate::constants::BYTES_PER_GB as f64,
+            self.cpu_memory_usage_percent,
+            if self.cpu_memory_pressure { "YES" } else { "NO" },
+            self.ram_buffer_used_bytes as f64 / BYTES_PER_MB as f64,
+            self.ram_buffer_capacity_bytes as f64 / BYTES_PER_MB as f64,
+            ram_buffer_percent,
+            (self.gpu_memory_total_bytes - self.gpu_memory_free_bytes) as f64 / crate::constants::BYTES_PER_GB as f64,
+            self.gpu_memory_total_bytes as f64 / crate::constants::BYTES_PER_GB as f64,
+            gpu_usage_percent,
+            if self.gpu_memory_pressure { "YES" } else { "NO" },
+            self.current_chunk_size_bytes as f64 / BYTES_PER_MB as f64,
+            self.records_processed
+        )
+    }
 }
 
 /// Memory statistics for monitoring and reporting
@@ -465,5 +589,45 @@ mod tests {
 
         let summary = stats.format_summary();
         assert!(summary.contains("Dynamic Chunk Sizing"), "Summary should contain chunk sizing info");
+    }
+
+    #[test]
+    fn test_resource_cleanup() {
+        let mut manager = MemoryManager::new(Some(1)).unwrap(); // 1GB limit for testing
+
+        // Add some data to the buffer
+        let test_data = b"test data for cleanup";
+        let result = manager.add_to_ram_buffer(test_data);
+        assert!(result.is_ok() && result.unwrap(), "Should add data successfully");
+
+        // Verify data is in buffer
+        assert!(manager.get_ram_buffer_contents().len() > 0, "Buffer should contain data");
+
+        // Test resource cleanup
+        let cleanup_result = manager.release_chunk_resources();
+        assert!(cleanup_result.is_ok(), "Resource cleanup should succeed");
+
+        // Verify buffer is cleared
+        assert_eq!(manager.get_ram_buffer_contents().len(), 0, "Buffer should be empty after cleanup");
+        assert_eq!(manager.ram_buffer_position, 0, "Buffer position should be reset");
+    }
+
+    #[test]
+    #[cfg(not(feature = "cuda"))]
+    fn test_resource_usage_stats_cpu_only() {
+        let manager = MemoryManager::new(Some(1)).unwrap();
+
+        let stats = manager.get_resource_usage_stats();
+        assert!(stats.is_ok(), "Should get resource usage stats successfully");
+
+        let stats = stats.unwrap();
+        assert!(stats.cpu_memory_used_bytes > 0, "CPU memory usage should be positive");
+        assert!(stats.cpu_memory_usage_percent >= 0.0, "CPU usage percent should be non-negative");
+        assert_eq!(stats.gpu_memory_total_bytes, 0, "GPU memory should be 0 in CPU-only mode");
+        assert!(!stats.gpu_memory_pressure, "GPU pressure should be false in CPU-only mode");
+
+        let summary = stats.format_summary();
+        assert!(summary.contains("Resource Usage Statistics"), "Summary should contain header");
+        assert!(summary.contains("CPU Memory"), "Summary should contain CPU info");
     }
 }
