@@ -1,6 +1,145 @@
 use sysinfo::{System, Pid};
 use std::time::{Duration, Instant};
-use crate::constants::BYTES_PER_GB;
+use crate::constants::{
+    BYTES_PER_GB, ALGORITHM_RAM_ALLOCATION_PERCENT, MEMORY_SAFETY_MARGIN
+};
+
+#[cfg(feature = "cuda")]
+use crate::constants::ALGORITHM_GPU_ALLOCATION_PERCENT;
+use anyhow::Result;
+
+#[cfg(feature = "cuda")]
+use crate::cuda::processor::CudaDeviceProperties;
+
+/// Comprehensive system resource information following algorithm specifications
+#[derive(Debug, Clone)]
+pub struct SystemResources {
+    pub total_ram_bytes: usize,
+    pub available_ram_bytes: usize,
+    pub ram_limit_bytes: usize,  // 90% of available RAM as per algorithm
+    pub ram_buffer_size_bytes: usize,  // Buffer size for processing
+    #[cfg(feature = "cuda")]
+    pub gpu_properties: Option<CudaDeviceProperties>,
+    #[cfg(feature = "cuda")]
+    pub gpu_limit_bytes: usize,  // 90% of available GPU memory as per algorithm
+    #[cfg(feature = "cuda")]
+    pub gpu_buffer_size_bytes: usize,  // GPU buffer size for processing
+}
+
+impl SystemResources {
+    /// Query system resources dynamically as specified in algorithm step 1
+    pub fn query_system_resources(user_ram_limit_gb: Option<usize>) -> Result<Self> {
+        let mut system = System::new_all();
+        system.refresh_all();
+
+        let total_ram_bytes = system.total_memory() as usize;
+        let available_ram_bytes = system.available_memory() as usize;
+
+        // Calculate RAM limit: min(available_ram, user_limit) * 90% as per algorithm
+        let user_ram_limit_bytes = user_ram_limit_gb
+            .map(|gb| gb * BYTES_PER_GB as usize)
+            .unwrap_or(available_ram_bytes);
+
+        let ram_limit_bytes = ((available_ram_bytes.min(user_ram_limit_bytes) as f64)
+            * ALGORITHM_RAM_ALLOCATION_PERCENT * MEMORY_SAFETY_MARGIN) as usize;
+
+        // RAM Buffer Size: Allocate ~90% of the RAM_limit for buffering file chunks
+        let ram_buffer_size_bytes = (ram_limit_bytes as f64 * ALGORITHM_RAM_ALLOCATION_PERCENT) as usize;
+
+        #[cfg(feature = "cuda")]
+        let (gpu_properties, gpu_limit_bytes, gpu_buffer_size_bytes) = {
+            // Try to get GPU properties - this will fail gracefully if no CUDA device
+            match Self::query_gpu_resources() {
+                Ok((props, limit, buffer)) => (Some(props), limit, buffer),
+                Err(_) => (None, 0, 0),
+            }
+        };
+
+        Ok(SystemResources {
+            total_ram_bytes,
+            available_ram_bytes,
+            ram_limit_bytes,
+            ram_buffer_size_bytes,
+            #[cfg(feature = "cuda")]
+            gpu_properties,
+            #[cfg(feature = "cuda")]
+            gpu_limit_bytes,
+            #[cfg(feature = "cuda")]
+            gpu_buffer_size_bytes,
+        })
+    }
+
+    #[cfg(feature = "cuda")]
+    fn query_gpu_resources() -> Result<(CudaDeviceProperties, usize, usize)> {
+        use cudarc::driver::safe::CudaContext;
+        use std::sync::Arc;
+
+        // Initialize CUDA context to query device properties
+        let context = Arc::new(CudaContext::new(0)?);
+        let props = crate::cuda::processor::CudaProcessor::get_device_properties_internal(&context)?;
+
+        // Calculate GPU limit: 90% of available GPU memory as per algorithm
+        let gpu_limit_bytes = ((props.free_memory as f64)
+            * ALGORITHM_GPU_ALLOCATION_PERCENT * MEMORY_SAFETY_MARGIN) as usize;
+
+        // GPU Chunk Size: Allocate ~90% of the GPU_limit for processing
+        let gpu_buffer_size_bytes = (gpu_limit_bytes as f64 * ALGORITHM_GPU_ALLOCATION_PERCENT) as usize;
+
+        Ok((props, gpu_limit_bytes, gpu_buffer_size_bytes))
+    }
+
+    /// Get current memory usage for monitoring
+    pub fn get_current_memory_usage(&self) -> Result<(usize, f64)> {
+        let current_usage = get_process_memory_usage();
+        let usage_percent = (current_usage as f64 / self.ram_limit_bytes as f64) * 100.0;
+        Ok((current_usage, usage_percent))
+    }
+
+    /// Check if we're approaching memory limits
+    pub fn is_memory_pressure(&self) -> Result<bool> {
+        let (_, usage_percent) = self.get_current_memory_usage()?;
+        Ok(usage_percent > 80.0)  // Consider 80% as pressure threshold
+    }
+
+    /// Get formatted resource summary for logging
+    pub fn format_summary(&self) -> String {
+        #[cfg(feature = "cuda")]
+        {
+            let mut summary = format!(
+                "System Resources:\n  RAM: {:.2} GB total, {:.2} GB available, {:.2} GB limit, {:.2} GB buffer",
+                self.total_ram_bytes as f64 / BYTES_PER_GB as f64,
+                self.available_ram_bytes as f64 / BYTES_PER_GB as f64,
+                self.ram_limit_bytes as f64 / BYTES_PER_GB as f64,
+                self.ram_buffer_size_bytes as f64 / BYTES_PER_GB as f64
+            );
+
+            if let Some(ref props) = self.gpu_properties {
+                summary.push_str(&format!(
+                    "\n  GPU: {:.2} GB total, {:.2} GB free, {:.2} GB limit, {:.2} GB buffer",
+                    props.total_memory as f64 / BYTES_PER_GB as f64,
+                    props.free_memory as f64 / BYTES_PER_GB as f64,
+                    self.gpu_limit_bytes as f64 / BYTES_PER_GB as f64,
+                    self.gpu_buffer_size_bytes as f64 / BYTES_PER_GB as f64
+                ));
+            } else {
+                summary.push_str("\n  GPU: Not available");
+            }
+
+            summary
+        }
+
+        #[cfg(not(feature = "cuda"))]
+        {
+            format!(
+                "System Resources:\n  RAM: {:.2} GB total, {:.2} GB available, {:.2} GB limit, {:.2} GB buffer",
+                self.total_ram_bytes as f64 / BYTES_PER_GB as f64,
+                self.available_ram_bytes as f64 / BYTES_PER_GB as f64,
+                self.ram_limit_bytes as f64 / BYTES_PER_GB as f64,
+                self.ram_buffer_size_bytes as f64 / BYTES_PER_GB as f64
+            )
+        }
+    }
+}
 
 /// Get information about the system's memory
 ///
@@ -93,11 +232,11 @@ pub fn estimate_remaining_time(
 
     let total_estimated = elapsed.as_secs_f64() / progress;
     let remaining_secs = total_estimated - elapsed.as_secs_f64();
-    
+
     if remaining_secs <= 0.0 {
         return Some(Duration::from_secs(0));
     }
-    
+
     Some(Duration::from_secs_f64(remaining_secs))
 }
 
@@ -138,17 +277,44 @@ mod tests {
     #[test]
     fn test_estimate_remaining_time() {
         let start = Instant::now();
-        
+
         // No progress yet
         assert_eq!(estimate_remaining_time(start, 100, 0), None);
-        
+
         // Some progress
         sleep(Duration::from_millis(100));
         let remaining = estimate_remaining_time(start, 100, 10);
         assert!(remaining.is_some());
-        
+
         // Complete
         let remaining = estimate_remaining_time(start, 100, 100);
         assert_eq!(remaining.unwrap(), Duration::from_secs(0));
     }
-} 
+
+    #[test]
+    fn test_system_resources_query() {
+        // Test basic resource querying
+        let resources = SystemResources::query_system_resources(None);
+        assert!(resources.is_ok(), "Should be able to query system resources");
+
+        let resources = resources.unwrap();
+        assert!(resources.total_ram_bytes > 0, "Total RAM should be positive");
+        assert!(resources.available_ram_bytes > 0, "Available RAM should be positive");
+        assert!(resources.ram_limit_bytes > 0, "RAM limit should be positive");
+        assert!(resources.ram_buffer_size_bytes > 0, "RAM buffer size should be positive");
+
+        // Test with user limit
+        let resources_limited = SystemResources::query_system_resources(Some(1));
+        assert!(resources_limited.is_ok(), "Should handle user RAM limit");
+
+        // Test memory usage monitoring
+        let (usage, percent) = resources.get_current_memory_usage().unwrap();
+        assert!(usage > 0, "Current memory usage should be positive");
+        assert!(percent >= 0.0, "Memory usage percent should be non-negative");
+
+        // Test format summary
+        let summary = resources.format_summary();
+        assert!(summary.contains("System Resources"), "Summary should contain header");
+        assert!(summary.contains("RAM:"), "Summary should contain RAM info");
+    }
+}

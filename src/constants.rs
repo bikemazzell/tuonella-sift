@@ -36,4 +36,10 @@ pub const BINARY_HEADER_SIZE_BYTES: usize = 16;
 
 // Processing constants
 pub const DEFAULT_PROGRESS_INTERVAL_SECONDS: u64 = 30;
-pub const VERBOSE_PROGRESS_INTERVAL_SECONDS: u64 = 5; 
+pub const VERBOSE_PROGRESS_INTERVAL_SECONDS: u64 = 5;
+
+// Algorithm-specific memory allocation constants (as per docs/algorithm.md)
+pub const ALGORITHM_RAM_ALLOCATION_PERCENT: f64 = 0.90;  // 90% of available RAM
+pub const ALGORITHM_GPU_ALLOCATION_PERCENT: f64 = 0.90;  // 90% of available GPU memory
+pub const MEMORY_SAFETY_MARGIN: f64 = 0.95;  // Additional safety margin
+pub const DYNAMIC_MEMORY_CHECK_INTERVAL_RECORDS: usize = 1000;  // Check memory every N records
