@@ -8,8 +8,18 @@ use crate::config::model::{Config, DeduplicationConfig};
 use crate::core::record::Record;
 use crate::core::validation::{parse_csv_line, detect_field_positions, detect_field_positions_with_config, is_valid_line_with_config, EMAIL_REGEX, DELIMITER_REGEX};
 use crate::core::memory_manager::MemoryManager;
+use crate::constants::{
+    VALIDATION_ERRORS_FILENAME, TEMP_FILE_PREFIX, FINAL_DEDUPLICATED_FILENAME, MIN_FIELD_COUNT, BYTES_PER_MB,
+    PROTOCOL_HTTP, PROTOCOL_HTTPS, PROTOCOL_ANDROID, PROTOCOL_FTP, PROTOCOL_MAILTO,
+    CORE_FIELD_COUNT, EXTRA_FIELDS_START_INDEX,
+    TEST_MAX_RAM_USAGE_GB, TEST_CHUNK_SIZE_MB, TEST_RECORD_CHUNK_SIZE, TEST_MAX_MEMORY_RECORDS
+};
 #[cfg(feature = "cuda")]
-use crate::constants::{GPU_CHUNK_PROCESSING_BATCH_SIZE, GPU_TEMP_FILE_READ_CHUNK_SIZE_MB, BYTES_PER_MB};
+use crate::constants::{
+    DEFAULT_USERNAME_HEADER, DEFAULT_PASSWORD_HEADER, DEFAULT_URL_HEADER, FIELD_NAME_TEMPLATE
+};
+#[cfg(feature = "cuda")]
+use crate::constants::{GPU_CHUNK_PROCESSING_BATCH_SIZE, GPU_TEMP_FILE_READ_CHUNK_SIZE_MB};
 
 #[cfg(feature = "cuda")]
 use crate::cuda::processor::{CudaProcessor, CudaRecord};
@@ -47,7 +57,7 @@ pub fn process_csv_files_with_algorithm_streaming(
     fs::create_dir_all(&config.io.temp_directory)?;
 
     // Create error log file
-    let error_log_path = Path::new(&config.io.temp_directory).join("validation_errors.log");
+    let error_log_path = Path::new(&config.io.temp_directory).join(VALIDATION_ERRORS_FILENAME);
     let error_file = File::create(&error_log_path)?;
     let mut error_writer = BufWriter::new(error_file);
 
@@ -64,7 +74,7 @@ pub fn process_csv_files_with_algorithm_streaming(
         }
 
         let temp_file = Path::new(&config.io.temp_directory)
-            .join(format!("temp_{}.csv", i));
+            .join(format!("{}{}.csv", TEMP_FILE_PREFIX, i));
 
         process_single_csv_with_algorithm_streaming(
             csv_file,
@@ -164,7 +174,7 @@ fn process_single_csv_with_algorithm_streaming(
         else {
             let fields = parse_csv_line(&line);
 
-            if fields.len() < 3 {
+            if fields.len() < MIN_FIELD_COUNT {
                 skip_reason = Some("fewer than 3 fields");
             } else {
                 // Check if the line has valid field positions
@@ -177,11 +187,11 @@ fn process_single_csv_with_algorithm_streaming(
                 else {
                     for (i, field) in fields.iter().enumerate() {
                         if i != url_idx &&
-                           (field.starts_with("http://") ||
-                            field.starts_with("https://") ||
-                            field.starts_with("android://") ||
-                            field.starts_with("ftp://") ||
-                            field.starts_with("mailto://")) {
+                           (field.starts_with(PROTOCOL_HTTP) ||
+                            field.starts_with(PROTOCOL_HTTPS) ||
+                            field.starts_with(PROTOCOL_ANDROID) ||
+                            field.starts_with(PROTOCOL_FTP) ||
+                            field.starts_with(PROTOCOL_MAILTO)) {
                             skip_reason = Some("URL protocol found in non-URL field");
                             break;
                         }
@@ -279,7 +289,7 @@ fn process_single_csv_file_with_validation(
     let mut valid_lines = 0;
     let mut total_lines = 0;
     let mut invalid_lines = 0;
-    let ram_buffer_size_bytes = chunk_size_mb * 1024 * 1024;
+    let ram_buffer_size_bytes = chunk_size_mb * BYTES_PER_MB;
     let mut ram_buffer = Vec::with_capacity(ram_buffer_size_bytes);
 
     for line in reader.lines() {
@@ -305,7 +315,7 @@ fn process_single_csv_file_with_validation(
         else {
             let fields = parse_csv_line(&line);
 
-            if fields.len() < 3 {
+            if fields.len() < MIN_FIELD_COUNT {
                 skip_reason = Some("fewer than 3 fields");
             } else {
                 // Check if the line has valid field positions
@@ -318,11 +328,11 @@ fn process_single_csv_file_with_validation(
                 else {
                     for (i, field) in fields.iter().enumerate() {
                         if i != url_idx &&
-                           (field.starts_with("http://") ||
-                            field.starts_with("https://") ||
-                            field.starts_with("android://") ||
-                            field.starts_with("ftp://") ||
-                            field.starts_with("mailto://")) {
+                           (field.starts_with(PROTOCOL_HTTP) ||
+                            field.starts_with(PROTOCOL_HTTPS) ||
+                            field.starts_with(PROTOCOL_ANDROID) ||
+                            field.starts_with(PROTOCOL_FTP) ||
+                            field.starts_with(PROTOCOL_MAILTO)) {
                             skip_reason = Some("URL protocol found in non-URL field");
                             break;
                         }
@@ -461,8 +471,8 @@ pub fn deduplicate_records(
             let mut header_fields = vec!["username".to_string(), "password".to_string()];
 
             // Add additional field names for extra fields beyond the core 3
-            if record.all_fields.len() > 3 {
-                for j in 3..record.all_fields.len() {
+            if record.all_fields.len() > CORE_FIELD_COUNT {
+                for j in EXTRA_FIELDS_START_INDEX..record.all_fields.len() {
                     header_fields.push(format!("field_{}", j + 1));
                 }
             } else {
@@ -481,7 +491,7 @@ pub fn deduplicate_records(
             output_fields.push(record.normalized_url.clone());
 
             // Add any extra fields beyond the core 3
-            for j in 3..record.all_fields.len() {
+            for j in EXTRA_FIELDS_START_INDEX..record.all_fields.len() {
                 output_fields.push(record.all_fields[j].clone());
             }
         } else {
@@ -563,15 +573,15 @@ pub fn process_temp_files_with_gpu(
         // Write header based on first record
         if i == 0 && !header_written {
             // Create header based on the number of fields in the first record
-            let mut header_fields = vec!["username".to_string(), "password".to_string()];
+            let mut header_fields = vec![DEFAULT_USERNAME_HEADER.to_string(), DEFAULT_PASSWORD_HEADER.to_string()];
 
             // Add additional field names for extra fields beyond the core 3
             if record.all_fields.len() > 3 {
                 for j in 3..record.all_fields.len() {
-                    header_fields.push(format!("field_{}", j + 1));
+                    header_fields.push(format!(FIELD_NAME_TEMPLATE, j + 1));
                 }
             } else {
-                header_fields.push("url".to_string());
+                header_fields.push(DEFAULT_URL_HEADER.to_string());
             }
 
             writeln!(writer, "{}", header_fields.join(","))?;
@@ -685,7 +695,7 @@ fn parse_line_to_cuda_record(line: &str, config: &DeduplicationConfig) -> Option
     // Parse CSV line into fields
     let fields: Vec<String> = parse_csv_line(line);
 
-    if fields.len() < 3 {
+    if fields.len() < MIN_FIELD_COUNT {
         return None;
     }
 
@@ -879,7 +889,7 @@ pub fn process_with_complete_algorithm(
 
     // Create a temporary file for intermediate results (Section 3 requirement)
     let temp_output_dir = Path::new(&config.io.temp_directory);
-    let temp_output_file = temp_output_dir.join("final_deduplicated.csv");
+    let temp_output_file = temp_output_dir.join(FINAL_DEDUPLICATED_FILENAME);
 
     let stats = process_temp_files_with_gpu(
         &temp_files,
@@ -958,7 +968,7 @@ pub fn process_with_complete_algorithm_cpu_fallback(
 
     // Create a temporary file for intermediate results
     let temp_output_dir = Path::new(&config.io.temp_directory);
-    let temp_output_file = temp_output_dir.join("final_deduplicated.csv");
+    let temp_output_file = temp_output_dir.join(FINAL_DEDUPLICATED_FILENAME);
 
     let stats = deduplicate_records(
         &temp_files,
@@ -1440,14 +1450,14 @@ mod tests {
         // Create config
         let config = Config {
             memory: crate::config::model::MemoryConfig {
-                max_ram_usage_gb: 1,
+                max_ram_usage_gb: TEST_MAX_RAM_USAGE_GB,
                 auto_detect_memory: true,
             },
             processing: crate::config::model::ProcessingConfig {
                 enable_cuda: false,
-                chunk_size_mb: 1,
-                record_chunk_size: 10,
-                max_memory_records: 1000,
+                chunk_size_mb: TEST_CHUNK_SIZE_MB,
+                record_chunk_size: TEST_RECORD_CHUNK_SIZE,
+                max_memory_records: TEST_MAX_MEMORY_RECORDS,
             },
             io: crate::config::model::IoConfig {
                 temp_directory: temp_dir.path().to_string_lossy().to_string(),

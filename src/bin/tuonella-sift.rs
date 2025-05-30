@@ -35,12 +35,10 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let start_time = Instant::now();
 
-    // Load configuration
     let config_path = &args.config;
     println!("📚 Loading configuration from {}", config_path.display());
     let config = Config::load(config_path).await?;
 
-    // Setup directories
     std::fs::create_dir_all(&config.io.temp_directory)?;
     std::fs::create_dir_all(&config.io.output_directory)?;
 
@@ -52,7 +50,6 @@ async fn main() -> Result<()> {
     println!("🔍 Preparing to judge souls from: {}", args.input.display());
     println!("📝 The worthy shall be recorded in: {}", output_path.display());
 
-    // Initialize CUDA processor if available and not disabled
     #[cfg(feature = "cuda")]
     let cuda_processor = if !args.force_cpu && config.processing.enable_cuda {
         match CudaProcessor::new(config.cuda.clone(), 0) {
@@ -75,7 +72,6 @@ async fn main() -> Result<()> {
         None
     };
 
-    // Process CSV files
     if args.verbose {
         println!("\n🔎 Examining the scrolls (CSV files) for worthiness...");
     }
@@ -93,7 +89,6 @@ async fn main() -> Result<()> {
 
     println!("📊 Found and processed {} CSV files. Let the judgment begin!", temp_files.len());
 
-    // Deduplicate records
     println!("\n⚔️ Commencing the great deduplication cull...");
     let stats = deduplicate_records(
         &temp_files,
@@ -104,7 +99,6 @@ async fn main() -> Result<()> {
         args.verbose,
     )?;
 
-    // Clean up temporary files
     if args.verbose {
         println!("🧹 Sweeping away temporary files...");
     }
@@ -116,7 +110,6 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Print summary
     let elapsed = start_time.elapsed();
     let processing_rate = if elapsed.as_secs() > 0 {
         stats.total_records as f64 / elapsed.as_secs_f64()
@@ -134,7 +127,6 @@ async fn main() -> Result<()> {
     println!("⚠️ Invalid records (sent to the void): {}", stats.invalid_records);
     println!("⏱️ Time in the underworld: {}", format_duration(elapsed));
     
-    // Add a fun comment based on processing speed
     let fun_comment = if processing_rate > 100000.0 {
         "🚀 By Odin's Eye! That is fast!"
     } else if processing_rate > 50000.0 {
@@ -147,11 +139,8 @@ async fn main() -> Result<()> {
         "🐢 Slow and steady wins the race... eventually."
     };
     
-    println!("🔄 Processing rate: {:.2} records/sec. {}", processing_rate, fun_comment);
-    println!("📜 The book of the worthy has been written to: {}", output_path.display());
+    println!("🔄 Processing rate: {:.2} rec/sec. {}", processing_rate, fun_comment);
+    println!("📜 Output written to: {}", output_path.display());
     
-    // Add a fun farewell message
-    println!("\n👋 Tuonella thanks you for your souls! Come back with more data soon!");
-
     Ok(())
 } 

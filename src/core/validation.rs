@@ -2,7 +2,12 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use std::path::Path;
 use anyhow::Result;
-use crate::constants::{PRINTABLE_USERNAME_MIN_LENGTH, PRINTABLE_USERNAME_MAX_LENGTH};
+use crate::constants::{
+    PRINTABLE_USERNAME_MIN_LENGTH, PRINTABLE_USERNAME_MAX_LENGTH,
+    PROTOCOL_HTTP, PROTOCOL_HTTPS, PROTOCOL_ANDROID, PROTOCOL_FTP, PROTOCOL_MAILTO,
+    URL_WWW_PREFIX, CSV_EXTENSION, LONG_PASSWORD_HEURISTIC_LENGTH,
+    REVERSE_DOMAIN_MIN_LENGTH, REVERSE_DOMAIN_MIN_PARTS, MIN_FIELD_COUNT
+};
 
 // Regular expressions for validation
 pub static EMAIL_REGEX: Lazy<Regex> = Lazy::new(|| {
@@ -36,7 +41,7 @@ pub fn normalize_url(url: &str) -> String {
     let mut normalized = url.to_lowercase();
 
     // Handle Android URLs specially
-    if normalized.starts_with("android://") {
+    if normalized.starts_with(PROTOCOL_ANDROID) {
         // Extract domain after @ symbol for Android URLs
         if let Some(at_pos) = normalized.rfind('@') {
             normalized = normalized[at_pos + 1..].to_string();
@@ -56,7 +61,7 @@ pub fn normalize_url(url: &str) -> String {
     }
 
     // Remove all protocol prefixes (https://, http://, ftp://, mailto://, etc.)
-    for prefix in &["https://", "http://", "android://", "ftp://", "mailto://"] {
+    for prefix in &[PROTOCOL_HTTPS, PROTOCOL_HTTP, PROTOCOL_ANDROID, PROTOCOL_FTP, PROTOCOL_MAILTO] {
         if normalized.starts_with(prefix) {
             normalized = normalized[prefix.len()..].to_string();
             break;
@@ -64,8 +69,8 @@ pub fn normalize_url(url: &str) -> String {
     }
 
     // Remove www. prefix
-    if normalized.starts_with("www.") {
-        normalized = normalized[4..].to_string();
+    if normalized.starts_with(URL_WWW_PREFIX) {
+        normalized = normalized[URL_WWW_PREFIX.len()..].to_string();
     }
 
     // Extract domain (and port if present) before any path, query parameters, or fragments
@@ -275,14 +280,14 @@ pub fn is_valid_username_field(field: &str) -> bool {
     }
 
     // Exclude fields that contain URL-like patterns
-    if field.starts_with("http://") || field.starts_with("https://") ||
-       field.starts_with("android://") || field.starts_with("ftp://") {
+    if field.starts_with(PROTOCOL_HTTP) || field.starts_with(PROTOCOL_HTTPS) ||
+       field.starts_with(PROTOCOL_ANDROID) || field.starts_with(PROTOCOL_FTP) {
         return false;
     }
 
     // Exclude fields that look like long random strings (likely passwords)
     // This is a heuristic - very long strings with mixed case and numbers are likely passwords
-    if field.len() > 50 && field.chars().any(|c| c.is_uppercase()) &&
+    if field.len() > LONG_PASSWORD_HEURISTIC_LENGTH && field.chars().any(|c| c.is_uppercase()) &&
        field.chars().any(|c| c.is_lowercase()) && field.chars().any(|c| c.is_numeric()) {
         return false;
     }
@@ -318,7 +323,7 @@ pub fn is_valid_line_with_config(line: &str, email_username_only: bool) -> bool 
     } else {
         // For non-email mode, check if line has at least one field that could be a username
         let fields = parse_csv_line(line);
-        if fields.len() < 3 {
+        if fields.len() < MIN_FIELD_COUNT {
             return false;
         }
 
@@ -334,11 +339,11 @@ pub fn is_valid_line_with_config(line: &str, email_username_only: bool) -> bool 
 /// Checks if a field appears to be a URL
 fn is_url_field(field: &str) -> bool {
     // Check for various URL patterns with protocols (highest priority)
-    if field.starts_with("http://") ||
-       field.starts_with("https://") ||
-       field.starts_with("android://") ||
-       field.starts_with("ftp://") ||
-       field.starts_with("mailto://") {
+    if field.starts_with(PROTOCOL_HTTP) ||
+       field.starts_with(PROTOCOL_HTTPS) ||
+       field.starts_with(PROTOCOL_ANDROID) ||
+       field.starts_with(PROTOCOL_FTP) ||
+       field.starts_with(PROTOCOL_MAILTO) {
         return true;
     }
 
@@ -348,7 +353,7 @@ fn is_url_field(field: &str) -> bool {
     }
 
     // Check for reverse domain notation (Android apps)
-    if field.contains('.') && field.split('.').count() >= 4 && !field.contains('@') && field.len() > 30 {
+    if field.contains('.') && field.split('.').count() >= REVERSE_DOMAIN_MIN_PARTS && !field.contains('@') && field.len() > REVERSE_DOMAIN_MIN_LENGTH {
         return true;
     }
 
@@ -392,7 +397,7 @@ pub fn discover_csv_files(dir: &Path) -> Result<Vec<std::path::PathBuf>> {
 
         if path.is_file() {
             if let Some(extension) = path.extension() {
-                if extension.to_string_lossy().to_lowercase() == "csv" {
+                if extension.to_string_lossy().to_lowercase() == CSV_EXTENSION {
                     csv_files.push(path);
                 }
             }

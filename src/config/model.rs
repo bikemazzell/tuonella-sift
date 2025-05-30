@@ -107,7 +107,6 @@ impl Config {
         let total_ram_gb = total_ram_bytes as f64 / BYTES_PER_GB as f64;
         let available_ram_gb = available_ram_bytes as f64 / BYTES_PER_GB as f64;
 
-        // Calculate usable memory based on configuration
         let user_ram_limit = if self.memory.auto_detect_memory {
             available_ram_bytes
         } else {
