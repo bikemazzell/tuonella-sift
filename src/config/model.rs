@@ -38,6 +38,7 @@ pub struct IoConfig {
 pub struct DeduplicationConfig {
     pub case_sensitive_usernames: bool,
     pub normalize_urls: bool,
+    pub email_username_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

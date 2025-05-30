@@ -49,6 +49,7 @@ async fn main() -> Result<()> {
         deduplication: tuonella_sift::config::model::DeduplicationConfig {
             case_sensitive_usernames: false,
             normalize_urls: true,
+            email_username_only: true,
         },
         logging: tuonella_sift::config::model::LoggingConfig {
             verbosity: "normal".to_string(),

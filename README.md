@@ -1,7 +1,5 @@
 # 🧹 Tuonella Sift ✨
 
-> *"In the realm of Tuonella, every soul is judged... just like your CSV data!"*
-
 A high-performance, memory-efficient CSV deduplication tool built in Rust with optional CUDA GPU acceleration and advanced performance optimizations. Named after Tuonella, the Finnish underworld where souls are sorted and filtered - just as this tool sifts through massive datasets to separate the unique from the duplicates.
 
 Designed to handle massive datasets (hundreds of GB to TB scale) with intelligent field detection, fuzzy URL matching, GPU acceleration, double buffering, parallel processing, and adaptive optimization.
@@ -181,7 +179,8 @@ The tool uses a configuration file in JSON format:
   },
   "deduplication": {
     "case_sensitive_usernames": false,
-    "normalize_urls": true
+    "normalize_urls": true,
+    "email_username_only": true
   },
   "logging": {
     "verbosity": "normal"
@@ -219,6 +218,9 @@ The tool uses a configuration file in JSON format:
 **🧹 Deduplication Settings**
 - `case_sensitive_usernames`: Username case sensitivity (default: false)
 - `normalize_urls`: Enable URL normalization (default: true)
+- `email_username_only`: Require usernames to be email addresses (default: true)
+  - `true`: Only email addresses are accepted as usernames (original behavior)
+  - `false`: Any printable character string is accepted as username
 
 ## 🛠️ Building and Testing
 
@@ -289,11 +291,15 @@ tuonella-sift/
 
 ### 🔍 Field Detection
 The tool automatically identifies CSV columns containing:
-- **✉️ User/Email**: Email patterns with 99%+ accuracy
+- **✉️ User/Email**: Email patterns with 99%+ accuracy (configurable to accept any printable username)
 - **🔑 Password**: Password-like field detection
 - **🌐 URL**: Domain and URL pattern recognition
 
 Uses intelligent sampling with pre-compiled regex patterns for maximum performance.
+
+**Username Validation Modes:**
+- **Email-only mode** (`email_username_only: true`): Only email addresses are accepted as usernames
+- **Printable username mode** (`email_username_only: false`): Any printable character string is accepted as username, excluding URL-like patterns
 
 ### 🌐 URL Normalization
 URLs are normalized for fuzzy duplicate detection:

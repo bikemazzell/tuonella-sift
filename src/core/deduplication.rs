@@ -6,8 +6,9 @@ use std::time::Instant;
 use anyhow::Result;
 use crate::config::model::{Config, DeduplicationConfig};
 use crate::core::record::Record;
-use crate::core::validation::{parse_csv_line, detect_field_positions, EMAIL_REGEX, DELIMITER_REGEX};
+use crate::core::validation::{parse_csv_line, detect_field_positions, detect_field_positions_with_config, is_valid_line_with_config, EMAIL_REGEX, DELIMITER_REGEX};
 use crate::core::memory_manager::MemoryManager;
+#[cfg(feature = "cuda")]
 use crate::constants::{GPU_CHUNK_PROCESSING_BATCH_SIZE, GPU_TEMP_FILE_READ_CHUNK_SIZE_MB, BYTES_PER_MB};
 
 #[cfg(feature = "cuda")]
@@ -70,6 +71,7 @@ pub fn process_csv_files_with_algorithm_streaming(
             &temp_file,
             &mut error_writer,
             memory_manager,
+            config,
             verbose
         )?;
 
@@ -113,6 +115,7 @@ fn process_single_csv_with_algorithm_streaming(
     output_path: &Path,
     error_writer: &mut BufWriter<File>,
     memory_manager: &mut MemoryManager,
+    config: &Config,
     verbose: bool
 ) -> Result<()> {
     if verbose {
@@ -150,9 +153,12 @@ fn process_single_csv_with_algorithm_streaming(
         else if !DELIMITER_REGEX.is_match(&line) {
             skip_reason = Some("no delimiter found");
         }
-        // Skip the Line If: It does not contain an email address
-        else if !EMAIL_REGEX.is_match(&line) {
+        // Skip the Line If: It does not contain a valid username (email or printable based on config)
+        else if config.deduplication.email_username_only && !EMAIL_REGEX.is_match(&line) {
             skip_reason = Some("no email address found");
+        }
+        else if !config.deduplication.email_username_only && !is_valid_line_with_config(&line, false) {
+            skip_reason = Some("no valid username found");
         }
         // Perform more advanced validation on the CSV fields
         else {
@@ -162,7 +168,7 @@ fn process_single_csv_with_algorithm_streaming(
                 skip_reason = Some("fewer than 3 fields");
             } else {
                 // Check if the line has valid field positions
-                let (user_idx, password_idx, url_idx) = detect_field_positions(&fields);
+                let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, config.deduplication.email_username_only);
 
                 if user_idx >= fields.len() || password_idx >= fields.len() || url_idx >= fields.len() {
                     skip_reason = Some("invalid field positions detected");
@@ -675,7 +681,7 @@ fn process_single_temp_file_with_gpu(
 
 /// Parse a CSV line into a CudaRecord for GPU processing
 #[cfg(feature = "cuda")]
-fn parse_line_to_cuda_record(line: &str, _config: &DeduplicationConfig) -> Option<CudaRecord> {
+fn parse_line_to_cuda_record(line: &str, config: &DeduplicationConfig) -> Option<CudaRecord> {
     // Parse CSV line into fields
     let fields: Vec<String> = parse_csv_line(line);
 
@@ -683,22 +689,43 @@ fn parse_line_to_cuda_record(line: &str, _config: &DeduplicationConfig) -> Optio
         return None;
     }
 
-    // Check if any field contains an email before proceeding
-    let has_email = fields.iter().any(|field| EMAIL_REGEX.is_match(field));
-    if !has_email {
-        return None; // Skip rows without email addresses
+    // Check for valid username based on configuration
+    if config.email_username_only {
+        // Check if any field contains an email before proceeding
+        let has_email = fields.iter().any(|field| EMAIL_REGEX.is_match(field));
+        if !has_email {
+            return None; // Skip rows without email addresses
+        }
+    } else {
+        // For non-email mode, check if line has at least one field that could be a username
+        let has_valid_username = fields.iter().any(|field| {
+            use crate::core::validation::PRINTABLE_USERNAME_REGEX;
+            PRINTABLE_USERNAME_REGEX.is_match(field) && !field.starts_with("http")
+        });
+        if !has_valid_username {
+            return None;
+        }
     }
 
     // Detect which fields are username, password, and URL
-    let (user_idx, password_idx, url_idx) = detect_field_positions(&fields);
+    let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, config.email_username_only);
 
     if user_idx >= fields.len() || password_idx >= fields.len() || url_idx >= fields.len() {
         return None;
     }
 
-    // Ensure the detected user field is actually an email (double-check)
-    if !EMAIL_REGEX.is_match(&fields[user_idx]) {
-        return None; // Skip if detected user field is not an email
+    // Validate the detected user field based on configuration
+    if config.email_username_only {
+        // Ensure the detected user field is actually an email (double-check)
+        if !EMAIL_REGEX.is_match(&fields[user_idx]) {
+            return None; // Skip if detected user field is not an email
+        }
+    } else {
+        // For non-email mode, validate that it's a printable username
+        use crate::core::validation::PRINTABLE_USERNAME_REGEX;
+        if !PRINTABLE_USERNAME_REGEX.is_match(&fields[user_idx]) || fields[user_idx].starts_with("http") {
+            return None; // Skip if not a valid printable username
+        }
     }
 
     Some(CudaRecord {
@@ -1050,22 +1077,43 @@ fn parse_line_to_record(line: &str, config: &DeduplicationConfig) -> Option<Reco
         return None;
     }
 
-    // Check if any field contains an email before proceeding
-    let has_email = fields.iter().any(|field| EMAIL_REGEX.is_match(field));
-    if !has_email {
-        return None; // Skip rows without email addresses
+    // Check for valid username based on configuration
+    if config.email_username_only {
+        // Check if any field contains an email before proceeding
+        let has_email = fields.iter().any(|field| EMAIL_REGEX.is_match(field));
+        if !has_email {
+            return None; // Skip rows without email addresses
+        }
+    } else {
+        // For non-email mode, check if line has at least one field that could be a username
+        let has_valid_username = fields.iter().any(|field| {
+            use crate::core::validation::PRINTABLE_USERNAME_REGEX;
+            PRINTABLE_USERNAME_REGEX.is_match(field) && !field.starts_with("http")
+        });
+        if !has_valid_username {
+            return None;
+        }
     }
 
     // Detect which fields are username, password, and URL
-    let (user_idx, password_idx, url_idx) = detect_field_positions(&fields);
+    let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, config.email_username_only);
 
     if user_idx >= fields.len() || password_idx >= fields.len() || url_idx >= fields.len() {
         return None;
     }
 
-    // Ensure the detected user field is actually an email (double-check)
-    if !EMAIL_REGEX.is_match(&fields[user_idx]) {
-        return None; // Skip if detected user field is not an email
+    // Validate the detected user field based on configuration
+    if config.email_username_only {
+        // Ensure the detected user field is actually an email (double-check)
+        if !EMAIL_REGEX.is_match(&fields[user_idx]) {
+            return None; // Skip if detected user field is not an email
+        }
+    } else {
+        // For non-email mode, validate that it's a printable username
+        use crate::core::validation::PRINTABLE_USERNAME_REGEX;
+        if !PRINTABLE_USERNAME_REGEX.is_match(&fields[user_idx]) || fields[user_idx].starts_with("http") {
+            return None; // Skip if not a valid printable username
+        }
     }
 
     Record::new_from_fields(
@@ -1216,6 +1264,7 @@ mod tests {
         let config = DeduplicationConfig {
             case_sensitive_usernames: false,
             normalize_urls: true,
+            email_username_only: true,
         };
 
         // Valid line
@@ -1254,6 +1303,7 @@ mod tests {
         let config = DeduplicationConfig {
             case_sensitive_usernames: false,
             normalize_urls: true,
+            email_username_only: true,
         };
 
         // Create test records using the proper constructor
@@ -1310,6 +1360,7 @@ mod tests {
         let config = DeduplicationConfig {
             case_sensitive_usernames: false,
             normalize_urls: true,
+            email_username_only: true,
         };
 
         // Valid line
@@ -1405,6 +1456,7 @@ mod tests {
             deduplication: DeduplicationConfig {
                 case_sensitive_usernames: false,
                 normalize_urls: true,
+                email_username_only: true,
             },
             logging: crate::config::model::LoggingConfig {
                 verbosity: "normal".to_string(),
@@ -1441,5 +1493,136 @@ mod tests {
         assert!(lines.iter().any(|l| l.contains("user3@example.com")));
 
         Ok(())
+    }
+
+    #[test]
+    fn test_parse_line_to_record_with_printable_usernames() {
+        // Test with email_username_only = false
+        let config = DeduplicationConfig {
+            case_sensitive_usernames: false,
+            normalize_urls: true,
+            email_username_only: false,
+        };
+
+        // Valid line with printable username (not email)
+        let line = "john_doe123,password456,https://example.com";
+        let record = parse_line_to_record(line, &config);
+        assert!(record.is_some());
+        let record = record.unwrap();
+        assert_eq!(record.user, "john_doe123");
+        assert_eq!(record.password, "password456");
+        assert_eq!(record.url, "https://example.com");
+
+        // Valid line with special characters in username
+        let line = "user.name+tag,secret123,https://site.org";
+        let record = parse_line_to_record(line, &config);
+        assert!(record.is_some());
+        let record = record.unwrap();
+        assert_eq!(record.user, "user.name+tag");
+
+        // Valid line with email (should still work)
+        let line = "user@example.com,password123,https://example.com";
+        let record = parse_line_to_record(line, &config);
+        assert!(record.is_some());
+        let record = record.unwrap();
+        assert_eq!(record.user, "user@example.com");
+
+        // Invalid line - username too short (empty)
+        let line = ",password123,https://example.com";
+        let record = parse_line_to_record(line, &config);
+        assert!(record.is_none());
+
+        // Invalid line - no valid username (all fields are URLs or empty)
+        let line = "https://baduser,https://another.com,https://example.com";
+        let record = parse_line_to_record(line, &config);
+        assert!(record.is_none());
+
+        // Test with email_username_only = true (original behavior)
+        let email_config = DeduplicationConfig {
+            case_sensitive_usernames: false,
+            normalize_urls: true,
+            email_username_only: true,
+        };
+
+        // Should reject non-email usernames
+        let line = "john_doe123,password456,https://example.com";
+        let record = parse_line_to_record(line, &email_config);
+        assert!(record.is_none());
+
+        // Should accept email usernames
+        let line = "user@example.com,password123,https://example.com";
+        let record = parse_line_to_record(line, &email_config);
+        assert!(record.is_some());
+    }
+
+    #[test]
+    fn test_field_detection_with_printable_usernames() {
+        use crate::core::validation::detect_field_positions_with_config;
+
+        // Test with email_username_only = false
+        let fields = vec![
+            "john_doe".to_string(),
+            "secret123".to_string(),
+            "https://example.com".to_string(),
+        ];
+
+        let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, false);
+        assert_eq!(user_idx, 0);  // john_doe should be detected as username
+        assert_eq!(password_idx, 1);
+        assert_eq!(url_idx, 2);
+
+        // Test with mixed fields
+        let fields = vec![
+            "https://site.com".to_string(),
+            "username123".to_string(),
+            "password456".to_string(),
+        ];
+
+        let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, false);
+        assert_eq!(url_idx, 0);   // URL should be detected first
+        assert_eq!(user_idx, 1);  // username123 should be detected as username
+        assert_eq!(password_idx, 2);
+
+        // Test with email_username_only = true (original behavior)
+        let fields = vec![
+            "user@example.com".to_string(),
+            "password123".to_string(),
+            "https://example.com".to_string(),
+        ];
+
+        let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, true);
+        assert_eq!(user_idx, 0);  // email should be detected as username
+        assert_eq!(password_idx, 1);
+        assert_eq!(url_idx, 2);
+    }
+
+    #[test]
+    fn test_line_validation_with_config() {
+        use crate::core::validation::is_valid_line_with_config;
+
+        // Test with email_username_only = false
+        let line = "john_doe,password123,https://example.com";
+        assert!(is_valid_line_with_config(line, false));
+
+        let line = "user@example.com,password123,https://example.com";
+        assert!(is_valid_line_with_config(line, false));
+
+        // Valid - has a valid username field (password123 is a valid printable username)
+        let line = ",password123,https://example.com";
+        assert!(is_valid_line_with_config(line, false));
+
+        // Invalid - no valid username (all fields are URLs or empty)
+        let line = ",https://password.com,https://example.com";
+        assert!(!is_valid_line_with_config(line, false));
+
+        // Test with email_username_only = true
+        let line = "user@example.com,password123,https://example.com";
+        assert!(is_valid_line_with_config(line, true));
+
+        // Should be invalid for non-email usernames when email_username_only = true
+        let line = "john_doe,password123,https://example.com";
+        // Note: is_valid_line_with_config with email_username_only=true should check for email presence
+        // This test depends on the EMAIL_REGEX matching the line
+        assert!(!is_valid_line_with_config(line, true));
     }
 }

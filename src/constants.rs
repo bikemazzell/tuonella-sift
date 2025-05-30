@@ -88,6 +88,10 @@ pub const MIN_CHUNK_SIZE_RECORDS: usize = 10;  // Minimum chunk size in records
 pub const ERROR_LOG_BUFFER_SIZE: usize = 1000;  // Buffer size for error logging
 pub const RECOVERY_CHECKPOINT_INTERVAL: usize = 10000;  // Save recovery checkpoint every N records
 
+// Username validation constants
+pub const PRINTABLE_USERNAME_MIN_LENGTH: usize = 1;  // Minimum length for printable username
+pub const PRINTABLE_USERNAME_MAX_LENGTH: usize = 320;  // Maximum length for printable username (RFC 5321 limit)
+
 // GPU processing constants for algorithm step 2.2
 pub const GPU_CHUNK_PROCESSING_BATCH_SIZE: usize = 10000;  // Records per GPU batch
 pub const GPU_TEMP_FILE_READ_CHUNK_SIZE_MB: usize = 64;    // MB to read from temp files at once

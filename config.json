@@ -15,7 +15,8 @@
   },
   "deduplication": {
     "case_sensitive_usernames": false,
-    "normalize_urls": true
+    "normalize_urls": true,
+    "email_username_only": false
   },
   "logging": {
     "verbosity": "normal"
@@ -35,4 +36,4 @@
       "xlarge": 500000
     }
   }
-} 
+}

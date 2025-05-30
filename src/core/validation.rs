@@ -2,6 +2,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use std::path::Path;
 use anyhow::Result;
+use crate::constants::{PRINTABLE_USERNAME_MIN_LENGTH, PRINTABLE_USERNAME_MAX_LENGTH};
 
 // Regular expressions for validation
 pub static EMAIL_REGEX: Lazy<Regex> = Lazy::new(|| {
@@ -10,6 +11,12 @@ pub static EMAIL_REGEX: Lazy<Regex> = Lazy::new(|| {
 
 pub static DELIMITER_REGEX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"[,;\t|]").unwrap()
+});
+
+// Regex for validating printable usernames (any printable ASCII characters)
+pub static PRINTABLE_USERNAME_REGEX: Lazy<Regex> = Lazy::new(|| {
+    let pattern = format!(r"^[\x21-\x7E]{{{},{}}}$", PRINTABLE_USERNAME_MIN_LENGTH, PRINTABLE_USERNAME_MAX_LENGTH);
+    Regex::new(&pattern).unwrap()
 });
 
 /// Normalizes a URL by removing protocol prefixes, www, and paths
@@ -178,6 +185,150 @@ pub fn detect_field_positions(fields: &[String]) -> (usize, usize, usize) {
     }
 
     (user_idx, password_idx, url_idx)
+}
+
+/// Detects field positions in a parsed CSV line with configuration
+///
+/// Tries to intelligently identify which fields contain:
+/// - Email/username (based on email_username_only flag)
+/// - Password
+/// - URL
+///
+/// Returns a tuple of (user_idx, password_idx, url_idx)
+pub fn detect_field_positions_with_config(fields: &[String], email_username_only: bool) -> (usize, usize, usize) {
+    let mut user_idx = 0;
+    let mut password_idx = 1;
+    let mut url_idx = 2;
+
+    // First pass: identify URL fields (most distinctive)
+    for (i, field) in fields.iter().enumerate() {
+        if is_url_field(field) {
+            url_idx = i;
+            break; // Take the first URL field found
+        }
+    }
+
+    // Second pass: identify username fields
+    let mut found_user = false;
+    for (i, field) in fields.iter().enumerate() {
+        if i != url_idx {
+            let is_valid_user = if email_username_only {
+                EMAIL_REGEX.is_match(field)
+            } else {
+                // For non-email usernames, check if it's a valid printable string
+                // and not obviously a URL or password-like field
+                is_valid_username_field(field)
+            };
+
+            if is_valid_user {
+                user_idx = i;
+                found_user = true;
+                break; // Take the first valid username field found
+            }
+        }
+    }
+
+    // If no valid username found, return invalid indices
+    if !found_user {
+        return (fields.len(), fields.len(), fields.len()); // Invalid indices
+    }
+
+    // Third pass: find password field (the remaining field)
+    for i in 0..fields.len() {
+        if i != user_idx && i != url_idx {
+            password_idx = i;
+            break;
+        }
+    }
+
+    // Ensure all indices are different and within bounds
+    if user_idx >= fields.len() { user_idx = 0; }
+    if password_idx >= fields.len() { password_idx = (user_idx + 1) % fields.len(); }
+    if url_idx >= fields.len() { url_idx = (password_idx + 1) % fields.len(); }
+
+    // Final validation: ensure all indices are unique
+    if user_idx == url_idx || user_idx == password_idx || password_idx == url_idx {
+        // Fallback to simple positional assignment
+        url_idx = url_idx.min(fields.len() - 1);
+        user_idx = (url_idx + 1) % fields.len();
+        password_idx = (url_idx + 2) % fields.len();
+    }
+
+    (user_idx, password_idx, url_idx)
+}
+
+/// Checks if a field is a valid username (printable characters, not URL-like)
+pub fn is_valid_username_field(field: &str) -> bool {
+    // Check for empty or whitespace-only fields
+    if field.trim().is_empty() {
+        return false;
+    }
+
+    // Check basic printable character requirements
+    if !PRINTABLE_USERNAME_REGEX.is_match(field) {
+        return false;
+    }
+
+    // Exclude fields that look like URLs
+    if is_url_field(field) {
+        return false;
+    }
+
+    // Exclude fields that contain URL-like patterns
+    if field.starts_with("http://") || field.starts_with("https://") ||
+       field.starts_with("android://") || field.starts_with("ftp://") {
+        return false;
+    }
+
+    // Exclude fields that look like long random strings (likely passwords)
+    // This is a heuristic - very long strings with mixed case and numbers are likely passwords
+    if field.len() > 50 && field.chars().any(|c| c.is_uppercase()) &&
+       field.chars().any(|c| c.is_lowercase()) && field.chars().any(|c| c.is_numeric()) {
+        return false;
+    }
+
+    true
+}
+
+/// Validates a CSV line with configuration
+///
+/// Checks for:
+/// - Printable characters
+/// - Delimiter presence
+/// - Username presence (email or printable based on config)
+///
+/// Returns true if line is valid, false otherwise
+pub fn is_valid_line_with_config(line: &str, email_username_only: bool) -> bool {
+    // Skip if no printable characters
+    if !line.chars().any(|c| c.is_ascii_graphic()) {
+        return false;
+    }
+
+    // Skip if no delimiter
+    if !DELIMITER_REGEX.is_match(line) {
+        return false;
+    }
+
+    // Check for username presence based on configuration
+    if email_username_only {
+        // Skip if no email address
+        if !EMAIL_REGEX.is_match(line) {
+            return false;
+        }
+    } else {
+        // For non-email mode, check if line has at least one field that could be a username
+        let fields = parse_csv_line(line);
+        if fields.len() < 3 {
+            return false;
+        }
+
+        let has_valid_username = fields.iter().any(|field| is_valid_username_field(field));
+        if !has_valid_username {
+            return false;
+        }
+    }
+
+    true
 }
 
 /// Checks if a field appears to be a URL
