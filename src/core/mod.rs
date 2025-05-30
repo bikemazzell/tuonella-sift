@@ -1,8 +1,10 @@
 pub mod record;
+pub mod batch_writer;
 pub mod deduplication;
 pub mod double_buffer;
 pub mod error_handler;
 pub mod memory_manager;
+pub mod parallel_processor;
 pub mod performance_monitor;
 pub mod recovery_manager;
 pub mod resource_manager;
