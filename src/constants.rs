@@ -57,6 +57,15 @@ pub const MIN_CHUNK_SIZE_REDUCTION_LIMIT: f64 = 0.25;  // Don't reduce below 25%
 pub const MAX_CHUNK_SIZE_INCREASE_LIMIT: f64 = 2.0;  // Don't increase above 200% of original size
 pub const CHUNK_SIZE_ADJUSTMENT_COOLDOWN_RECORDS: usize = 5000;  // Wait N records between adjustments
 
+// Error handling and recovery constants (Section 5: Error Handling)
+pub const MAX_RETRY_ATTEMPTS: usize = 3;  // Maximum number of retry attempts for failed operations
+pub const RETRY_DELAY_MS: u64 = 100;  // Initial delay between retries in milliseconds
+pub const RETRY_BACKOFF_MULTIPLIER: f64 = 2.0;  // Exponential backoff multiplier
+pub const CHUNK_SPLIT_FACTOR: f64 = 0.5;  // Split chunks to 50% of original size on error
+pub const MIN_CHUNK_SIZE_RECORDS: usize = 10;  // Minimum chunk size in records
+pub const ERROR_LOG_BUFFER_SIZE: usize = 1000;  // Buffer size for error logging
+pub const RECOVERY_CHECKPOINT_INTERVAL: usize = 10000;  // Save recovery checkpoint every N records
+
 // GPU processing constants for algorithm step 2.2
 pub const GPU_CHUNK_PROCESSING_BATCH_SIZE: usize = 10000;  // Records per GPU batch
 pub const GPU_TEMP_FILE_READ_CHUNK_SIZE_MB: usize = 64;    // MB to read from temp files at once

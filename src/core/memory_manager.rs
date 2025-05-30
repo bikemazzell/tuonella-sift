@@ -300,6 +300,14 @@ impl MemoryManager {
         self.record_counter += count;
     }
 
+    /// Force chunk size adjustment (for recovery scenarios)
+    ///
+    /// This allows external recovery managers to override chunk size
+    pub fn force_chunk_size_adjustment(&mut self, new_size: usize) {
+        self.current_chunk_size_bytes = new_size.max(1); // Ensure minimum size of 1
+        self.last_chunk_adjustment_record = self.record_counter;
+    }
+
     /// Release resources after processing a chunk
     ///
     /// This implements Section 4: "Free GPU and RAM buffers after processing each chunk to avoid memory leaks"
