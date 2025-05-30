@@ -68,7 +68,15 @@ debug = 1
 
 [[bin]]
 name = "tuonella-sift"
-path = "src/main.rs"
+path = "src/bin/tuonella-sift.rs"
+
+[[example]]
+name = "sample_deduplicator"
+path = "examples/sample_deduplicator.rs"
+
+[[example]]
+name = "test_data_generator"
+path = "examples/test_data_generator.rs"
 
 [lib]
 name = "tuonella_sift"

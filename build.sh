@@ -7,6 +7,10 @@ set -e  # Exit on any error
 
 echo "Building tuonella-sift..."
 
+# Create necessary directories
+mkdir -p ./output
+mkdir -p ./temp
+
 # Build the release version
 if [ "$1" = "--release" ] || [ "$1" = "-r" ]; then
     echo "Building release version..."
@@ -82,6 +86,7 @@ echo ""
 echo "Build completed successfully!"
 echo ""
 echo "Usage:"
-echo "  ./tuonella-sift -i input_dir -o output_dir"
-echo "  ./tuonella-sift -i input_dir -o output_dir -c cuda.config.json"
+echo "  ./tuonella-sift --input ./test_input --output ./output/deduplicated.csv"
+echo "  ./tuonella-sift --input ./test_input --output ./output/deduplicated.csv --verbose"
+echo "  ./tuonella-sift --input ./test_input --output ./output/deduplicated.csv --config config.json"
 echo ""

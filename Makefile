@@ -1,12 +1,17 @@
 # Makefile for tuonella-sift
 
-.PHONY: all build release debug cuda clean test help install
+.PHONY: all build release debug cuda clean test help install dirs run run-cuda
 
 # Default target
-all: release
+all: dirs release
+
+# Create necessary directories
+dirs:
+	@mkdir -p ./output
+	@mkdir -p ./temp
 
 # Build release version and copy to root
-release:
+release: dirs
 	@echo "Building release version..."
 	@cargo build --release
 	@cp target/release/tuonella-sift ./tuonella-sift
@@ -14,7 +19,7 @@ release:
 	@echo "✓ Release binary available at ./tuonella-sift"
 
 # Build debug version and copy to root
-debug:
+debug: dirs
 	@echo "Building debug version..."
 	@cargo build
 	@cp target/debug/tuonella-sift ./tuonella-sift
@@ -22,7 +27,7 @@ debug:
 	@echo "✓ Debug binary available at ./tuonella-sift"
 
 # Build release version with CUDA support
-cuda:
+cuda: dirs
 	@echo "Building release version with CUDA support..."
 	@cargo build --release --features cuda
 	@cp target/release/tuonella-sift ./tuonella-sift
@@ -48,6 +53,16 @@ test:
 test-cuda:
 	@echo "Running tests with CUDA support..."
 	@cargo test --features cuda
+
+# Run the program with test data
+run: dirs release
+	@echo "Running tuonella-sift with test data..."
+	@./tuonella-sift --input ./test_input --output ./output/deduplicated.csv
+
+# Run with CUDA and test data
+run-cuda: dirs cuda
+	@echo "Running tuonella-sift with CUDA and test data..."
+	@./tuonella-sift --input ./test_input --output ./output/deduplicated_cuda.csv
 
 # Install to /usr/local/bin (requires sudo)
 install: release
@@ -76,6 +91,8 @@ help:
 	@echo "  test      - Run tests"
 	@echo "  test-cuda - Run tests with CUDA support"
 	@echo "  clean     - Clean build artifacts"
+	@echo "  run       - Run with test data"
+	@echo "  run-cuda  - Run with CUDA and test data"
 	@echo "  install   - Install to /usr/local/bin (requires sudo)"
 	@echo "  uninstall - Remove from /usr/local/bin (requires sudo)"
 	@echo "  help      - Show this help"
@@ -84,7 +101,8 @@ help:
 	@echo "  make              # Build release version"
 	@echo "  make cuda         # Build with CUDA support"
 	@echo "  make test         # Run tests"
+	@echo "  make run          # Run with test data"
 	@echo "  make install      # Install system-wide"
 	@echo ""
 	@echo "After building, run:"
-	@echo "  ./tuonella-sift --help"
+	@echo "  ./tuonella-sift --help" 

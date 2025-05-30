@@ -1,0 +1,38 @@
+{
+  "memory": {
+    "max_ram_usage_gb": 32,
+    "auto_detect_memory": true
+  },
+  "processing": {
+    "enable_cuda": true,
+    "chunk_size_mb": 256,
+    "record_chunk_size": 10000,
+    "max_memory_records": 1000000
+  },
+  "io": {
+    "temp_directory": "./temp",
+    "output_directory": "./output"
+  },
+  "deduplication": {
+    "case_sensitive_usernames": false,
+    "normalize_urls": true
+  },
+  "logging": {
+    "verbosity": "normal"
+  },
+  "cuda": {
+    "gpu_memory_usage_percent": 80,
+    "estimated_bytes_per_record": 500,
+    "min_batch_size": 10000,
+    "max_batch_size": 1000000,
+    "max_url_buffer_size": 256,
+    "max_username_buffer_size": 64,
+    "threads_per_block": 256,
+    "batch_sizes": {
+      "small": 10000,
+      "medium": 50000,
+      "large": 100000,
+      "xlarge": 500000
+    }
+  }
+} 

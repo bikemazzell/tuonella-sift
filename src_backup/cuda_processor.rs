@@ -25,32 +25,119 @@ pub struct CudaDeviceProperties {
     pub l2_cache_size: i32,
 }
 
-// CUDA kernel source code for string processing
+// CUDA kernel source code for comprehensive URL normalization
 const CUDA_KERNEL_SOURCE: &str = r#"
-extern "C" __global__ void normalize_strings(
+__device__ bool starts_with(const char* str, int str_len, const char* prefix, int prefix_len) {
+    if (str_len < prefix_len) return false;
+    for (int i = 0; i < prefix_len; i++) {
+        if (str[i] != prefix[i]) return false;
+    }
+    return true;
+}
+
+__device__ int find_char(const char* str, int str_len, char c) {
+    for (int i = 0; i < str_len; i++) {
+        if (str[i] == c) return i;
+    }
+    return -1;
+}
+
+__device__ int find_last_char(const char* str, int str_len, char c) {
+    for (int i = str_len - 1; i >= 0; i--) {
+        if (str[i] == c) return i;
+    }
+    return -1;
+}
+
+__device__ char to_lower(char c) {
+    if (c >= 'A' && c <= 'Z') {
+        return c + 32;
+    }
+    return c;
+}
+
+extern "C" __global__ void normalize_urls(
     char* input_data,
     char* output_data,
     int* input_offsets,
     int* output_offsets,
-    int* lengths,
-    int num_strings,
-    bool to_lowercase
+    int* input_lengths,
+    int* output_lengths,
+    int num_strings
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= num_strings) return;
 
     int start = input_offsets[idx];
-    int len = lengths[idx];
+    int len = input_lengths[idx];
     int out_start = output_offsets[idx];
 
-    for (int i = 0; i < len; i++) {
-        char c = input_data[start + i];
-        if (to_lowercase && c >= 'A' && c <= 'Z') {
-            output_data[out_start + i] = c + 32; // Convert to lowercase
-        } else {
-            output_data[out_start + i] = c;
+    if (len == 0) {
+        output_lengths[idx] = 0;
+        return;
+    }
+
+    const char* input = input_data + start;
+    char* output = output_data + out_start;
+    int out_len = 0;
+
+    // Step 1: Find and skip protocol (anything before "://")
+    int protocol_end = 0;
+    for (int i = 0; i < len - 2; i++) {
+        if (input[i] == ':' && input[i+1] == '/' && input[i+2] == '/') {
+            protocol_end = i + 3;
+            break;
         }
     }
+
+    // Step 2: Handle android URLs with @ symbol - extract domain after @
+    int domain_start = protocol_end;
+    if (protocol_end > 0) {
+        // Look for android in the protocol part
+        bool is_android = false;
+        if (protocol_end >= 10) { // "android://" is 10 chars
+            if (starts_with(input, protocol_end, "android://", 10)) {
+                is_android = true;
+            }
+        }
+
+        if (is_android) {
+            // Find the last @ symbol
+            int at_pos = find_last_char(input + protocol_end, len - protocol_end, '@');
+            if (at_pos >= 0) {
+                domain_start = protocol_end + at_pos + 1;
+            }
+        }
+    }
+
+    // Step 3: Skip www. prefix
+    int content_start = domain_start;
+    if (len - domain_start >= 4 && starts_with(input + domain_start, len - domain_start, "www.", 4)) {
+        content_start += 4;
+    }
+
+    // Step 4: Find end of domain (before /, ?, #)
+    int content_end = len;
+    for (int i = content_start; i < len; i++) {
+        if (input[i] == '/' || input[i] == '?' || input[i] == '#') {
+            content_end = i;
+            break;
+        }
+    }
+
+    // Step 5: Remove trailing slash if it's the only character after domain
+    if (content_end < len && input[content_end] == '/' && content_end == len - 1) {
+        content_end = len - 1;
+    }
+
+    // Step 6: For Android URLs, keep full reverse domain notation
+    // For HTTP/HTTPS URLs, keep full domain including subdomains
+    // Copy and convert to lowercase
+    for (int i = content_start; i < content_end && out_len < 255; i++) {
+        output[out_len++] = to_lower(input[i]);
+    }
+
+    output_lengths[idx] = out_len;
 }
 "#;
 
@@ -116,7 +203,7 @@ impl CudaProcessor {
         let module = context.load_module(ptx)
             .map_err(|e| anyhow::anyhow!("Failed to load CUDA kernel: {}", e))?;
 
-        let normalize_function = module.load_function("normalize_strings")
+        let normalize_function = module.load_function("normalize_urls")
             .map_err(|e| anyhow::anyhow!("Failed to get CUDA function: {}", e))?;
 
         info!("CUDA kernel compiled and loaded successfully");
@@ -193,33 +280,32 @@ impl CudaProcessor {
         // Prepare data for GPU: flatten URLs, build offsets/lengths
         let mut input_data = Vec::new();
         let mut input_offsets = Vec::with_capacity(records.len());
-        let mut lengths = Vec::with_capacity(records.len());
+        let mut input_lengths = Vec::with_capacity(records.len());
         let mut output_offsets = Vec::with_capacity(records.len());
         let mut total_output_len = 0;
 
         for record in records.iter() {
             let url_bytes = record.url.as_bytes();
             input_offsets.push(input_data.len() as i32);
-            lengths.push(url_bytes.len() as i32);
+            input_lengths.push(url_bytes.len() as i32);
             input_data.extend_from_slice(url_bytes);
             output_offsets.push(total_output_len as i32);
-            total_output_len += url_bytes.len();
+            // Allocate maximum possible output size (could be same as input)
+            total_output_len += url_bytes.len().max(256); // Ensure minimum buffer size
         }
-
-        let mut output_data = vec![0u8; total_output_len];
 
         // Allocate/copy buffers to GPU using cudarc stream API
         let ctx = &self.context;
         let stream = ctx.default_stream();
         let d_input = stream.memcpy_stod(&input_data)?;
-        let mut d_output = stream.alloc_zeros::<u8>(output_data.len())?;
+        let d_output = stream.alloc_zeros::<u8>(total_output_len)?;
         let d_input_offsets = stream.memcpy_stod(&input_offsets)?;
         let d_output_offsets = stream.memcpy_stod(&output_offsets)?;
-        let d_lengths = stream.memcpy_stod(&lengths)?;
+        let d_input_lengths = stream.memcpy_stod(&input_lengths)?;
+        let d_output_lengths = stream.alloc_zeros::<i32>(records.len())?;
 
         // Launch CUDA kernel for normalization
         let num_strings = records.len() as i32;
-        let to_lowercase = true; // Always normalize URLs to lowercase
         let block_size = 256;
         let num_blocks = (num_strings + block_size - 1) / block_size;
         unsafe {
@@ -228,9 +314,9 @@ impl CudaProcessor {
                 .arg(&d_output)
                 .arg(&d_input_offsets)
                 .arg(&d_output_offsets)
-                .arg(&d_lengths)
-                .arg(&num_strings)
-                .arg(&to_lowercase);
+                .arg(&d_input_lengths)
+                .arg(&d_output_lengths)
+                .arg(&num_strings);
             builder.launch(LaunchConfig {
                 grid_dim: (num_blocks as u32, 1, 1),
                 block_dim: (block_size as u32, 1, 1),
@@ -238,14 +324,18 @@ impl CudaProcessor {
             })?;
         }
         stream.synchronize()?;
+
         let output_data_host = stream.memcpy_dtov(&d_output)?;
+        let output_lengths_host = stream.memcpy_dtov(&d_output_lengths)?;
+
         // Update records with normalized URLs from output_data_host
         for (i, record) in records.iter_mut().enumerate() {
             let start = output_offsets[i] as usize;
-            let len = lengths[i] as usize;
+            let len = output_lengths_host[i] as usize;
             let url_bytes = &output_data_host[start..start+len];
             record.normalized_url = String::from_utf8_lossy(url_bytes).to_string();
-            // TODO: GPU username normalization
+
+            // Handle username normalization
             if !case_sensitive_usernames {
                 record.normalized_user = record.user.to_lowercase();
             } else {
@@ -263,13 +353,64 @@ impl CudaProcessor {
 // Fallback CPU processing for when GPU is not available or fails
 fn process_records_cpu(records: &mut [Record], case_sensitive_usernames: bool) {
     for record in records.iter_mut() {
-        record.normalized_url = record.url.to_lowercase();
+        // Use proper URL normalization instead of just lowercasing
+        record.normalized_url = normalize_url_cpu(&record.url);
         if !case_sensitive_usernames {
             record.normalized_user = record.user.to_lowercase();
         } else {
             record.normalized_user = record.user.clone();
         }
     }
+}
+
+// CPU implementation of URL normalization matching the CUDA kernel logic
+fn normalize_url_cpu(url: &str) -> String {
+    if url.is_empty() {
+        return String::new();
+    }
+
+    let mut normalized = url.to_lowercase();
+
+    // Remove all protocol prefixes (https://, http://, android://, ftp://, mailto://, etc.)
+    if let Some(pos) = normalized.find("://") {
+        normalized = normalized[pos + 3..].to_string();
+    }
+
+    // Special handling for Android URLs: extract domain after @ symbol
+    if url.to_lowercase().starts_with("android://") && normalized.contains('@') {
+        if let Some(at_pos) = normalized.rfind('@') {
+            normalized = normalized[at_pos + 1..].to_string();
+        }
+    } else {
+        // For non-Android URLs, extract domain before any path/query/fragment
+        // Remove path, query parameters, and fragments first
+        if let Some(slash_pos) = normalized.find('/') {
+            normalized = normalized[..slash_pos].to_string();
+        }
+        if let Some(query_pos) = normalized.find('?') {
+            normalized = normalized[..query_pos].to_string();
+        }
+        if let Some(fragment_pos) = normalized.find('#') {
+            normalized = normalized[..fragment_pos].to_string();
+        }
+    }
+
+    // Remove www. prefix
+    if normalized.starts_with("www.") {
+        normalized = normalized[4..].to_string();
+    }
+
+    // For Android URLs, remove trailing slash and path after domain extraction
+    if let Some(slash_pos) = normalized.find('/') {
+        normalized = normalized[..slash_pos].to_string();
+    }
+
+    // Remove trailing slash if still present
+    if normalized.ends_with('/') {
+        normalized.pop();
+    }
+
+    normalized
 }
 
 #[cfg(test)]
@@ -364,9 +505,9 @@ mod tests {
         process_records_cpu(&mut records, true);
 
         assert_eq!(records[0].normalized_user, "User@Example.com"); // Case preserved
-        assert_eq!(records[0].normalized_url, "https://example.com/path");
+        assert_eq!(records[0].normalized_url, "example.com");
         assert_eq!(records[1].normalized_user, "TEST@GMAIL.COM"); // Case preserved
-        assert_eq!(records[1].normalized_url, "http://www.google.com");
+        assert_eq!(records[1].normalized_url, "google.com");
     }
 
     #[test]
@@ -380,9 +521,9 @@ mod tests {
         process_records_cpu(&mut records, false);
 
         assert_eq!(records[0].normalized_user, "user@example.com"); // Lowercased
-        assert_eq!(records[0].normalized_url, "https://example.com/path");
+        assert_eq!(records[0].normalized_url, "example.com");
         assert_eq!(records[1].normalized_user, "test@gmail.com"); // Lowercased
-        assert_eq!(records[1].normalized_url, "http://www.google.com");
+        assert_eq!(records[1].normalized_url, "google.com");
     }
 
     #[test]
