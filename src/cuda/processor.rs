@@ -20,50 +20,61 @@ use crate::constants::{PERCENT_95, PERCENT_100};
 #[cfg(feature = "cuda")]
 /// CUDA kernel source code for URL normalization
 const CUDA_KERNEL_SOURCE: &str = r#"
+// Constant buffer sizes and limits
+#define MAX_URL_LENGTH 255
+#define MAX_PROTOCOL_LENGTH 10
+
+// Common URL protocols as device constants
+__device__ const char* PROTOCOLS[] = {"http://", "https://", "android://", "ftp://", "mailto://"};
+__device__ const int PROTOCOL_LENGTHS[] = {7, 8, 10, 6, 8};
+__device__ const int NUM_PROTOCOLS = 5;
+
 __device__ bool starts_with(const char* str, int str_len, const char* prefix, int prefix_len) {
-    if (str_len < prefix_len) return false;
-    for (int i = 0; i < prefix_len; i++) {
-        if (str[i] != prefix[i]) return false;
-    }
-    return true;
+    return str_len >= prefix_len && __builtin_memcmp(str, prefix, prefix_len) == 0;
 }
 
-__device__ int find_char(const char* str, int str_len, char c) {
-    for (int i = 0; i < str_len; i++) {
-        if (str[i] == c) return i;
-    }
-    return -1;
+__device__ int find_char(const char* str, int str_len, char target) {
+    const char* end = str + str_len;
+    const char* ptr = (const char*)memchr(str, target, str_len);
+    return ptr ? ptr - str : -1;
 }
 
-__device__ int find_last_char(const char* str, int str_len, char c) {
+__device__ int find_last_char(const char* str, int str_len, char target) {
     for (int i = str_len - 1; i >= 0; i--) {
-        if (str[i] == c) return i;
+        if (str[i] == target) return i;
     }
     return -1;
 }
 
-__device__ char to_lower(char c) {
-    if (c >= 'A' && c <= 'Z') {
-        return c + 32;
+__device__ inline char to_lower(char c) {
+    // Branchless lowercase conversion
+    return c | ((c >= 'A' && c <= 'Z') << 5);
+}
+
+__device__ int detect_protocol(const char* input, int len) {
+    for (int i = 0; i < NUM_PROTOCOLS; i++) {
+        if (starts_with(input, len, PROTOCOLS[i], PROTOCOL_LENGTHS[i])) {
+            return PROTOCOL_LENGTHS[i];
+        }
     }
-    return c;
+    return 0;
 }
 
 extern "C" __global__ void normalize_emails(
-    char* input_data,
-    char* output_data,
-    int* input_offsets,
-    int* output_offsets,
-    int* input_lengths,
-    int* output_lengths,
+    const char* __restrict__ input_data,
+    char* __restrict__ output_data,
+    const int* __restrict__ input_offsets,
+    const int* __restrict__ output_offsets,
+    const int* __restrict__ input_lengths,
+    int* __restrict__ output_lengths,
     int num_strings
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= num_strings) return;
 
-    int start = input_offsets[idx];
-    int len = input_lengths[idx];
-    int out_start = output_offsets[idx];
+    const int start = input_offsets[idx];
+    const int len = input_lengths[idx];
+    const int out_start = output_offsets[idx];
 
     if (len == 0) {
         output_lengths[idx] = 0;
@@ -72,30 +83,39 @@ extern "C" __global__ void normalize_emails(
 
     const char* input = input_data + start;
     char* output = output_data + out_start;
-    int out_len = 0;
-
-    for (int i = 0; i < len; i++) {
-        output[out_len++] = to_lower(input[i]);
+    
+    // Process 4 characters at a time when possible
+    int i = 0;
+    for (; i < len - 3; i += 4) {
+        output[i] = to_lower(input[i]);
+        output[i + 1] = to_lower(input[i + 1]);
+        output[i + 2] = to_lower(input[i + 2]);
+        output[i + 3] = to_lower(input[i + 3]);
+    }
+    
+    // Handle remaining characters
+    for (; i < len; i++) {
+        output[i] = to_lower(input[i]);
     }
 
-    output_lengths[idx] = out_len;
+    output_lengths[idx] = len;
 }
 
 extern "C" __global__ void normalize_urls(
-    char* input_data,
-    char* output_data,
-    int* input_offsets,
-    int* output_offsets,
-    int* input_lengths,
-    int* output_lengths,
+    const char* __restrict__ input_data,
+    char* __restrict__ output_data,
+    const int* __restrict__ input_offsets,
+    const int* __restrict__ output_offsets,
+    const int* __restrict__ input_lengths,
+    int* __restrict__ output_lengths,
     int num_strings
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= num_strings) return;
 
-    int start = input_offsets[idx];
-    int len = input_lengths[idx];
-    int out_start = output_offsets[idx];
+    const int start = input_offsets[idx];
+    const int len = input_lengths[idx];
+    const int out_start = output_offsets[idx];
 
     if (len == 0) {
         output_lengths[idx] = 0;
@@ -106,49 +126,40 @@ extern "C" __global__ void normalize_urls(
     char* output = output_data + out_start;
     int out_len = 0;
 
-    int protocol_end = 0;
-    for (int i = 0; i < len - 2; i++) {
-        if (input[i] == ':' && input[i+1] == '/' && input[i+2] == '/') {
-            protocol_end = i + 3;
+    // Detect and skip protocol
+    int domain_start = detect_protocol(input, len);
+    
+    // Handle android:// special case
+    if (domain_start == PROTOCOL_LENGTHS[2]) { // android:// length
+        int at_pos = find_last_char(input + domain_start, len - domain_start, '@');
+        if (at_pos >= 0) {
+            domain_start += at_pos + 1;
+        }
+    }
+
+    // Skip www. prefix if present
+    const int www_len = 4;
+    if (len - domain_start >= www_len && starts_with(input + domain_start, len - domain_start, "www.", www_len)) {
+        domain_start += www_len;
+    }
+
+    // Find end of domain (first occurrence of /, ?, or #)
+    int domain_end = len;
+    for (int i = domain_start; i < len; i++) {
+        char c = input[i];
+        if (c == '/' || c == '?' || c == '#') {
+            domain_end = i;
             break;
         }
     }
 
-    int domain_start = protocol_end;
-    if (protocol_end > 0) {
-        bool is_android = false;
-        if (protocol_end >= 10) {
-            if (starts_with(input, protocol_end, "android://", 10)) {
-                is_android = true;
-            }
-        }
-
-        if (is_android) {
-            int at_pos = find_last_char(input + protocol_end, len - protocol_end, '@');
-            if (at_pos >= 0) {
-                domain_start = protocol_end + at_pos + 1;
-            }
-        }
+    // Remove trailing slash
+    if (domain_end > domain_start && input[domain_end - 1] == '/') {
+        domain_end--;
     }
 
-    int content_start = domain_start;
-    if (len - domain_start >= 4 && starts_with(input + domain_start, len - domain_start, "www.", 4)) {
-        content_start += 4;
-    }
-
-    int content_end = len;
-    for (int i = content_start; i < len; i++) {
-        if (input[i] == '/' || input[i] == '?' || input[i] == '#') {
-            content_end = i;
-            break;
-        }
-    }
-
-    if (content_end < len && input[content_end] == '/' && content_end == len - 1) {
-        content_end = len - 1;
-    }
-
-    for (int i = content_start; i < content_end && out_len < 255; i++) {
+    // Copy and normalize domain
+    for (int i = domain_start; i < domain_end && out_len < MAX_URL_LENGTH; i++) {
         output[out_len++] = to_lower(input[i]);
     }
 
@@ -500,5 +511,184 @@ pub struct CudaRecord;
 impl CudaProcessor {
     pub fn new(_: (), _: i32) -> Result<Self, ()> {
         Err(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg(feature = "cuda")]
+    fn test_cuda_string_processing() -> Result<()> {
+        // Initialize CUDA processor with test configuration
+        let config = CudaConfig {
+            device_ordinal: 0,
+            gpu_memory_usage_percent: 80,
+            max_url_buffer_size: 256,
+            max_username_buffer_size: 128,
+            estimated_bytes_per_record: 512,
+            min_batch_size: 1,
+            max_batch_size: 1000,
+            batch_sizes: crate::config::model::BatchSizes {
+                small: 64,
+                medium: 128,
+                large: 256,
+                xlarge: 512,
+            },
+        };
+
+        let processor = CudaProcessor::new(config, 0)?;
+
+        // Test case 1: Basic URL normalization
+        let mut records = vec![
+            CudaRecord {
+                user: "Test@Example.com".to_string(),
+                password: "pass123".to_string(),
+                url: "https://www.Example.com/path?query#fragment".to_string(),
+                normalized_user: String::new(),
+                normalized_url: String::new(),
+                field_count: 3,
+                all_fields: vec!["Test@Example.com".to_string(), "pass123".to_string(), "https://www.Example.com/path?query#fragment".to_string()],
+            },
+            CudaRecord {
+                user: "USER@DOMAIN.COM".to_string(),
+                password: "pass456".to_string(),
+                url: "http://Sub.Domain.com/".to_string(),
+                normalized_user: String::new(),
+                normalized_url: String::new(),
+                field_count: 3,
+                all_fields: vec!["USER@DOMAIN.COM".to_string(), "pass456".to_string(), "http://Sub.Domain.com/".to_string()],
+            },
+        ];
+
+        // Process records
+        processor.process_batch(&mut records, false)?;
+
+        // Verify results
+        assert_eq!(records[0].normalized_url, "example.com");
+        assert_eq!(records[0].normalized_user, "test@example.com");
+        assert_eq!(records[1].normalized_url, "sub.domain.com");
+        assert_eq!(records[1].normalized_user, "user@domain.com");
+
+        // Test case 2: Android URL handling
+        let mut android_records = vec![
+            CudaRecord {
+                user: "User1@test.com".to_string(),
+                password: "pass789".to_string(),
+                url: "android://AbC123@com.example.app/".to_string(),
+                normalized_user: String::new(),
+                normalized_url: String::new(),
+                field_count: 3,
+                all_fields: vec!["User1@test.com".to_string(), "pass789".to_string(), "android://AbC123@com.example.app/".to_string()],
+            },
+        ];
+
+        processor.process_batch(&mut android_records, false)?;
+        assert_eq!(android_records[0].normalized_url, "com.example.app");
+        assert_eq!(android_records[0].normalized_user, "user1@test.com");
+
+        // Test case 3: Case-sensitive username mode
+        let mut case_sensitive_records = vec![
+            CudaRecord {
+                user: "MixedCase@Domain.com".to_string(),
+                password: "pass123".to_string(),
+                url: "https://test.com".to_string(),
+                normalized_user: String::new(),
+                normalized_url: String::new(),
+                field_count: 3,
+                all_fields: vec!["MixedCase@Domain.com".to_string(), "pass123".to_string(), "https://test.com".to_string()],
+            },
+        ];
+
+        processor.process_batch(&mut case_sensitive_records, true)?;
+        assert_eq!(case_sensitive_records[0].normalized_url, "test.com");
+        assert_eq!(case_sensitive_records[0].normalized_user, "MixedCase@Domain.com"); // Should preserve case
+
+        // Test case 4: Empty strings
+        let mut empty_records = vec![
+            CudaRecord {
+                user: "".to_string(),
+                password: "pass123".to_string(),
+                url: "".to_string(),
+                normalized_user: String::new(),
+                normalized_url: String::new(),
+                field_count: 3,
+                all_fields: vec!["".to_string(), "pass123".to_string(), "".to_string()],
+            },
+        ];
+
+        processor.process_batch(&mut empty_records, false)?;
+        assert_eq!(empty_records[0].normalized_url, "");
+        assert_eq!(empty_records[0].normalized_user, "");
+
+        // Test case 5: Maximum length handling
+        let long_url = "https://".to_string() + &"a".repeat(300) + ".com/path";
+        let mut long_records = vec![
+            CudaRecord {
+                user: "test@example.com".to_string(),
+                password: "pass123".to_string(),
+                url: long_url,
+                normalized_user: String::new(),
+                normalized_url: String::new(),
+                field_count: 3,
+                all_fields: vec!["test@example.com".to_string(), "pass123".to_string(), "long_url".to_string()],
+            },
+        ];
+
+        processor.process_batch(&mut long_records, false)?;
+        assert!(long_records[0].normalized_url.len() <= 255); // Should truncate to MAX_URL_LENGTH
+
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(feature = "cuda")]
+    fn test_cuda_batch_processing() -> Result<()> {
+        let config = CudaConfig {
+            device_ordinal: 0,
+            gpu_memory_usage_percent: 80,
+            max_url_buffer_size: 256,
+            max_username_buffer_size: 128,
+            estimated_bytes_per_record: 512,
+            min_batch_size: 1,
+            max_batch_size: 1000,
+            batch_sizes: crate::config::model::BatchSizes {
+                small: 64,
+                medium: 128,
+                large: 256,
+                xlarge: 512,
+            },
+        };
+
+        let processor = CudaProcessor::new(config, 0)?;
+
+        // Create a large batch of records
+        let mut records: Vec<CudaRecord> = (0..1000).map(|i| {
+            CudaRecord {
+                user: format!("User{}@example.com", i),
+                password: format!("pass{}", i),
+                url: format!("https://site{}.example.com/path", i),
+                normalized_user: String::new(),
+                normalized_url: String::new(),
+                field_count: 3,
+                all_fields: vec![
+                    format!("User{}@example.com", i),
+                    format!("pass{}", i),
+                    format!("https://site{}.example.com/path", i),
+                ],
+            }
+        }).collect();
+
+        // Process the large batch
+        processor.process_batch(&mut records, false)?;
+
+        // Verify results
+        for (i, record) in records.iter().enumerate() {
+            assert_eq!(record.normalized_url, format!("site{}.example.com", i));
+            assert_eq!(record.normalized_user, format!("user{}@example.com", i));
+        }
+
+        Ok(())
     }
 }

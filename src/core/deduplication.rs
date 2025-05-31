@@ -24,7 +24,6 @@ use crate::constants::{GPU_CHUNK_PROCESSING_BATCH_SIZE, GPU_TEMP_FILE_READ_CHUNK
 #[cfg(feature = "cuda")]
 use crate::cuda::processor::{CudaProcessor, CudaRecord};
 
-/// Represents processing statistics
 #[derive(Debug, Default, Clone)]
 pub struct ProcessingStats {
     pub total_records: usize,

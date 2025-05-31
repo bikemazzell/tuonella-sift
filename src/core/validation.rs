@@ -22,6 +22,15 @@ pub static PRINTABLE_USERNAME_REGEX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(&pattern).unwrap()
 });
 
+// Common URL protocols
+const URL_PROTOCOLS: &[&str] = &[
+    PROTOCOL_HTTP,
+    PROTOCOL_HTTPS,
+    PROTOCOL_ANDROID,
+    PROTOCOL_FTP,
+    PROTOCOL_MAILTO,
+];
+
 pub fn normalize_url(url: &str) -> String {
     if url.is_empty() {
         return String::new();
@@ -84,24 +93,38 @@ pub fn parse_csv_line(line: &str) -> Vec<String> {
     while let Some(ch) = chars.next() {
         match ch {
             '"' => {
-                if in_quotes && chars.peek() == Some(&'"') {
-                    current_field.push('"');
-                    chars.next();
-                } else {
-                    in_quotes = !in_quotes;
+                match (in_quotes, chars.peek()) {
+                    (false, _) if current_field.is_empty() => in_quotes = true,
+                    (true, Some('"')) => {
+                        current_field.push('"');
+                        chars.next();
+                    },
+                    (true, _) => {
+                        in_quotes = false;
+                        if chars.peek().map_or(false, |&c| !c.is_whitespace() && c != ',') {
+                            continue;
+                        }
+                    },
+                    (false, Some('"')) => {
+                        current_field.push('"');
+                        chars.next();
+                    },
+                    _ => current_field.push('"'),
                 }
-            }
+            },
             ',' if !in_quotes => {
                 fields.push(current_field.trim().to_string());
                 current_field.clear();
-            }
-            _ => {
-                current_field.push(ch);
-            }
+            },
+            _ => current_field.push(ch),
         }
     }
 
+    if in_quotes {
+        current_field.push('"');
+    }
     fields.push(current_field.trim().to_string());
+
     fields
 }
 
@@ -151,134 +174,132 @@ pub fn detect_field_positions(fields: &[String]) -> (usize, usize, usize) {
 }
 
 pub fn detect_field_positions_with_config(fields: &[String], email_username_only: bool) -> (usize, usize, usize) {
-    let mut user_idx = 0;
-    let mut password_idx = 1;
-    let mut url_idx = 2;
-
-    for (i, field) in fields.iter().enumerate() {
-        if is_url_field(field) {
-            url_idx = i;
-            break;
-        }
-    }
-
-    let mut found_user = false;
-    for (i, field) in fields.iter().enumerate() {
-        if i != url_idx {
-            let is_valid_user = if email_username_only {
-                EMAIL_REGEX.is_match(field)
-            } else {
-                // For non-email usernames, check if it's a valid printable string
-                // and not obviously a URL or password-like field
-                is_valid_username_field(field)
-            };
-
-            if is_valid_user {
-                user_idx = i;
-                found_user = true;
-                break;
-            }
-        }
-    }
-
-    if !found_user {
+    // Initialize default positions
+    let mut positions = (0, 1, 2);
+    
+    // Early return if we don't have enough fields
+    if fields.len() < MIN_FIELD_COUNT {
         return (fields.len(), fields.len(), fields.len());
     }
 
-    for i in 0..fields.len() {
-        if i != user_idx && i != url_idx {
-            password_idx = i;
-            break;
-        }
+    // First find URL field as it's the most distinctive
+    positions.2 = fields.iter()
+        .position(|field| is_url_field(field))
+        .unwrap_or(2);
+
+    // Find username field, excluding the URL field
+    let username_pos = fields.iter()
+        .enumerate()
+        .find(|(i, field)| {
+            *i != positions.2 && (
+                if email_username_only {
+                    EMAIL_REGEX.is_match(field)
+                } else {
+                    is_valid_username_field(field)
+                }
+            )
+        })
+        .map(|(i, _)| i);
+
+    // If no valid username found, return invalid positions
+    if username_pos.is_none() {
+        return (fields.len(), fields.len(), fields.len());
+    }
+    positions.0 = username_pos.unwrap();
+
+    // Find password field - first available field that's not URL or username
+    positions.1 = fields.iter()
+        .enumerate()
+        .find(|(i, _)| *i != positions.0 && *i != positions.2)
+        .map(|(i, _)| i)
+        .unwrap_or((positions.0 + 1) % fields.len());
+
+    // Ensure no field position collisions
+    if positions.0 == positions.1 || positions.0 == positions.2 || positions.1 == positions.2 {
+        positions = (
+            positions.2.saturating_add(1) % fields.len(),
+            positions.2.saturating_add(2) % fields.len(),
+            positions.2
+        );
     }
 
-    if user_idx >= fields.len() { user_idx = 0; }
-    if password_idx >= fields.len() { password_idx = (user_idx + 1) % fields.len(); }
-    if url_idx >= fields.len() { url_idx = (password_idx + 1) % fields.len(); }
-
-    if user_idx == url_idx || user_idx == password_idx || password_idx == url_idx {
-        url_idx = url_idx.min(fields.len() - 1);
-        user_idx = (url_idx + 1) % fields.len();
-        password_idx = (url_idx + 2) % fields.len();
-    }
-
-    (user_idx, password_idx, url_idx)
-}
-
-pub fn is_valid_username_field(field: &str) -> bool {
-    if field.trim().is_empty() {
-        return false;
-    }
-
-    if !PRINTABLE_USERNAME_REGEX.is_match(field) {
-        return false;
-    }
-
-    if is_url_field(field) {
-        return false;
-    }
-
-    if field.starts_with(PROTOCOL_HTTP) || field.starts_with(PROTOCOL_HTTPS) ||
-       field.starts_with(PROTOCOL_ANDROID) || field.starts_with(PROTOCOL_FTP) {
-        return false;
-    }
-
-    // Exclude fields that look like long random strings (likely passwords)
-    // This is a heuristic - very long strings with mixed case and numbers are likely passwords
-    if field.len() > LONG_PASSWORD_HEURISTIC_LENGTH && field.chars().any(|c| c.is_uppercase()) &&
-       field.chars().any(|c| c.is_lowercase()) && field.chars().any(|c| c.is_numeric()) {
-        return false;
-    }
-
-    true
-}
-
-pub fn is_valid_line_with_config(line: &str, email_username_only: bool) -> bool {
-    if !line.chars().any(|c| c.is_ascii_graphic()) {
-        return false;
-    }
-
-    if !DELIMITER_REGEX.is_match(line) {
-        return false;
-    }
-
-    if email_username_only {
-        if !EMAIL_REGEX.is_match(line) {
-            return false;
-        }
-    } else {
-        let fields = parse_csv_line(line);
-        if fields.len() < MIN_FIELD_COUNT {
-            return false;
-        }
-
-        let has_valid_username = fields.iter().any(|field| is_valid_username_field(field));
-        if !has_valid_username {
-            return false;
-        }
-    }
-
-    true
+    positions
 }
 
 fn is_url_field(field: &str) -> bool {
-    if field.starts_with(PROTOCOL_HTTP) ||
-       field.starts_with(PROTOCOL_HTTPS) ||
-       field.starts_with(PROTOCOL_ANDROID) ||
-       field.starts_with(PROTOCOL_FTP) ||
-       field.starts_with(PROTOCOL_MAILTO) {
+    // Check for standard URL protocols
+    if URL_PROTOCOLS.iter().any(|&protocol| field.starts_with(protocol)) {
         return true;
     }
 
-    if field.contains('.') && (field.contains('/') || field.contains('?') || field.contains('#')) {
-        return true;
+    // Check for domain-like structure with path/query/fragment
+    if field.contains('.') && 
+       (field.contains('/') || field.contains('?') || field.contains('#')) {
+        let domain_part = field.split('.').next().unwrap_or("");
+        let after_dot = field.split('.').nth(1).unwrap_or("");
+
+        // Validate domain-like structure
+        let is_valid_domain = domain_part.len() >= 2 && 
+            !domain_part.starts_with(&['/', '@', '#', '?'] as &[char]) &&
+            domain_part.chars().all(|c| c.is_alphanumeric() || c == '-') &&
+            after_dot.chars().all(|c| c.is_alphanumeric());
+
+        if is_valid_domain {
+            return true;
+        }
     }
 
-    if field.contains('.') && field.split('.').count() >= REVERSE_DOMAIN_MIN_PARTS && !field.contains('@') && field.len() > REVERSE_DOMAIN_MIN_LENGTH {
-        return true;
+    // Check for reverse domain notation
+    if field.contains('.') && 
+       field.split('.').count() >= REVERSE_DOMAIN_MIN_PARTS && 
+       !field.contains('@') && 
+       field.len() > REVERSE_DOMAIN_MIN_LENGTH {
+        return field.split('.')
+            .all(|part| part.len() >= 2 && 
+                !part.starts_with('-') && 
+                !part.ends_with('-') && 
+                part.chars().all(|c| c.is_alphanumeric() || c == '-'));
     }
 
     false
+}
+
+fn is_valid_username_field(field: &str) -> bool {
+    let field = field.trim();
+    
+    // Basic validation - must be non-empty and match printable pattern
+    if field.is_empty() || !PRINTABLE_USERNAME_REGEX.is_match(field) {
+        return false;
+    }
+
+    // Must not be a URL or URL-like pattern
+    if is_url_field(field) || URL_PROTOCOLS.iter().any(|&protocol| field.starts_with(protocol)) {
+        return false;
+    }
+
+    // Check if it looks like a password (long string with mixed case and numbers)
+    !(field.len() > LONG_PASSWORD_HEURISTIC_LENGTH && {
+        let chars: Vec<_> = field.chars().collect();
+        chars.iter().any(|c| c.is_uppercase()) &&
+        chars.iter().any(|c| c.is_lowercase()) &&
+        chars.iter().any(|c| c.is_numeric())
+    })
+}
+
+pub fn is_valid_line_with_config(line: &str, email_username_only: bool) -> bool {
+    // Basic line validation
+    if !line.chars().any(|c| c.is_ascii_graphic()) || !DELIMITER_REGEX.is_match(line) {
+        return false;
+    }
+
+    // Email-only mode validation
+    if email_username_only {
+        return EMAIL_REGEX.is_match(line);
+    }
+
+    // General validation
+    let fields = parse_csv_line(line);
+    fields.len() >= MIN_FIELD_COUNT && fields.iter().any(|field| is_valid_username_field(field))
 }
 
 pub fn is_valid_line(line: &str) -> bool {
@@ -389,5 +410,91 @@ mod tests {
         assert!(!is_valid_line("   "));
         assert!(!is_valid_line("not an email,password,site.com"));
         assert!(!is_valid_line("user@example.com password site.com"));
+    }
+
+    #[test]
+    fn test_special_character_passwords() {
+        // Test the specific case that was failing
+        let fields = vec![
+            "alzaidabdulelah@gmail.com".to_string(),
+            "/g$WyY_.*@8RwC#".to_string(),
+            "https://us.battle.net/login/en-gb/".to_string()
+        ];
+
+        let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, true);
+        assert_eq!(user_idx, 0, "Email should be detected as username");
+        assert_eq!(password_idx, 1, "Special character string should be detected as password");
+        assert_eq!(url_idx, 2, "URL should be detected as URL field");
+
+        // Test that the password field is not mistakenly identified as a URL
+        assert!(!is_url_field(&fields[password_idx]), "Password with special chars should not be detected as URL");
+        
+        // Test that the URL field is correctly identified
+        assert!(is_url_field(&fields[url_idx]), "URL should be detected as URL");
+
+        // Additional test cases for passwords with URL-like patterns
+        let test_passwords = vec![
+            "pass@word123",
+            "http.pass",
+            "my.password/123",
+            "pass/word@123.com",
+            "user.name@domain",
+            "/path/like/password",
+            "password#with@special.chars"
+        ];
+
+        for password in test_passwords {
+            let message = format!("Password '{}' should not be detected as URL", password);
+            assert!(!is_url_field(password), "{}", message);
+        }
+
+        // Test complete line parsing
+        let line = "alzaidabdulelah@gmail.com,/g$WyY_.*@8RwC#,https://us.battle.net/login/en-gb/";
+        let fields = parse_csv_line(line);
+        assert_eq!(fields.len(), 3, "Line should be parsed into three fields");
+        
+        // Verify the line is considered valid
+        assert!(is_valid_line_with_config(line, true), 
+               "Line with special character password should be considered valid");
+    }
+
+    #[test]
+    fn test_email_with_quotes() {
+        // Test the specific failing case
+        let line = "root@her0in.de,As26013069!\",https://wannafake.com/signup";
+        
+        // Test that the line is considered valid
+        assert!(is_valid_line_with_config(line, true), 
+               "Line with quoted password should be considered valid");
+
+        // Test field parsing
+        let fields = parse_csv_line(line);
+        assert_eq!(fields.len(), 3, "Line should be parsed into three fields");
+        assert_eq!(fields[0], "root@her0in.de", "Email should be parsed correctly");
+        
+        // Test that the email is recognized as valid
+        assert!(EMAIL_REGEX.is_match(&fields[0]), "Email should be recognized as valid");
+
+        // Test field detection
+        let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, true);
+        assert_eq!(user_idx, 0, "Email should be detected as username");
+        assert_eq!(password_idx, 1, "Password field should be detected");
+        assert_eq!(url_idx, 2, "URL field should be detected");
+
+        // Test with other similar email patterns
+        let test_emails = vec![
+            "user@domain.com",
+            "root@her0in.de",
+            "user@sub.domain.co.uk",
+            "user.name@domain.com",
+            "user+tag@domain.com",
+            "user123@domain.com",
+            "user@domain123.com"
+        ];
+
+        for email in test_emails {
+            let message = format!("Email '{}' should be recognized as valid", email);
+            assert!(EMAIL_REGEX.is_match(email), "{}", message);
+        }
     }
 }
