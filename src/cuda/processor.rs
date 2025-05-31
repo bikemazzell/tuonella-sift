@@ -15,7 +15,11 @@ use cudarc::driver::{PushKernelArg, LaunchConfig};
 #[cfg(feature = "cuda")]
 use crate::config::model::CudaConfig;
 #[cfg(feature = "cuda")]
-use crate::constants::{PERCENT_95, PERCENT_100};
+use crate::constants::{
+    PERCENT_95, PERCENT_100, DEFAULT_CUDA_GRID_DIM, DEFAULT_CUDA_SHARED_MEM_BYTES,
+    DEFAULT_MIN_BUFFER_SIZE, BYTES_PER_KB, BYTES_PER_MB, BYTES_PER_GB,
+    CUDA_MEMORY_POOL_SIZE_MB, CUDA_WARP_SIZE, CUDA_MAX_THREADS_PER_BLOCK
+};
 
 #[cfg(feature = "cuda")]
 /// CUDA kernel source code for URL normalization
@@ -30,13 +34,18 @@ __device__ const int PROTOCOL_LENGTHS[] = {7, 8, 10, 6, 8};
 __device__ const int NUM_PROTOCOLS = 5;
 
 __device__ bool starts_with(const char* str, int str_len, const char* prefix, int prefix_len) {
-    return str_len >= prefix_len && __builtin_memcmp(str, prefix, prefix_len) == 0;
+    if (str_len < prefix_len) return false;
+    for (int i = 0; i < prefix_len; i++) {
+        if (str[i] != prefix[i]) return false;
+    }
+    return true;
 }
 
 __device__ int find_char(const char* str, int str_len, char target) {
-    const char* end = str + str_len;
-    const char* ptr = (const char*)memchr(str, target, str_len);
-    return ptr ? ptr - str : -1;
+    for (int i = 0; i < str_len; i++) {
+        if (str[i] == target) return i;
+    }
+    return -1;
 }
 
 __device__ int find_last_char(const char* str, int str_len, char target) {
@@ -83,16 +92,10 @@ extern "C" __global__ void normalize_emails(
 
     const char* input = input_data + start;
     char* output = output_data + out_start;
-    
-    // Process 4 characters at a time when possible
+
+    // Process characters one by one for simplicity and compatibility
     int i = 0;
-    for (; i < len - 3; i += 4) {
-        output[i] = to_lower(input[i]);
-        output[i + 1] = to_lower(input[i + 1]);
-        output[i + 2] = to_lower(input[i + 2]);
-        output[i + 3] = to_lower(input[i + 3]);
-    }
-    
+
     // Handle remaining characters
     for (; i < len; i++) {
         output[i] = to_lower(input[i]);
@@ -128,7 +131,7 @@ extern "C" __global__ void normalize_urls(
 
     // Detect and skip protocol
     int domain_start = detect_protocol(input, len);
-    
+
     // Handle android:// special case
     if (domain_start == PROTOCOL_LENGTHS[2]) { // android:// length
         int at_pos = find_last_char(input + domain_start, len - domain_start, '@');
@@ -199,6 +202,9 @@ pub struct CudaProcessor {
     normalize_emails_function: CudaFunction,
     optimal_batch_size: usize,
     max_string_length: usize,
+    optimal_block_size: usize,
+    optimal_grid_size: usize,
+    memory_pool_size: usize,
 }
 
 #[cfg(feature = "cuda")]
@@ -210,6 +216,9 @@ impl Clone for CudaProcessor {
             normalize_emails_function: self.normalize_emails_function.clone(),
             optimal_batch_size: self.optimal_batch_size,
             max_string_length: self.max_string_length,
+            optimal_block_size: self.optimal_block_size,
+            optimal_grid_size: self.optimal_grid_size,
+            memory_pool_size: self.memory_pool_size,
         }
     }
 }
@@ -230,12 +239,12 @@ impl CudaProcessor {
 
         println!("CUDA device properties detected:");
         println!("  Compute Capability: {}.{}", props.compute_capability_major, props.compute_capability_minor);
-        println!("  Total Memory: {:.2} GB ({} bytes)", props.total_memory as f64 / (1024.0 * 1024.0 * 1024.0), props.total_memory);
-        println!("  Free Memory: {:.2} GB ({} bytes)", props.free_memory as f64 / (1024.0 * 1024.0 * 1024.0), props.free_memory);
+        println!("  Total Memory: {:.2} GB ({} bytes)", props.total_memory as f64 / BYTES_PER_GB as f64, props.total_memory);
+        println!("  Free Memory: {:.2} GB ({} bytes)", props.free_memory as f64 / BYTES_PER_GB as f64, props.free_memory);
         println!("  Max Threads per Block: {}", props.max_threads_per_block);
-        println!("  Max Shared Memory per Block: {} KB", props.max_shared_memory_per_block as f64 / 1024.0);
+        println!("  Max Shared Memory per Block: {} KB", props.max_shared_memory_per_block as f64 / BYTES_PER_KB as f64);
         println!("  Memory Bus Width: {} bits", props.memory_bus_width);
-        println!("  L2 Cache Size: {} MB", props.l2_cache_size as usize / (1024 * 1024));
+        println!("  L2 Cache Size: {} MB", props.l2_cache_size as usize / (BYTES_PER_MB as usize));
 
         let available_memory_bytes = (props.free_memory as f64 * (config.gpu_memory_usage_percent as f64 / PERCENT_100) * PERCENT_95) as usize;
 
@@ -249,11 +258,21 @@ impl CudaProcessor {
             &config
         );
 
-        println!("CUDA processor initialized for device {} - Available memory for use: {} bytes, Max batch size: {}, Optimal batch size: {}",
+        // Calculate optimal block and grid sizes based on device properties
+        let optimal_block_size = Self::calculate_optimal_block_size(&props, &config);
+        let optimal_grid_size = Self::calculate_optimal_grid_size(optimal_batch_size, optimal_block_size);
+
+        // Calculate memory pool size
+        let memory_pool_size = (CUDA_MEMORY_POOL_SIZE_MB * BYTES_PER_MB).min(available_memory_bytes / 4);
+
+        println!("CUDA processor initialized for device {} - Available memory for use: {} bytes, Max batch size: {}, Optimal batch size: {}, Block size: {}, Grid size: {}, Memory pool: {} MB",
               device_ordinal,
               available_memory_bytes,
               max_batch_size,
-              optimal_batch_size);
+              optimal_batch_size,
+              optimal_block_size,
+              optimal_grid_size,
+              memory_pool_size / BYTES_PER_MB);
 
         println!("Compiling CUDA kernel for string normalization...");
         let ptx = compile_ptx(CUDA_KERNEL_SOURCE)
@@ -276,6 +295,9 @@ impl CudaProcessor {
             normalize_emails_function,
             optimal_batch_size,
             max_string_length: config.max_url_buffer_size.max(config.max_username_buffer_size),
+            optimal_block_size,
+            optimal_grid_size,
+            memory_pool_size,
         })
     }
 
@@ -322,6 +344,28 @@ impl CudaProcessor {
         size.max(1)
     }
 
+    fn calculate_optimal_block_size(props: &CudaDeviceProperties, config: &CudaConfig) -> usize {
+        // Start with configured threads per block
+        let mut block_size = config.threads_per_block;
+
+        // Ensure it's a multiple of warp size for optimal performance
+        block_size = (block_size / CUDA_WARP_SIZE) * CUDA_WARP_SIZE;
+
+        // Clamp to device limits
+        block_size = block_size.min(props.max_threads_per_block as usize);
+        block_size = block_size.min(CUDA_MAX_THREADS_PER_BLOCK);
+
+        // Ensure minimum warp size
+        block_size.max(CUDA_WARP_SIZE)
+    }
+
+    fn calculate_optimal_grid_size(batch_size: usize, block_size: usize) -> usize {
+        if block_size == 0 {
+            return 1;
+        }
+        (batch_size + block_size - 1) / block_size
+    }
+
     pub fn process_batch(&self, records: &mut [CudaRecord], case_sensitive_usernames: bool) -> Result<()> {
         if records.is_empty() {
             return Ok(());
@@ -365,11 +409,13 @@ impl CudaProcessor {
             input_lengths.push(url_bytes.len() as i32);
             input_data.extend_from_slice(url_bytes);
             output_offsets.push(total_output_len as i32);
-            total_output_len += url_bytes.len().max(256); // Ensure minimum buffer size
+            total_output_len += url_bytes.len().max(DEFAULT_MIN_BUFFER_SIZE); // Ensure minimum buffer size
         }
 
+        // Use the default stream for now (we'll optimize with multiple streams later)
         let ctx = &self.context;
         let stream = ctx.default_stream();
+
         let d_input = stream.memcpy_stod(&input_data)?;
         let d_output = stream.alloc_zeros::<u8>(total_output_len)?;
         let d_input_offsets = stream.memcpy_stod(&input_offsets)?;
@@ -378,8 +424,9 @@ impl CudaProcessor {
         let d_output_lengths = stream.alloc_zeros::<i32>(records.len())?;
 
         let num_strings = records.len() as i32;
-        let block_size = 256;
-        let num_blocks = (num_strings + block_size - 1) / block_size;
+        let block_size = self.optimal_block_size;
+        let num_blocks = self.optimal_grid_size.min((num_strings as usize + block_size - 1) / block_size);
+
         unsafe {
             let mut builder = stream.launch_builder(&self.normalize_urls_function);
             builder.arg(&d_input)
@@ -390,9 +437,9 @@ impl CudaProcessor {
                 .arg(&d_output_lengths)
                 .arg(&num_strings);
             builder.launch(LaunchConfig {
-                grid_dim: (num_blocks as u32, 1, 1),
-                block_dim: (block_size as u32, 1, 1),
-                shared_mem_bytes: 0,
+                grid_dim: (num_blocks as u32, DEFAULT_CUDA_GRID_DIM as u32, DEFAULT_CUDA_GRID_DIM as u32),
+                block_dim: (block_size as u32, DEFAULT_CUDA_GRID_DIM as u32, DEFAULT_CUDA_GRID_DIM as u32),
+                shared_mem_bytes: DEFAULT_CUDA_SHARED_MEM_BYTES,
             })?;
         }
         stream.synchronize()?;
@@ -426,8 +473,10 @@ impl CudaProcessor {
             total_output_len += email_bytes.len();
         }
 
+        // Use the default stream for now
         let ctx = &self.context;
         let stream = ctx.default_stream();
+
         let d_input = stream.memcpy_stod(&input_data)?;
         let d_output = stream.alloc_zeros::<u8>(total_output_len)?;
         let d_input_offsets = stream.memcpy_stod(&input_offsets)?;
@@ -436,8 +485,9 @@ impl CudaProcessor {
         let d_output_lengths = stream.alloc_zeros::<i32>(records.len())?;
 
         let num_strings = records.len() as i32;
-        let block_size = 256;
-        let num_blocks = (num_strings + block_size - 1) / block_size;
+        let block_size = self.optimal_block_size;
+        let num_blocks = self.optimal_grid_size.min((num_strings as usize + block_size - 1) / block_size);
+
         unsafe {
             let mut builder = stream.launch_builder(&self.normalize_emails_function);
             builder.arg(&d_input)
@@ -448,9 +498,9 @@ impl CudaProcessor {
                 .arg(&d_output_lengths)
                 .arg(&num_strings);
             builder.launch(LaunchConfig {
-                grid_dim: (num_blocks as u32, 1, 1),
-                block_dim: (block_size as u32, 1, 1),
-                shared_mem_bytes: 0,
+                grid_dim: (num_blocks as u32, DEFAULT_CUDA_GRID_DIM as u32, DEFAULT_CUDA_GRID_DIM as u32),
+                block_dim: (block_size as u32, DEFAULT_CUDA_GRID_DIM as u32, DEFAULT_CUDA_GRID_DIM as u32),
+                shared_mem_bytes: DEFAULT_CUDA_SHARED_MEM_BYTES,
             })?;
         }
         stream.synchronize()?;
@@ -470,6 +520,8 @@ impl CudaProcessor {
     pub fn get_optimal_batch_size(&self) -> usize {
         self.optimal_batch_size
     }
+
+
 
     pub fn release_gpu_resources(&self) -> Result<()> {
         let stream = self.context.default_stream();
@@ -523,13 +575,13 @@ mod tests {
     fn test_cuda_string_processing() -> Result<()> {
         // Initialize CUDA processor with test configuration
         let config = CudaConfig {
-            device_ordinal: 0,
             gpu_memory_usage_percent: 80,
             max_url_buffer_size: 256,
             max_username_buffer_size: 128,
             estimated_bytes_per_record: 512,
             min_batch_size: 1,
             max_batch_size: 1000,
+            threads_per_block: 256,
             batch_sizes: crate::config::model::BatchSizes {
                 small: 64,
                 medium: 128,
@@ -646,13 +698,13 @@ mod tests {
     #[cfg(feature = "cuda")]
     fn test_cuda_batch_processing() -> Result<()> {
         let config = CudaConfig {
-            device_ordinal: 0,
             gpu_memory_usage_percent: 80,
             max_url_buffer_size: 256,
             max_username_buffer_size: 128,
             estimated_bytes_per_record: 512,
             min_batch_size: 1,
             max_batch_size: 1000,
+            threads_per_block: 256,
             batch_sizes: crate::config::model::BatchSizes {
                 small: 64,
                 medium: 128,

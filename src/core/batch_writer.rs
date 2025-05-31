@@ -6,11 +6,11 @@ use anyhow::Result;
 use crate::core::record::Record;
 use crate::constants::{
     WRITE_BATCH_SIZE_RECORDS, WRITE_BUFFER_SIZE_MB, MAX_WRITE_BATCH_SIZE_RECORDS,
-    BYTES_PER_MB, ZERO_DURATION_SECS, ZERO_DURATION_NANOS, ZERO_FLOAT, ZERO_COUNT,
+    BYTES_PER_MB, ZERO_DURATION_SECS, ZERO_DURATION_NANOS, ZERO_F64, ZERO_USIZE,
     MIN_BATCH_SIZE, MIN_OPERATIONS_FOR_OPTIMIZATION, LOW_THROUGHPUT_THRESHOLD,
     HIGH_THROUGHPUT_THRESHOLD, IO_THROUGHPUT_THRESHOLD, BATCH_SIZE_REDUCTION_FACTOR,
     BATCH_SIZE_INCREASE_FACTOR, THROUGHPUT_EFFICIENCY_THRESHOLD, BYTES_PER_MB_FLOAT,
-    EFFICIENCY_COMPONENTS_COUNT, TEST_BATCH_SIZE, TEST_COMPLETENESS_SCORE, TEST_FIELD_COUNT
+    EFFICIENCY_COMPONENTS_COUNT
 };
 
 #[derive(Debug)]
@@ -41,15 +41,15 @@ pub struct BatchWriteMetrics {
 impl Default for BatchWriteMetrics {
     fn default() -> Self {
         Self {
-            total_records_written: ZERO_COUNT,
-            total_write_operations: ZERO_COUNT,
+            total_records_written: ZERO_USIZE,
+            total_write_operations: ZERO_USIZE,
             total_write_time: Duration::new(ZERO_DURATION_SECS, ZERO_DURATION_NANOS),
-            total_bytes_written: ZERO_COUNT,
-            average_records_per_write: ZERO_FLOAT,
-            average_write_throughput: ZERO_FLOAT,
-            average_io_throughput: ZERO_FLOAT,
-            forced_flushes: ZERO_COUNT,
-            automatic_flushes: ZERO_COUNT,
+            total_bytes_written: ZERO_USIZE,
+            average_records_per_write: ZERO_F64,
+            average_write_throughput: ZERO_F64,
+            average_io_throughput: ZERO_F64,
+            forced_flushes: ZERO_USIZE,
+            automatic_flushes: ZERO_USIZE,
         }
     }
 }
@@ -158,12 +158,12 @@ impl BatchWriter {
             self.metrics.automatic_flushes += 1;
         }
 
-        if self.metrics.total_write_operations > ZERO_COUNT {
+        if self.metrics.total_write_operations > ZERO_USIZE {
             self.metrics.average_records_per_write =
                 self.metrics.total_records_written as f64 / self.metrics.total_write_operations as f64;
         }
 
-        if self.metrics.total_write_time.as_secs_f64() > ZERO_FLOAT {
+        if self.metrics.total_write_time.as_secs_f64() > ZERO_F64 {
             self.metrics.average_write_throughput =
                 self.metrics.total_records_written as f64 / self.metrics.total_write_time.as_secs_f64();
 
@@ -256,15 +256,15 @@ impl BatchWriteMetrics {
     }
 
     pub fn get_efficiency_score(&self) -> f64 {
-        if self.total_write_operations == ZERO_COUNT {
-            return ZERO_FLOAT;
+        if self.total_write_operations == ZERO_USIZE {
+            return ZERO_F64;
         }
 
         let batching_efficiency = (self.average_records_per_write / MAX_WRITE_BATCH_SIZE_RECORDS as f64).min(1.0);
 
         let throughput_efficiency = (self.average_write_throughput / THROUGHPUT_EFFICIENCY_THRESHOLD).min(1.0);
 
-        let flush_efficiency = if self.total_write_operations > ZERO_COUNT {
+        let flush_efficiency = if self.total_write_operations > ZERO_USIZE {
             1.0 - (self.forced_flushes as f64 / self.total_write_operations as f64)
         } else {
             1.0
@@ -279,6 +279,7 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
     use std::fs;
+    use crate::constants::{TEST_COMPLETENESS_SCORE, TEST_FIELD_COUNT};
 
     #[test]
     fn test_batch_writer_creation() -> Result<()> {
@@ -297,7 +298,8 @@ mod tests {
         let temp_dir = tempdir()?;
         let output_path = temp_dir.path().join("test_output.csv");
 
-        let mut writer = BatchWriter::with_batch_size(&output_path, TEST_BATCH_SIZE)?;
+        // Use a small batch size (2) to ensure multiple write operations with 5 records
+        let mut writer = BatchWriter::with_batch_size(&output_path, 2)?;
 
         for i in 0..5 {
             let record = Record {

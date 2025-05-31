@@ -44,7 +44,7 @@ pub fn write_csv<W: Write>(writer: &mut BufWriter<W>, records: &[Vec<String>]) -
 pub fn count_lines(path: &Path) -> Result<usize> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
-    let count = reader.lines().count();
+    let count = reader.lines().filter_map(|line| line.ok()).count();
     Ok(count)
 }
 
@@ -57,20 +57,27 @@ pub fn sample_lines(path: &Path, sample_size: usize) -> Result<Vec<String>> {
         return Ok(Vec::new());
     }
 
-    let sample_rate = if total_lines <= sample_size {
-        1.0 // Sample all lines if there are fewer than requested
-    } else {
-        sample_size as f64 / total_lines as f64
-    };
-
     let file = File::open(path)?;
     let reader = BufReader::new(file);
     let mut samples = Vec::with_capacity(sample_size);
 
-    for line in reader.lines() {
-        if rand::random::<f64>() < sample_rate && samples.len() < sample_size {
-            if let Ok(line) = line {
+    if total_lines <= sample_size {
+        // If we have fewer lines than requested, take all lines
+        for line_result in reader.lines() {
+            if let Ok(line) = line_result {
                 samples.push(line);
+            }
+            // Silently skip UTF-8 errors in sampling
+        }
+    } else {
+        // Calculate sampling interval to ensure we get enough samples
+        let interval = (total_lines as f64 / sample_size as f64).ceil() as usize;
+        for (i, line_result) in reader.lines().enumerate() {
+            if i % interval == 0 && samples.len() < sample_size {
+                if let Ok(line) = line_result {
+                    samples.push(line);
+                }
+                // Silently skip UTF-8 errors in sampling
             }
         }
     }

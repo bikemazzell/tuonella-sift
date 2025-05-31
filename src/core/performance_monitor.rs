@@ -3,7 +3,16 @@ use std::collections::VecDeque;
 use anyhow::Result;
 use crate::constants::{
     PERFORMANCE_SAMPLE_WINDOW_RECORDS, ADAPTIVE_OPTIMIZATION_INTERVAL_RECORDS,
-    MIN_THROUGHPUT_RECORDS_PER_SECOND, THROUGHPUT_IMPROVEMENT_THRESHOLD_PERCENT
+    MIN_THROUGHPUT_RECORDS_PER_SECOND, THROUGHPUT_IMPROVEMENT_THRESHOLD_PERCENT,
+    MEMORY_PRESSURE_HIGH_THRESHOLD, MEMORY_PRESSURE_LOW_THRESHOLD,
+    THROUGHPUT_REDUCTION_FACTOR, IO_EFFICIENCY_HIGH_THRESHOLD,
+    CHUNK_SIZE_MIN_MB, CHUNK_SIZE_MAX_MB, GPU_UTILIZATION_LOW_THRESHOLD,
+    GPU_UTILIZATION_HIGH_THRESHOLD, BATCH_SIZE_INCREASE_FACTOR_GPU,
+    BATCH_SIZE_DECREASE_FACTOR_GPU, MIN_PARALLEL_THREADS,
+    MAX_PARALLEL_THREADS, MIN_BATCH_SIZE_RECORDS, MAX_BATCH_SIZE_RECORDS,
+    MIN_BUFFER_SIZE_MB, MAX_BUFFER_SIZE_MB, DEFAULT_CHUNK_SIZE_MB,
+    DEFAULT_BATCH_SIZE, DEFAULT_PARALLEL_THREADS, DEFAULT_BUFFER_SIZE_MB,
+    PERFORMANCE_SAMPLE_WINDOW_DIVISOR
 };
 
 #[derive(Debug)]
@@ -57,10 +66,10 @@ pub struct OptimizationParams {
 impl Default for OptimizationParams {
     fn default() -> Self {
         Self {
-            chunk_size_mb: 256,
-            batch_size: 10000,
-            parallel_threads: 4,
-            buffer_size_mb: 512,
+            chunk_size_mb: DEFAULT_CHUNK_SIZE_MB,
+            batch_size: DEFAULT_BATCH_SIZE,
+            parallel_threads: DEFAULT_PARALLEL_THREADS,
+            buffer_size_mb: DEFAULT_BUFFER_SIZE_MB,
             aggressive_optimization: false,
         }
     }
@@ -76,7 +85,7 @@ impl Default for PerformanceMetrics {
             io_efficiency: 0.0,
             memory_pressure: 0.0,
             gpu_utilization: 0.0,
-            recommended_chunk_size_mb: 256,
+            recommended_chunk_size_mb: DEFAULT_CHUNK_SIZE_MB,
             performance_trend: PerformanceTrend::Stable,
         }
     }
@@ -85,7 +94,7 @@ impl Default for PerformanceMetrics {
 impl PerformanceMonitor {
     pub fn new() -> Self {
         Self {
-            sample_window: VecDeque::with_capacity(PERFORMANCE_SAMPLE_WINDOW_RECORDS / 1000),
+            sample_window: VecDeque::with_capacity(PERFORMANCE_SAMPLE_WINDOW_RECORDS / PERFORMANCE_SAMPLE_WINDOW_DIVISOR),
             current_metrics: PerformanceMetrics::default(),
             optimization_params: OptimizationParams::default(),
             records_since_optimization: 0,
@@ -112,7 +121,7 @@ impl PerformanceMonitor {
 
         self.sample_window.push_back(sample);
 
-        while self.sample_window.len() > (PERFORMANCE_SAMPLE_WINDOW_RECORDS / 1000) {
+        while self.sample_window.len() > (PERFORMANCE_SAMPLE_WINDOW_RECORDS / PERFORMANCE_SAMPLE_WINDOW_DIVISOR) {
             self.sample_window.pop_front();
         }
 
@@ -215,21 +224,21 @@ impl PerformanceMonitor {
         let current_chunk_size = self.optimization_params.chunk_size_mb;
         let mut recommended_size = current_chunk_size;
 
-        if self.current_metrics.memory_pressure > 0.8 {
-            recommended_size = (current_chunk_size as f64 * 0.8) as usize;
-        } else if self.current_metrics.memory_pressure < 0.5 {
-            recommended_size = (current_chunk_size as f64 * 1.2) as usize;
+        if self.current_metrics.memory_pressure > MEMORY_PRESSURE_HIGH_THRESHOLD {
+            recommended_size = (current_chunk_size as f64 * MEMORY_PRESSURE_LOW_THRESHOLD) as usize;
+        } else if self.current_metrics.memory_pressure < MEMORY_PRESSURE_LOW_THRESHOLD {
+            recommended_size = (current_chunk_size as f64 * BATCH_SIZE_INCREASE_FACTOR_GPU) as usize;
         }
 
         if self.current_metrics.current_throughput < MIN_THROUGHPUT_RECORDS_PER_SECOND {
-            recommended_size = (recommended_size as f64 * 0.7) as usize;
+            recommended_size = (recommended_size as f64 * THROUGHPUT_REDUCTION_FACTOR) as usize;
         }
 
-        if self.current_metrics.io_efficiency > 0.6 {
-            recommended_size = (recommended_size as f64 * 1.3) as usize;
+        if self.current_metrics.io_efficiency > IO_EFFICIENCY_HIGH_THRESHOLD {
+            recommended_size = (recommended_size as f64 * BATCH_SIZE_INCREASE_FACTOR_GPU) as usize;
         }
 
-        recommended_size = recommended_size.max(64).min(2048);
+        recommended_size = recommended_size.max(CHUNK_SIZE_MIN_MB).min(CHUNK_SIZE_MAX_MB);
 
         self.current_metrics.recommended_chunk_size_mb = recommended_size;
         Ok(())
@@ -248,25 +257,25 @@ impl PerformanceMonitor {
 
         new_params.chunk_size_mb = self.current_metrics.recommended_chunk_size_mb;
 
-        if self.current_metrics.gpu_utilization < 70.0 {
-            new_params.batch_size = (new_params.batch_size as f64 * 1.2) as usize;
-        } else if self.current_metrics.gpu_utilization > 95.0 {
-            new_params.batch_size = (new_params.batch_size as f64 * 0.9) as usize;
+        if self.current_metrics.gpu_utilization < GPU_UTILIZATION_LOW_THRESHOLD {
+            new_params.batch_size = (new_params.batch_size as f64 * BATCH_SIZE_INCREASE_FACTOR_GPU) as usize;
+        } else if self.current_metrics.gpu_utilization > GPU_UTILIZATION_HIGH_THRESHOLD {
+            new_params.batch_size = (new_params.batch_size as f64 * BATCH_SIZE_DECREASE_FACTOR_GPU) as usize;
         }
 
         match self.current_metrics.performance_trend {
             PerformanceTrend::Degrading => {
-                new_params.parallel_threads = (new_params.parallel_threads.saturating_sub(1)).max(1);
+                new_params.parallel_threads = (new_params.parallel_threads.saturating_sub(1)).max(MIN_PARALLEL_THREADS);
             },
             PerformanceTrend::Improving => {
-                new_params.parallel_threads = (new_params.parallel_threads + 1).min(16);
+                new_params.parallel_threads = (new_params.parallel_threads + 1).min(MAX_PARALLEL_THREADS);
             },
             PerformanceTrend::Stable => {
             }
         }
 
-        new_params.batch_size = new_params.batch_size.max(1000).min(100000);
-        new_params.buffer_size_mb = (new_params.chunk_size_mb * 2).max(256).min(4096);
+        new_params.batch_size = new_params.batch_size.max(MIN_BATCH_SIZE_RECORDS).min(MAX_BATCH_SIZE_RECORDS);
+        new_params.buffer_size_mb = (new_params.chunk_size_mb * 2).max(MIN_BUFFER_SIZE_MB).min(MAX_BUFFER_SIZE_MB);
 
         self.optimization_params = new_params.clone();
         self.records_since_optimization = 0;

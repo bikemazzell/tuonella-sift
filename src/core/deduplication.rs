@@ -9,18 +9,15 @@ use crate::core::record::Record;
 use crate::core::validation::{parse_csv_line, detect_field_positions, detect_field_positions_with_config, is_valid_line_with_config, EMAIL_REGEX, DELIMITER_REGEX};
 use crate::core::memory_manager::MemoryManager;
 use crate::constants::{
-    VALIDATION_ERRORS_FILENAME, TEMP_FILE_PREFIX, FINAL_DEDUPLICATED_FILENAME, MIN_FIELD_COUNT, BYTES_PER_MB,
-    PROTOCOL_HTTP, PROTOCOL_HTTPS, PROTOCOL_ANDROID, PROTOCOL_FTP, PROTOCOL_MAILTO,
-    CORE_FIELD_COUNT, EXTRA_FIELDS_START_INDEX,
-    TEST_MAX_RAM_USAGE_GB, TEST_CHUNK_SIZE_MB, TEST_RECORD_CHUNK_SIZE, TEST_MAX_MEMORY_RECORDS
+    VALIDATION_ERRORS_FILENAME, TEMP_FILE_PREFIX, FINAL_DEDUPLICATED_FILENAME,
+    MIN_FIELD_COUNT, BYTES_PER_MB, PROTOCOL_HTTP, PROTOCOL_HTTPS, PROTOCOL_ANDROID,
+    PROTOCOL_FTP, PROTOCOL_MAILTO, CORE_FIELD_COUNT, EXTRA_FIELDS_START_INDEX
 };
 #[cfg(feature = "cuda")]
 use crate::constants::{
-    DEFAULT_USERNAME_HEADER, DEFAULT_PASSWORD_HEADER, DEFAULT_URL_HEADER, FIELD_NAME_TEMPLATE
+    DEFAULT_USERNAME_HEADER, DEFAULT_PASSWORD_HEADER, DEFAULT_URL_HEADER,
+    GPU_CHUNK_PROCESSING_BATCH_SIZE, GPU_TEMP_FILE_READ_CHUNK_SIZE_MB
 };
-#[cfg(feature = "cuda")]
-use crate::constants::{GPU_CHUNK_PROCESSING_BATCH_SIZE, GPU_TEMP_FILE_READ_CHUNK_SIZE_MB};
-
 #[cfg(feature = "cuda")]
 use crate::cuda::processor::{CudaProcessor, CudaRecord};
 
@@ -146,9 +143,23 @@ fn process_single_csv_with_algorithm_streaming(
     // Clear RAM buffer before starting
     memory_manager.clear_ram_buffer();
 
-    // Stream files line by line as per algorithm
-    for line in reader.lines() {
-        let line = line?;
+    // Stream files line by line as per algorithm with UTF-8 error handling
+    for line_result in reader.lines() {
+        let line = match line_result {
+            Ok(line) => line,
+            Err(e) => {
+                // Handle UTF-8 encoding errors gracefully
+                if verbose {
+                    println!("    ⚠️ UTF-8 encoding error at line {}: {}", total_lines + 1, e);
+                }
+                // Skip this line and continue processing
+                total_lines += 1;
+                invalid_lines += 1;
+                writeln!(error_writer, "{}:{}: UTF-8 encoding error - {}",
+                    input_path.display(), total_lines, e)?;
+                continue;
+            }
+        };
         total_lines += 1;
 
         // Line-by-Line Pre-Validation (CPU) as per algorithm
@@ -291,8 +302,22 @@ fn process_single_csv_file_with_validation(
     let ram_buffer_size_bytes = chunk_size_mb * BYTES_PER_MB;
     let mut ram_buffer = Vec::with_capacity(ram_buffer_size_bytes);
 
-    for line in reader.lines() {
-        let line = line?;
+    for line_result in reader.lines() {
+        let line = match line_result {
+            Ok(line) => line,
+            Err(e) => {
+                // Handle UTF-8 encoding errors gracefully
+                if verbose {
+                    println!("    ⚠️ UTF-8 encoding error at line {}: {}", total_lines + 1, e);
+                }
+                // Skip this line and continue processing
+                total_lines += 1;
+                invalid_lines += 1;
+                writeln!(error_writer, "{}:{}: UTF-8 encoding error - {}",
+                    input_path.display(), total_lines, e)?;
+                continue;
+            }
+        };
         total_lines += 1;
 
         // Line-by-Line Pre-Validation
@@ -417,8 +442,18 @@ pub fn deduplicate_records(
 
         let mut records_batch = Vec::new();
 
-        for line in reader.lines() {
-            let line = line?;
+        for line_result in reader.lines() {
+            let line = match line_result {
+                Ok(line) => line,
+                Err(e) => {
+                    // Handle UTF-8 encoding errors gracefully
+                    if verbose {
+                        println!("    ⚠️ UTF-8 encoding error in temp file {}: {}", temp_file.display(), e);
+                    }
+                    stats.invalid_records += 1;
+                    continue;
+                }
+            };
             stats.total_records += 1;
 
             // Parse the line to extract fields
@@ -577,7 +612,7 @@ pub fn process_temp_files_with_gpu(
             // Add additional field names for extra fields beyond the core 3
             if record.all_fields.len() > 3 {
                 for j in 3..record.all_fields.len() {
-                    header_fields.push(format!(FIELD_NAME_TEMPLATE, j + 1));
+                    header_fields.push(format!("field_{}", j + 1));
                 }
             } else {
                 header_fields.push(DEFAULT_URL_HEADER.to_string());
@@ -644,8 +679,18 @@ fn process_single_temp_file_with_gpu(
     let mut current_chunk_size = 0;
     let mut cuda_records = Vec::new();
 
-    for line in reader.lines() {
-        let line = line?;
+    for line_result in reader.lines() {
+        let line = match line_result {
+            Ok(line) => line,
+            Err(e) => {
+                // Handle UTF-8 encoding errors gracefully
+                if verbose {
+                    println!("    ⚠️ UTF-8 encoding error in GPU temp file {}: {}", temp_file.display(), e);
+                }
+                stats.invalid_records += 1;
+                continue;
+            }
+        };
         stats.total_records += 1;
         current_chunk_size += line.len();
 
@@ -1178,8 +1223,7 @@ fn process_record_batch(
             }
         }
     } else {
-        // CPU fallback: normalize records manually
-        #[cfg(not(feature = "cuda"))]
+        // CPU fallback: normalize records manually when CUDA processor is not provided
         for record in records_batch.iter_mut() {
             record.normalized_url = super::validation::normalize_url(&record.url);
             record.normalized_user = if config.case_sensitive_usernames {
@@ -1257,6 +1301,10 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::tempdir;
+    use crate::constants::{
+        TEST_MAX_RAM_USAGE_GB, TEST_CHUNK_SIZE_MB,
+        TEST_RECORD_CHUNK_SIZE, TEST_MAX_MEMORY_RECORDS
+    };
 
     fn create_test_csv(path: &Path, lines: &[&str]) -> Result<()> {
         let file = File::create(path)?;
@@ -1351,6 +1399,9 @@ mod tests {
 
         // Check results
         assert_eq!(dedup_map.len(), 2); // Should be 2 unique records (duplicate removed)
+
+
+
         assert!(dedup_map.contains_key("user1@example.com|pass1|example.com"));
         assert!(dedup_map.contains_key("user2@example.com|pass2|another.com"));
 

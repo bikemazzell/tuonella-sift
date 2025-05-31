@@ -11,8 +11,8 @@ use crate::cuda::processor::CudaRecord;
 #[cfg(feature = "cuda")]
 use crate::constants::{
     BUFFER_SWAP_THRESHOLD_PERCENT, ASYNC_IO_TIMEOUT_SECONDS,
-    BYTES_PER_MB, ZERO_DURATION_SECS, ZERO_DURATION_NANOS, ZERO_FLOAT, ZERO_COUNT,
-    BUFFER_SIZE_RESET_VALUE, PERCENTAGE_MULTIPLIER, INITIAL_BUFFER_A_ACTIVE
+    BYTES_PER_MB, ZERO_DURATION_SECS, ZERO_DURATION_NANOS, ZERO_F64, ZERO_USIZE,
+    PERCENT_100, BUFFER_SIZE_RESET_VALUE, INITIAL_BUFFER_A_ACTIVE, PERCENTAGE_MULTIPLIER
 };
 
 #[cfg(feature = "cuda")]
@@ -65,13 +65,13 @@ impl Default for BufferState {
 impl Default for DoubleBufferMetrics {
     fn default() -> Self {
         Self {
-            total_records: ZERO_COUNT,
+            total_records: ZERO_USIZE,
             total_processing_time: Duration::new(ZERO_DURATION_SECS, ZERO_DURATION_NANOS),
             total_io_time: Duration::new(ZERO_DURATION_SECS, ZERO_DURATION_NANOS),
-            buffer_swaps: ZERO_COUNT,
-            average_throughput: ZERO_FLOAT,
-            gpu_utilization_percent: ZERO_FLOAT,
-            io_wait_percent: ZERO_FLOAT,
+            buffer_swaps: ZERO_USIZE,
+            average_throughput: ZERO_F64,
+            gpu_utilization_percent: ZERO_F64,
+            io_wait_percent: ZERO_F64,
         }
     }
 }
@@ -220,7 +220,7 @@ impl DoubleBuffer {
         metrics.total_records += record_count;
 
         let total_time_secs = (metrics.total_processing_time + metrics.total_io_time).as_secs_f64();
-        if total_time_secs > ZERO_FLOAT {
+        if total_time_secs > ZERO_F64 {
             metrics.average_throughput = metrics.total_records as f64 / total_time_secs;
         }
 
@@ -229,11 +229,11 @@ impl DoubleBuffer {
 
     fn calculate_utilization(&self, metrics: &mut DoubleBufferMetrics) {
         let total_time = metrics.total_processing_time + metrics.total_io_time;
-        if total_time.as_secs_f64() > ZERO_FLOAT {
+        if total_time.as_secs_f64() > ZERO_F64 {
             metrics.gpu_utilization_percent =
-                (metrics.total_processing_time.as_secs_f64() / total_time.as_secs_f64()) * PERCENTAGE_MULTIPLIER;
+                (metrics.total_processing_time.as_secs_f64() / total_time.as_secs_f64()) * PERCENT_100;
             metrics.io_wait_percent =
-                (metrics.total_io_time.as_secs_f64() / total_time.as_secs_f64()) * PERCENTAGE_MULTIPLIER;
+                (metrics.total_io_time.as_secs_f64() / total_time.as_secs_f64()) * PERCENT_100;
         }
     }
 

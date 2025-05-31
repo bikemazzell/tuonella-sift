@@ -2,14 +2,14 @@ use sysinfo::{System, Pid};
 use std::time::{Duration, Instant};
 use crate::constants::{
     BYTES_PER_GB, ALGORITHM_RAM_ALLOCATION_PERCENT, MEMORY_SAFETY_MARGIN,
-    MAX_RAM_BUFFER_SIZE_GB, MEMORY_PRESSURE_THRESHOLD_PERCENT
+    MAX_RAM_BUFFER_SIZE_GB, MEMORY_PRESSURE_THRESHOLD_PERCENT,
+    BYTES_PER_KB, SECONDS_PER_HOUR, SECONDS_PER_MINUTE,
+    KB_AS_F64, MB_AS_F64, GB_AS_F64, TB_AS_F64,
+    DECIMAL_PLACES, ZERO_F64, PERCENT_100
 };
 
 #[cfg(feature = "cuda")]
-use crate::constants::MAX_GPU_BUFFER_SIZE_GB;
-
-#[cfg(feature = "cuda")]
-use crate::constants::ALGORITHM_GPU_ALLOCATION_PERCENT;
+use crate::constants::{MAX_GPU_BUFFER_SIZE_GB, ALGORITHM_GPU_ALLOCATION_PERCENT};
 use anyhow::Result;
 
 #[cfg(feature = "cuda")]
@@ -123,7 +123,7 @@ impl SystemResources {
     /// Get current memory usage for monitoring
     pub fn get_current_memory_usage(&self) -> Result<(usize, f64)> {
         let current_usage = get_process_memory_usage();
-        let usage_percent = (current_usage as f64 / self.ram_limit_bytes as f64) * 100.0;
+        let usage_percent = (current_usage as f64 / self.ram_limit_bytes as f64) * PERCENT_100;
         Ok((current_usage, usage_percent))
     }
 
@@ -138,7 +138,7 @@ impl SystemResources {
         #[cfg(feature = "cuda")]
         {
             let mut summary = format!(
-                "System Resources:\n  RAM: {:.2} GB total, {:.2} GB available, {:.2} GB limit, {:.2} GB buffer",
+                "System Resources:\n  RAM: {:.DECIMAL_PLACES$} GB total, {:.DECIMAL_PLACES$} GB available, {:.DECIMAL_PLACES$} GB limit, {:.DECIMAL_PLACES$} GB buffer",
                 self.total_ram_bytes as f64 / BYTES_PER_GB as f64,
                 self.available_ram_bytes as f64 / BYTES_PER_GB as f64,
                 self.ram_limit_bytes as f64 / BYTES_PER_GB as f64,
@@ -147,7 +147,7 @@ impl SystemResources {
 
             if let Some(ref props) = self.gpu_properties {
                 summary.push_str(&format!(
-                    "\n  GPU: {:.2} GB total, {:.2} GB free, {:.2} GB limit, {:.2} GB buffer",
+                    "\n  GPU: {:.DECIMAL_PLACES$} GB total, {:.DECIMAL_PLACES$} GB free, {:.DECIMAL_PLACES$} GB limit, {:.DECIMAL_PLACES$} GB buffer",
                     props.total_memory as f64 / BYTES_PER_GB as f64,
                     props.free_memory as f64 / BYTES_PER_GB as f64,
                     self.gpu_limit_bytes as f64 / BYTES_PER_GB as f64,
@@ -163,7 +163,7 @@ impl SystemResources {
         #[cfg(not(feature = "cuda"))]
         {
             format!(
-                "System Resources:\n  RAM: {:.2} GB total, {:.2} GB available, {:.2} GB limit, {:.2} GB buffer",
+                "System Resources:\n  RAM: {:.DECIMAL_PLACES$} GB total, {:.DECIMAL_PLACES$} GB available, {:.DECIMAL_PLACES$} GB limit, {:.DECIMAL_PLACES$} GB buffer",
                 self.total_ram_bytes as f64 / BYTES_PER_GB as f64,
                 self.available_ram_bytes as f64 / BYTES_PER_GB as f64,
                 self.ram_limit_bytes as f64 / BYTES_PER_GB as f64,
@@ -195,7 +195,7 @@ pub fn get_process_memory_usage() -> usize {
 
     let pid = Pid::from_u32(std::process::id());
     if let Some(process) = system.process(pid) {
-        process.memory() as usize * 1024 // Convert KB to bytes
+        process.memory() as usize * BYTES_PER_KB // Convert KB to bytes
     } else {
         0
     }
@@ -214,9 +214,9 @@ pub fn check_memory_available(required_gb: f64) -> bool {
 /// Formats the duration in the form "HH:MM:SS"
 pub fn format_duration(duration: Duration) -> String {
     let total_seconds = duration.as_secs();
-    let hours = total_seconds / 3600;
-    let minutes = (total_seconds % 3600) / 60;
-    let seconds = total_seconds % 60;
+    let hours = total_seconds / SECONDS_PER_HOUR;
+    let minutes = (total_seconds % SECONDS_PER_HOUR) / SECONDS_PER_MINUTE;
+    let seconds = total_seconds % SECONDS_PER_MINUTE;
 
     format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
 }
@@ -225,22 +225,17 @@ pub fn format_duration(duration: Duration) -> String {
 ///
 /// Formats bytes as KB, MB, GB, etc.
 pub fn format_bytes(bytes: usize) -> String {
-    const KB: f64 = 1024.0;
-    const MB: f64 = KB * 1024.0;
-    const GB: f64 = MB * 1024.0;
-    const TB: f64 = GB * 1024.0;
-
     let bytes = bytes as f64;
-    if bytes < KB {
+    if bytes < KB_AS_F64 {
         format!("{:.0} B", bytes)
-    } else if bytes < MB {
-        format!("{:.2} KB", bytes / KB)
-    } else if bytes < GB {
-        format!("{:.2} MB", bytes / MB)
-    } else if bytes < TB {
-        format!("{:.2} GB", bytes / GB)
+    } else if bytes < MB_AS_F64 {
+        format!("{:.DECIMAL_PLACES$} KB", bytes / KB_AS_F64)
+    } else if bytes < GB_AS_F64 {
+        format!("{:.DECIMAL_PLACES$} MB", bytes / MB_AS_F64)
+    } else if bytes < TB_AS_F64 {
+        format!("{:.DECIMAL_PLACES$} GB", bytes / GB_AS_F64)
     } else {
-        format!("{:.2} TB", bytes / TB)
+        format!("{:.DECIMAL_PLACES$} TB", bytes / TB_AS_F64)
     }
 }
 
@@ -258,14 +253,14 @@ pub fn estimate_remaining_time(
 
     let elapsed = start_time.elapsed();
     let progress = work_done as f64 / total_work as f64;
-    if progress <= 0.0 {
+    if progress <= ZERO_F64 {
         return None;
     }
 
     let total_estimated = elapsed.as_secs_f64() / progress;
     let remaining_secs = total_estimated - elapsed.as_secs_f64();
 
-    if remaining_secs <= 0.0 {
+    if remaining_secs <= ZERO_F64 {
         return Some(Duration::from_secs(0));
     }
 
@@ -276,34 +271,40 @@ pub fn estimate_remaining_time(
 mod tests {
     use super::*;
     use std::thread::sleep;
+    use crate::constants::{
+        TEST_TOTAL_WORK, TEST_PARTIAL_WORK, TEST_DURATION_ZERO_SECS,
+        TEST_RAM_LIMIT_GB, ZERO_USIZE, ZERO_F64, TEST_DURATION_61_SECS,
+        TEST_DURATION_3661_SECS, TEST_SMALL_BYTES, TEST_MEDIUM_BYTES,
+        BYTES_PER_KB, BYTES_PER_MB, TEST_SLEEP_DURATION_MS
+    };
 
     #[test]
     fn test_memory_info() {
         let (total, available) = get_memory_info();
-        assert!(total > 0.0, "Total memory should be positive");
-        assert!(available > 0.0, "Available memory should be positive");
+        assert!(total > ZERO_F64, "Total memory should be positive");
+        assert!(available > ZERO_F64, "Available memory should be positive");
         assert!(available <= total, "Available memory should not exceed total");
     }
 
     #[test]
     fn test_process_memory_usage() {
         let usage = get_process_memory_usage();
-        assert!(usage > 0, "Process memory usage should be positive");
+        assert!(usage > ZERO_USIZE, "Process memory usage should be positive");
     }
 
     #[test]
     fn test_format_duration() {
-        assert_eq!(format_duration(Duration::from_secs(0)), "00:00:00");
-        assert_eq!(format_duration(Duration::from_secs(61)), "00:01:01");
-        assert_eq!(format_duration(Duration::from_secs(3661)), "01:01:01");
+        assert_eq!(format_duration(Duration::from_secs(TEST_DURATION_ZERO_SECS)), "00:00:00");
+        assert_eq!(format_duration(Duration::from_secs(TEST_DURATION_61_SECS)), "00:01:01");
+        assert_eq!(format_duration(Duration::from_secs(TEST_DURATION_3661_SECS)), "01:01:01");
     }
 
     #[test]
     fn test_format_bytes() {
-        assert_eq!(format_bytes(512), "512 B");
-        assert_eq!(format_bytes(1536), "1.50 KB");
-        assert_eq!(format_bytes(1536 * 1024), "1.50 MB");
-        assert_eq!(format_bytes(1536 * 1024 * 1024), "1.50 GB");
+        assert_eq!(format_bytes(TEST_SMALL_BYTES), "512 B");
+        assert_eq!(format_bytes(TEST_MEDIUM_BYTES), "1.50 KB");
+        assert_eq!(format_bytes(TEST_MEDIUM_BYTES * BYTES_PER_KB), "1.50 MB");
+        assert_eq!(format_bytes(TEST_MEDIUM_BYTES * BYTES_PER_MB), "1.50 GB");
     }
 
     #[test]
@@ -311,44 +312,44 @@ mod tests {
         let start = Instant::now();
 
         // No progress yet
-        assert_eq!(estimate_remaining_time(start, 100, 0), None);
+        assert_eq!(estimate_remaining_time(start, TEST_TOTAL_WORK, ZERO_USIZE), None);
 
         // Some progress
-        sleep(Duration::from_millis(100));
-        let remaining = estimate_remaining_time(start, 100, 10);
+        sleep(Duration::from_millis(TEST_SLEEP_DURATION_MS));
+        let remaining = estimate_remaining_time(start, TEST_TOTAL_WORK, TEST_PARTIAL_WORK);
         assert!(remaining.is_some());
 
         // Complete
-        let remaining = estimate_remaining_time(start, 100, 100);
-        assert_eq!(remaining.unwrap(), Duration::from_secs(0));
+        let remaining = estimate_remaining_time(start, TEST_TOTAL_WORK, TEST_TOTAL_WORK);
+        assert_eq!(remaining.unwrap(), Duration::from_secs(TEST_DURATION_ZERO_SECS));
     }
 
     #[test]
     fn test_system_resources_query() {
         // Test basic resource querying with conservative limits
-        let resources = SystemResources::query_system_resources(Some(1)); // Limit to 1GB to be safe
+        let resources = SystemResources::query_system_resources(Some(TEST_RAM_LIMIT_GB)); // Limit to 1GB to be safe
         assert!(resources.is_ok(), "Should be able to query system resources");
 
         let resources = resources.unwrap();
-        assert!(resources.total_ram_bytes > 0, "Total RAM should be positive");
-        assert!(resources.available_ram_bytes > 0, "Available RAM should be positive");
-        assert!(resources.ram_limit_bytes > 0, "RAM limit should be positive");
-        assert!(resources.ram_buffer_size_bytes > 0, "RAM buffer size should be positive");
+        assert!(resources.total_ram_bytes > ZERO_USIZE, "Total RAM should be positive");
+        assert!(resources.available_ram_bytes > ZERO_USIZE, "Available RAM should be positive");
+        assert!(resources.ram_limit_bytes > ZERO_USIZE, "RAM limit should be positive");
+        assert!(resources.ram_buffer_size_bytes > ZERO_USIZE, "RAM buffer size should be positive");
 
         // Ensure safety limits are applied
-        let max_ram_buffer = (crate::constants::MAX_RAM_BUFFER_SIZE_GB * crate::constants::BYTES_PER_GB as f64) as usize;
+        let max_ram_buffer = (MAX_RAM_BUFFER_SIZE_GB * BYTES_PER_GB as f64) as usize;
         assert!(resources.ram_buffer_size_bytes <= max_ram_buffer, "RAM buffer should not exceed safety limit");
 
         #[cfg(feature = "cuda")]
         if resources.gpu_properties.is_some() {
-            let max_gpu_buffer = (crate::constants::MAX_GPU_BUFFER_SIZE_GB * crate::constants::BYTES_PER_GB as f64) as usize;
+            let max_gpu_buffer = (MAX_GPU_BUFFER_SIZE_GB * BYTES_PER_GB as f64) as usize;
             assert!(resources.gpu_buffer_size_bytes <= max_gpu_buffer, "GPU buffer should not exceed safety limit");
         }
 
         // Test memory usage monitoring (should be lightweight)
         let (usage, percent) = resources.get_current_memory_usage().unwrap();
-        assert!(usage > 0, "Current memory usage should be positive");
-        assert!(percent >= 0.0, "Memory usage percent should be non-negative");
+        assert!(usage > ZERO_USIZE, "Current memory usage should be positive");
+        assert!(percent >= ZERO_F64, "Memory usage percent should be non-negative");
 
         // Test format summary (should not allocate memory)
         let summary = resources.format_summary();

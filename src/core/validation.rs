@@ -14,13 +14,50 @@ pub static EMAIL_REGEX: Lazy<Regex> = Lazy::new(|| {
 });
 
 pub static DELIMITER_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"[,;\t|]").unwrap()
+    Regex::new(r"[,;\t|:]").unwrap()
 });
 
 pub static PRINTABLE_USERNAME_REGEX: Lazy<Regex> = Lazy::new(|| {
     let pattern = format!(r"^[\x21-\x7E]{{{},{}}}$", PRINTABLE_USERNAME_MIN_LENGTH, PRINTABLE_USERNAME_MAX_LENGTH);
     Regex::new(&pattern).unwrap()
 });
+
+/// Detect the delimiter used in a line by counting occurrences
+/// Returns the most common delimiter found, defaulting to comma if none found
+/// Special handling for colons to avoid counting protocol colons (http:, https:, etc.)
+pub fn detect_delimiter(line: &str) -> char {
+    let delimiters = [',', ';', '\t', '|', ':'];
+    let mut max_count = 0;
+    let mut detected_delimiter = ','; // Default to comma
+
+    for &delimiter in &delimiters {
+        let count = if delimiter == ':' {
+            count_non_protocol_colons(line)
+        } else {
+            line.matches(delimiter).count()
+        };
+
+        if count > max_count {
+            max_count = count;
+            detected_delimiter = delimiter;
+        }
+    }
+
+    detected_delimiter
+}
+
+/// Count colons that are not part of URL protocols
+fn count_non_protocol_colons(line: &str) -> usize {
+    let protocols = ["http:", "https:", "ftp:", "mailto:", "android:"];
+    let mut count = line.matches(':').count();
+
+    // Subtract protocol colons
+    for protocol in &protocols {
+        count = count.saturating_sub(line.matches(protocol).count());
+    }
+
+    count
+}
 
 // Common URL protocols
 const URL_PROTOCOLS: &[&str] = &[
@@ -85,6 +122,19 @@ pub fn normalize_url(url: &str) -> String {
 }
 
 pub fn parse_csv_line(line: &str) -> Vec<String> {
+    let delimiter = detect_delimiter(line);
+    parse_csv_line_with_delimiter(line, delimiter)
+}
+
+pub fn parse_csv_line_with_delimiter(line: &str, delimiter: char) -> Vec<String> {
+    if delimiter == ':' {
+        parse_colon_delimited_line(line)
+    } else {
+        parse_standard_delimited_line(line, delimiter)
+    }
+}
+
+fn parse_standard_delimited_line(line: &str, delimiter: char) -> Vec<String> {
     let mut fields = Vec::new();
     let mut current_field = String::new();
     let mut in_quotes = false;
@@ -101,7 +151,7 @@ pub fn parse_csv_line(line: &str) -> Vec<String> {
                     },
                     (true, _) => {
                         in_quotes = false;
-                        if chars.peek().map_or(false, |&c| !c.is_whitespace() && c != ',') {
+                        if chars.peek().map_or(false, |&c| !c.is_whitespace() && c != delimiter) {
                             continue;
                         }
                     },
@@ -112,7 +162,7 @@ pub fn parse_csv_line(line: &str) -> Vec<String> {
                     _ => current_field.push('"'),
                 }
             },
-            ',' if !in_quotes => {
+            ch if ch == delimiter && !in_quotes => {
                 fields.push(current_field.trim().to_string());
                 current_field.clear();
             },
@@ -128,102 +178,161 @@ pub fn parse_csv_line(line: &str) -> Vec<String> {
     fields
 }
 
+fn parse_colon_delimited_line(line: &str) -> Vec<String> {
+    // First, replace protocol colons with a placeholder to avoid splitting on them
+    let mut temp_line = line.to_string();
+    let protocols = ["https://", "http://", "ftp://", "mailto://", "android://"];
+
+    for protocol in &protocols {
+        temp_line = temp_line.replace(protocol, &protocol.replace("://", "___PROTOCOL___"));
+    }
+
+    // Parse with quote handling
+    let mut fields = Vec::new();
+    let mut current_field = String::new();
+    let mut in_quotes = false;
+    let mut chars = temp_line.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' => {
+                match (in_quotes, chars.peek()) {
+                    (false, _) if current_field.is_empty() => in_quotes = true,
+                    (true, Some('"')) => {
+                        current_field.push('"');
+                        chars.next();
+                    },
+                    (true, _) => {
+                        in_quotes = false;
+                        if chars.peek().map_or(false, |&c| !c.is_whitespace() && c != ':') {
+                            continue;
+                        }
+                    },
+                    (false, Some('"')) => {
+                        current_field.push('"');
+                        chars.next();
+                    },
+                    _ => current_field.push('"'),
+                }
+            },
+            ':' if !in_quotes => {
+                fields.push(current_field.replace("___PROTOCOL___", "://").trim().to_string());
+                current_field.clear();
+            },
+            _ => current_field.push(ch),
+        }
+    }
+
+    if in_quotes {
+        current_field.push('"');
+    }
+    fields.push(current_field.replace("___PROTOCOL___", "://").trim().to_string());
+
+    fields
+}
+
 pub fn detect_field_positions(fields: &[String]) -> (usize, usize, usize) {
-    let mut user_idx = 0;
-    let mut password_idx = 1;
-    let mut url_idx = 2;
+    if fields.is_empty() {
+        return (0, 0, 0);
+    }
+
+    // Find URL and email positions in a single pass
+    let mut url_idx = None;
+    let mut email_idx = None;
 
     for (i, field) in fields.iter().enumerate() {
-        if is_url_field(field) {
-            url_idx = i;
+        if url_idx.is_none() && is_url_field(field) {
+            url_idx = Some(i);
+        } else if email_idx.is_none() && EMAIL_REGEX.is_match(field) {
+            email_idx = Some(i);
+        }
+
+        if url_idx.is_some() && email_idx.is_some() {
             break;
         }
     }
 
-    let mut found_email = false;
-    for (i, field) in fields.iter().enumerate() {
-        if i != url_idx && EMAIL_REGEX.is_match(field) {
-            user_idx = i;
-            found_email = true;
-            break;
-        }
-    }
+    // If no email found, return invalid positions
+    let email_idx = match email_idx {
+        Some(idx) => idx,
+        None => return (fields.len(), fields.len(), fields.len())
+    };
 
-    if !found_email {
-        return (fields.len(), fields.len(), fields.len());
-    }
+    let url_idx = url_idx.unwrap_or(2);
 
-    for i in 0..fields.len() {
-        if i != user_idx && i != url_idx {
-            password_idx = i;
-            break;
-        }
-    }
+    // Find first available position for password that's not email or url
+    let password_idx = (0..fields.len())
+        .find(|&i| i != email_idx && i != url_idx)
+        .unwrap_or((email_idx + 1) % fields.len());
 
-    if user_idx >= fields.len() { user_idx = 0; }
-    if password_idx >= fields.len() { password_idx = (user_idx + 1) % fields.len(); }
-    if url_idx >= fields.len() { url_idx = (password_idx + 1) % fields.len(); }
+    // Ensure positions are unique and within bounds
+    let len = fields.len();
+    let positions = if email_idx == url_idx || email_idx == password_idx || password_idx == url_idx {
+        let base = url_idx.min(len - 1);
+        (
+            (base + 1) % len,
+            (base + 2) % len,
+            base
+        )
+    } else {
+        (email_idx, password_idx, url_idx)
+    };
 
-    if user_idx == url_idx || user_idx == password_idx || password_idx == url_idx {
-        url_idx = url_idx.min(fields.len() - 1);
-        user_idx = (url_idx + 1) % fields.len();
-        password_idx = (url_idx + 2) % fields.len();
-    }
-
-    (user_idx, password_idx, url_idx)
+    positions
 }
 
 pub fn detect_field_positions_with_config(fields: &[String], email_username_only: bool) -> (usize, usize, usize) {
-    // Initialize default positions
-    let mut positions = (0, 1, 2);
-    
-    // Early return if we don't have enough fields
     if fields.len() < MIN_FIELD_COUNT {
         return (fields.len(), fields.len(), fields.len());
     }
 
-    // First find URL field as it's the most distinctive
-    positions.2 = fields.iter()
-        .position(|field| is_url_field(field))
-        .unwrap_or(2);
+    // Find URL and username positions in a single pass
+    let mut url_idx = None;
+    let mut username_idx = None;
 
-    // Find username field, excluding the URL field
-    let username_pos = fields.iter()
-        .enumerate()
-        .find(|(i, field)| {
-            *i != positions.2 && (
-                if email_username_only {
-                    EMAIL_REGEX.is_match(field)
-                } else {
-                    is_valid_username_field(field)
-                }
-            )
-        })
-        .map(|(i, _)| i);
+    for (i, field) in fields.iter().enumerate() {
+        if url_idx.is_none() && is_url_field(field) {
+            url_idx = Some(i);
+        } else if username_idx.is_none() && (
+            if email_username_only {
+                EMAIL_REGEX.is_match(field)
+            } else {
+                is_valid_username_field(field)
+            }
+        ) {
+            username_idx = Some(i);
+        }
+
+        if url_idx.is_some() && username_idx.is_some() {
+            break;
+        }
+    }
 
     // If no valid username found, return invalid positions
-    if username_pos.is_none() {
-        return (fields.len(), fields.len(), fields.len());
+    let username_idx = match username_idx {
+        Some(idx) => idx,
+        None => return (fields.len(), fields.len(), fields.len())
+    };
+
+    let url_idx = url_idx.unwrap_or(2);
+
+    // Find first available position for password
+    let password_idx = (0..fields.len())
+        .find(|&i| i != username_idx && i != url_idx)
+        .unwrap_or((username_idx + 1) % fields.len());
+
+    // Ensure positions are unique and within bounds
+    let len = fields.len();
+    if username_idx == url_idx || username_idx == password_idx || password_idx == url_idx {
+        let base = url_idx.min(len - 1);
+        (
+            (base + 1) % len,
+            (base + 2) % len,
+            base
+        )
+    } else {
+        (username_idx, password_idx, url_idx)
     }
-    positions.0 = username_pos.unwrap();
-
-    // Find password field - first available field that's not URL or username
-    positions.1 = fields.iter()
-        .enumerate()
-        .find(|(i, _)| *i != positions.0 && *i != positions.2)
-        .map(|(i, _)| i)
-        .unwrap_or((positions.0 + 1) % fields.len());
-
-    // Ensure no field position collisions
-    if positions.0 == positions.1 || positions.0 == positions.2 || positions.1 == positions.2 {
-        positions = (
-            positions.2.saturating_add(1) % fields.len(),
-            positions.2.saturating_add(2) % fields.len(),
-            positions.2
-        );
-    }
-
-    positions
 }
 
 fn is_url_field(field: &str) -> bool {
@@ -233,13 +342,13 @@ fn is_url_field(field: &str) -> bool {
     }
 
     // Check for domain-like structure with path/query/fragment
-    if field.contains('.') && 
+    if field.contains('.') &&
        (field.contains('/') || field.contains('?') || field.contains('#')) {
         let domain_part = field.split('.').next().unwrap_or("");
         let after_dot = field.split('.').nth(1).unwrap_or("");
 
         // Validate domain-like structure
-        let is_valid_domain = domain_part.len() >= 2 && 
+        let is_valid_domain = domain_part.len() >= 2 &&
             !domain_part.starts_with(&['/', '@', '#', '?'] as &[char]) &&
             domain_part.chars().all(|c| c.is_alphanumeric() || c == '-') &&
             after_dot.chars().all(|c| c.is_alphanumeric());
@@ -250,14 +359,14 @@ fn is_url_field(field: &str) -> bool {
     }
 
     // Check for reverse domain notation
-    if field.contains('.') && 
-       field.split('.').count() >= REVERSE_DOMAIN_MIN_PARTS && 
-       !field.contains('@') && 
+    if field.contains('.') &&
+       field.split('.').count() >= REVERSE_DOMAIN_MIN_PARTS &&
+       !field.contains('@') &&
        field.len() > REVERSE_DOMAIN_MIN_LENGTH {
         return field.split('.')
-            .all(|part| part.len() >= 2 && 
-                !part.starts_with('-') && 
-                !part.ends_with('-') && 
+            .all(|part| part.len() >= 2 &&
+                !part.starts_with('-') &&
+                !part.ends_with('-') &&
                 part.chars().all(|c| c.is_alphanumeric() || c == '-'));
     }
 
@@ -266,7 +375,7 @@ fn is_url_field(field: &str) -> bool {
 
 fn is_valid_username_field(field: &str) -> bool {
     let field = field.trim();
-    
+
     // Basic validation - must be non-empty and match printable pattern
     if field.is_empty() || !PRINTABLE_USERNAME_REGEX.is_match(field) {
         return false;
@@ -338,6 +447,8 @@ pub fn discover_csv_files(dir: &Path) -> Result<Vec<std::path::PathBuf>> {
     Ok(csv_files)
 }
 
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -377,6 +488,80 @@ mod tests {
         assert_eq!(fields[0], "user,with,commas@example.com");
         assert_eq!(fields[1], "pass\"word");
         assert_eq!(fields[2], "http://site.com");
+    }
+
+    #[test]
+    fn test_delimiter_detection() {
+        // Test comma delimiter
+        assert_eq!(detect_delimiter("a,b,c"), ',');
+
+        // Test semicolon delimiter
+        assert_eq!(detect_delimiter("a;b;c"), ';');
+
+        // Test tab delimiter
+        assert_eq!(detect_delimiter("a\tb\tc"), '\t');
+
+        // Test pipe delimiter
+        assert_eq!(detect_delimiter("a|b|c"), '|');
+
+        // Test colon delimiter
+        assert_eq!(detect_delimiter("a:b:c"), ':');
+
+        // Test mixed delimiters - should return the most common one
+        assert_eq!(detect_delimiter("a:b:c,d"), ':');
+        assert_eq!(detect_delimiter("a,b,c:d"), ',');
+
+        // Test no delimiters - should default to comma
+        assert_eq!(detect_delimiter("abc"), ',');
+
+        // Test protocol colons are ignored
+        assert_eq!(detect_delimiter("https://site.com:user:pass"), ':');
+        assert_eq!(detect_delimiter("http://site.com,user,pass"), ',');
+
+        // Test the specific failing case
+        assert_eq!(detect_delimiter("https://accounts.google.com/ServiceLogin:jawahar84@gmail.com:jawahar123"), ':');
+    }
+
+    #[test]
+    fn test_colon_delimited_parsing() {
+        // Test the specific failing case from the user
+        let line = "https://accounts.google.com/ServiceLogin:jawahar84@gmail.com:jawahar123";
+        let fields = parse_csv_line(line);
+        assert_eq!(fields.len(), 3);
+        assert_eq!(fields[0], "https://accounts.google.com/ServiceLogin");
+        assert_eq!(fields[1], "jawahar84@gmail.com");
+        assert_eq!(fields[2], "jawahar123");
+
+        // Test more colon-delimited examples
+        let line = "https://accounts.google.com/servicelogin:jawaher.mohamed2014:01112625515";
+        let fields = parse_csv_line(line);
+        assert_eq!(fields.len(), 3);
+        assert_eq!(fields[0], "https://accounts.google.com/servicelogin");
+        assert_eq!(fields[1], "jawaher.mohamed2014");
+        assert_eq!(fields[2], "01112625515");
+
+        // Test colon delimiter with quotes
+        let line = "\"https://site.com\":\"user@example.com\":\"password123\"";
+        let fields = parse_csv_line(line);
+        assert_eq!(fields.len(), 3);
+        assert_eq!(fields[0], "https://site.com");
+        assert_eq!(fields[1], "user@example.com");
+        assert_eq!(fields[2], "password123");
+    }
+
+    #[test]
+    fn test_colon_delimiter_validation() {
+        // Test that colon-delimited lines are now considered valid
+        let line = "https://accounts.google.com/ServiceLogin:jawahar84@gmail.com:jawahar123";
+        assert!(DELIMITER_REGEX.is_match(line), "Line with colon delimiter should match DELIMITER_REGEX");
+        assert!(is_valid_line_with_config(line, true), "Colon-delimited line should be considered valid");
+
+        // Test field detection with colon-delimited data
+        let fields = parse_csv_line(line);
+        let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, true);
+        assert_eq!(url_idx, 0, "URL should be detected in first field");
+        assert_eq!(user_idx, 1, "Email should be detected in second field");
+        assert_eq!(password_idx, 2, "Password should be detected in third field");
     }
 
     #[test]
@@ -428,7 +613,7 @@ mod tests {
 
         // Test that the password field is not mistakenly identified as a URL
         assert!(!is_url_field(&fields[password_idx]), "Password with special chars should not be detected as URL");
-        
+
         // Test that the URL field is correctly identified
         assert!(is_url_field(&fields[url_idx]), "URL should be detected as URL");
 
@@ -452,9 +637,9 @@ mod tests {
         let line = "alzaidabdulelah@gmail.com,/g$WyY_.*@8RwC#,https://us.battle.net/login/en-gb/";
         let fields = parse_csv_line(line);
         assert_eq!(fields.len(), 3, "Line should be parsed into three fields");
-        
+
         // Verify the line is considered valid
-        assert!(is_valid_line_with_config(line, true), 
+        assert!(is_valid_line_with_config(line, true),
                "Line with special character password should be considered valid");
     }
 
@@ -462,16 +647,16 @@ mod tests {
     fn test_email_with_quotes() {
         // Test the specific failing case
         let line = "root@her0in.de,As26013069!\",https://wannafake.com/signup";
-        
+
         // Test that the line is considered valid
-        assert!(is_valid_line_with_config(line, true), 
+        assert!(is_valid_line_with_config(line, true),
                "Line with quoted password should be considered valid");
 
         // Test field parsing
         let fields = parse_csv_line(line);
         assert_eq!(fields.len(), 3, "Line should be parsed into three fields");
         assert_eq!(fields[0], "root@her0in.de", "Email should be parsed correctly");
-        
+
         // Test that the email is recognized as valid
         assert!(EMAIL_REGEX.is_match(&fields[0]), "Email should be recognized as valid");
 

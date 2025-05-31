@@ -4,10 +4,10 @@ use crate::constants::{
     MEMORY_PRESSURE_THRESHOLD_PERCENT, MEMORY_CRITICAL_THRESHOLD_PERCENT,
     CHUNK_SIZE_REDUCTION_FACTOR, CHUNK_SIZE_INCREASE_FACTOR,
     MIN_CHUNK_SIZE_REDUCTION_LIMIT, MAX_CHUNK_SIZE_INCREASE_LIMIT,
-    CHUNK_SIZE_ADJUSTMENT_COOLDOWN_RECORDS, ZERO_COUNT, PERCENTAGE_MULTIPLIER,
-    INITIAL_BUFFER_POSITION, INITIAL_RECORD_COUNTER, INITIAL_ADJUSTMENT_RECORD,
-    LOW_MEMORY_THRESHOLD_FACTOR, DEFAULT_CHUNK_ADJUSTMENT_FACTOR, MIN_CHUNK_SIZE_LIMIT,
-    DEFAULT_GPU_MEMORY_FREE, DEFAULT_GPU_MEMORY_TOTAL, DEFAULT_GPU_PRESSURE, ZERO_FLOAT
+    CHUNK_SIZE_ADJUSTMENT_COOLDOWN_RECORDS, ZERO_USIZE, PERCENT_100,
+    ZERO_F64, LOW_MEMORY_THRESHOLD_FACTOR, DEFAULT_CHUNK_ADJUSTMENT_FACTOR,
+    MIN_CHUNK_SIZE_LIMIT, DEFAULT_GPU_MEMORY_FREE, DEFAULT_GPU_MEMORY_TOTAL,
+    DEFAULT_GPU_PRESSURE
 };
 use crate::utils::system::SystemResources;
 
@@ -47,7 +47,7 @@ impl MemoryManager {
     pub fn new(user_ram_limit_gb: Option<usize>) -> Result<Self> {
         let resources = SystemResources::query_system_resources(user_ram_limit_gb)?;
 
-        println!("🧠 Initializing Memory Manager with algorithm-compliant allocation:");
+        println!("🧠 Initializing Memory Manager...");
         println!("{}", resources.format_summary());
 
         let ram_buffer_capacity = resources.ram_buffer_size_bytes;
@@ -59,7 +59,7 @@ impl MemoryManager {
         let gpu_buffer_capacity = resources.gpu_buffer_size_bytes;
 
         #[cfg(feature = "cuda")]
-        let gpu_context = if gpu_buffer_capacity > ZERO_COUNT && resources.gpu_properties.is_some() {
+        let gpu_context = if gpu_buffer_capacity > ZERO_USIZE && resources.gpu_properties.is_some() {
             println!("🚀 GPU buffer capacity reserved: {:.2} MB", gpu_buffer_capacity as f64 / BYTES_PER_MB as f64);
             match CudaContext::new(0) {
                 Ok(context) => {
@@ -81,17 +81,17 @@ impl MemoryManager {
         Ok(Self {
             resources,
             ram_buffer,
-            ram_buffer_position: INITIAL_BUFFER_POSITION,
+            ram_buffer_position: ZERO_USIZE,
             ram_buffer_capacity,
             #[cfg(feature = "cuda")]
             gpu_buffer_capacity,
             #[cfg(feature = "cuda")]
             gpu_context,
-            record_counter: INITIAL_RECORD_COUNTER,
+            record_counter: ZERO_USIZE,
             buffers_initialized: true,
             original_chunk_size_bytes: initial_chunk_size,
             current_chunk_size_bytes: initial_chunk_size,
-            last_chunk_adjustment_record: INITIAL_ADJUSTMENT_RECORD,
+            last_chunk_adjustment_record: ZERO_USIZE,
         })
     }
 
@@ -125,7 +125,7 @@ impl MemoryManager {
 
     pub fn clear_ram_buffer(&mut self) {
         self.ram_buffer.clear();
-        self.ram_buffer_position = INITIAL_BUFFER_POSITION;
+        self.ram_buffer_position = ZERO_USIZE;
     }
 
     #[cfg(feature = "cuda")]
@@ -140,7 +140,7 @@ impl MemoryManager {
 
     #[cfg(feature = "cuda")]
     pub fn has_gpu_buffer(&self) -> bool {
-        self.gpu_context.is_some() && self.gpu_buffer_capacity > ZERO_COUNT
+        self.gpu_context.is_some() && self.gpu_buffer_capacity > ZERO_USIZE
     }
 
     pub fn check_memory_pressure(&self) -> Result<bool> {
@@ -322,17 +322,17 @@ pub struct ResourceUsageStats {
 
 impl ResourceUsageStats {
     pub fn format_summary(&self) -> String {
-        let ram_buffer_percent = if self.ram_buffer_capacity_bytes > ZERO_COUNT {
-            (self.ram_buffer_used_bytes as f64 / self.ram_buffer_capacity_bytes as f64) * PERCENTAGE_MULTIPLIER
+        let ram_buffer_percent = if self.ram_buffer_capacity_bytes > ZERO_USIZE {
+            (self.ram_buffer_used_bytes as f64 / self.ram_buffer_capacity_bytes as f64) * PERCENT_100
         } else {
-            ZERO_FLOAT
+            ZERO_F64
         };
 
-        let gpu_usage_percent = if self.gpu_memory_total_bytes > ZERO_COUNT {
+        let gpu_usage_percent = if self.gpu_memory_total_bytes > ZERO_USIZE {
             let used = self.gpu_memory_total_bytes - self.gpu_memory_free_bytes;
-            (used as f64 / self.gpu_memory_total_bytes as f64) * PERCENTAGE_MULTIPLIER
+            (used as f64 / self.gpu_memory_total_bytes as f64) * PERCENT_100
         } else {
-            ZERO_FLOAT
+            ZERO_F64
         };
 
         format!(
@@ -392,7 +392,7 @@ impl MemoryStats {
                 self.ram_limit_bytes as f64 / crate::constants::BYTES_PER_GB as f64,
                 self.ram_buffer_capacity_bytes as f64 / BYTES_PER_MB as f64,
                 self.ram_buffer_used_bytes as f64 / BYTES_PER_MB as f64,
-                (self.ram_buffer_used_bytes as f64 / self.ram_buffer_capacity_bytes as f64) * PERCENTAGE_MULTIPLIER,
+                (self.ram_buffer_used_bytes as f64 / self.ram_buffer_capacity_bytes as f64) * PERCENT_100,
                 self.current_process_usage_bytes as f64 / crate::constants::BYTES_PER_GB as f64,
                 self.usage_percent,
                 if self.memory_pressure { "YES" } else { "NO" }
@@ -429,7 +429,7 @@ impl MemoryStats {
                 self.ram_limit_bytes as f64 / crate::constants::BYTES_PER_GB as f64,
                 self.ram_buffer_capacity_bytes as f64 / BYTES_PER_MB as f64,
                 self.ram_buffer_used_bytes as f64 / BYTES_PER_MB as f64,
-                (self.ram_buffer_used_bytes as f64 / self.ram_buffer_capacity_bytes as f64) * PERCENTAGE_MULTIPLIER,
+                (self.ram_buffer_used_bytes as f64 / self.ram_buffer_capacity_bytes as f64) * PERCENT_100,
                 self.current_process_usage_bytes as f64 / crate::constants::BYTES_PER_GB as f64,
                 self.usage_percent,
                 if self.memory_pressure { "YES" } else { "NO" },
@@ -453,7 +453,7 @@ mod tests {
         let manager = manager.unwrap();
         assert!(manager.is_initialized(), "Manager should be initialized");
         assert!(manager.ram_buffer_capacity > 0, "RAM buffer should have capacity");
-        assert_eq!(manager.ram_buffer_position, INITIAL_BUFFER_POSITION, "RAM buffer should start empty");
+        assert_eq!(manager.ram_buffer_position, ZERO_USIZE, "RAM buffer should start empty");
     }
 
     #[test]
@@ -470,7 +470,7 @@ mod tests {
         assert_eq!(contents, test_data, "Buffer contents should match added data");
 
         manager.clear_ram_buffer();
-        assert_eq!(manager.ram_buffer_position, INITIAL_BUFFER_POSITION, "Buffer position should reset");
+        assert_eq!(manager.ram_buffer_position, ZERO_USIZE, "Buffer position should reset");
         assert_eq!(manager.get_ram_buffer_contents().len(), 0, "Buffer should be empty");
     }
 
@@ -527,7 +527,7 @@ mod tests {
         assert!(cleanup_result.is_ok(), "Resource cleanup should succeed");
 
         assert_eq!(manager.get_ram_buffer_contents().len(), 0, "Buffer should be empty after cleanup");
-        assert_eq!(manager.ram_buffer_position, INITIAL_BUFFER_POSITION, "Buffer position should be reset");
+        assert_eq!(manager.ram_buffer_position, ZERO_USIZE, "Buffer position should be reset");
     }
 
     #[test]
