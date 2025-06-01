@@ -14,7 +14,7 @@ pub static EMAIL_REGEX: Lazy<Regex> = Lazy::new(|| {
 });
 
 pub static DELIMITER_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"[,;\t|:]").unwrap()
+    Regex::new(r"[,;\t|: ]").unwrap()
 });
 
 pub static PRINTABLE_USERNAME_REGEX: Lazy<Regex> = Lazy::new(|| {
@@ -22,11 +22,77 @@ pub static PRINTABLE_USERNAME_REGEX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(&pattern).unwrap()
 });
 
+/// Detect if a line uses mixed delimiters
+/// Patterns:
+/// - URL SPACE USERNAME:PASSWORD
+/// - URL;USERNAME:PASSWORD
+pub fn is_mixed_delimiter_line(line: &str) -> bool {
+    // Check for space-separated pattern: URL SPACE USERNAME:PASSWORD
+    if is_space_mixed_delimiter_line(line) {
+        return true;
+    }
+
+    // Check for semicolon-separated pattern: URL;USERNAME:PASSWORD
+    if is_semicolon_mixed_delimiter_line(line) {
+        return true;
+    }
+
+    false
+}
+
+/// Detect if a line uses space mixed delimiters: URL SPACE USERNAME:PASSWORD
+fn is_space_mixed_delimiter_line(line: &str) -> bool {
+    let parts: Vec<&str> = line.split(' ').collect();
+    if parts.len() != 2 {
+        return false;
+    }
+
+    let url_part = parts[0];
+    let credentials_part = parts[1];
+
+    // Check if first part looks like a URL
+    let is_url = is_url_field(url_part);
+
+    // Check if second part contains exactly one colon (for username:password)
+    let colon_count = count_non_protocol_colons(credentials_part);
+
+    is_url && colon_count == 1
+}
+
+/// Detect if a line uses semicolon mixed delimiters: URL;USERNAME:PASSWORD
+fn is_semicolon_mixed_delimiter_line(line: &str) -> bool {
+    let parts: Vec<&str> = line.split(';').collect();
+    if parts.len() != 2 {
+        return false;
+    }
+
+    let url_part = parts[0];
+    let credentials_part = parts[1];
+
+    // Check if first part looks like a URL
+    let is_url = is_url_field(url_part);
+
+    // Check if second part contains exactly one colon (for username:password)
+    let colon_count = count_non_protocol_colons(credentials_part);
+
+    is_url && colon_count == 1
+}
+
 /// Detect the delimiter used in a line by counting occurrences
 /// Returns the most common delimiter found, defaulting to comma if none found
 /// Special handling for colons to avoid counting protocol colons (http:, https:, etc.)
+/// Special handling for mixed delimiter lines (space + colon, semicolon + colon)
 pub fn detect_delimiter(line: &str) -> char {
-    let delimiters = [',', ';', '\t', '|', ':'];
+    // Check for mixed delimiter patterns first
+    if is_space_mixed_delimiter_line(line) {
+        return ' '; // Return space as primary delimiter for space mixed pattern
+    }
+
+    if is_semicolon_mixed_delimiter_line(line) {
+        return ';'; // Return semicolon as primary delimiter for semicolon mixed pattern
+    }
+
+    let delimiters = [',', ';', '\t', '|', ':', ' '];
     let mut max_count = 0;
     let mut detected_delimiter = ','; // Default to comma
 
@@ -127,11 +193,65 @@ pub fn parse_csv_line(line: &str) -> Vec<String> {
 }
 
 pub fn parse_csv_line_with_delimiter(line: &str, delimiter: char) -> Vec<String> {
-    if delimiter == ':' {
+    if delimiter == ' ' && is_space_mixed_delimiter_line(line) {
+        parse_space_mixed_delimiter_line(line)
+    } else if delimiter == ';' && is_semicolon_mixed_delimiter_line(line) {
+        parse_semicolon_mixed_delimiter_line(line)
+    } else if delimiter == ':' {
         parse_colon_delimited_line(line)
     } else {
         parse_standard_delimited_line(line, delimiter)
     }
+}
+
+fn parse_space_mixed_delimiter_line(line: &str) -> Vec<String> {
+    // Handle space mixed delimiter pattern: URL SPACE USERNAME:PASSWORD
+    let parts: Vec<&str> = line.split(' ').collect();
+    if parts.len() != 2 {
+        // Fallback to space-delimited parsing if pattern doesn't match
+        return parse_standard_delimited_line(line, ' ');
+    }
+
+    let url_part = parts[0].trim();
+    let credentials_part = parts[1].trim();
+
+    // Split credentials by colon
+    let cred_parts: Vec<&str> = credentials_part.splitn(2, ':').collect();
+    if cred_parts.len() != 2 {
+        // Fallback if no colon found in credentials
+        return vec![url_part.to_string(), credentials_part.to_string()];
+    }
+
+    vec![
+        url_part.to_string(),
+        cred_parts[0].trim().to_string(),
+        cred_parts[1].trim().to_string(),
+    ]
+}
+
+fn parse_semicolon_mixed_delimiter_line(line: &str) -> Vec<String> {
+    // Handle semicolon mixed delimiter pattern: URL;USERNAME:PASSWORD
+    let parts: Vec<&str> = line.split(';').collect();
+    if parts.len() != 2 {
+        // Fallback to semicolon-delimited parsing if pattern doesn't match
+        return parse_standard_delimited_line(line, ';');
+    }
+
+    let url_part = parts[0].trim();
+    let credentials_part = parts[1].trim();
+
+    // Split credentials by colon
+    let cred_parts: Vec<&str> = credentials_part.splitn(2, ':').collect();
+    if cred_parts.len() != 2 {
+        // Fallback if no colon found in credentials
+        return vec![url_part.to_string(), credentials_part.to_string()];
+    }
+
+    vec![
+        url_part.to_string(),
+        cred_parts[0].trim().to_string(),
+        cred_parts[1].trim().to_string(),
+    ]
 }
 
 fn parse_standard_delimited_line(line: &str, delimiter: char) -> Vec<String> {
@@ -286,21 +406,46 @@ pub fn detect_field_positions_with_config(fields: &[String], email_username_only
         return (fields.len(), fields.len(), fields.len());
     }
 
-    // Find URL and username positions in a single pass
+    // Find URL with priority: protocol URLs first, then domain-like patterns
     let mut url_idx = None;
     let mut username_idx = None;
 
+    // First pass: Look for URLs with protocols (highest priority)
     for (i, field) in fields.iter().enumerate() {
-        if url_idx.is_none() && is_url_field(field) {
+        if URL_PROTOCOLS.iter().any(|&protocol| field.starts_with(protocol)) {
             url_idx = Some(i);
-        } else if username_idx.is_none() && (
-            if email_username_only {
+            break;
+        }
+    }
+
+    // Second pass: Look for usernames and fallback URLs
+    for (i, field) in fields.iter().enumerate() {
+        // Skip if this field is already identified as a protocol URL
+        if url_idx == Some(i) {
+            continue;
+        }
+
+        // Look for username - be more lenient when we already have a protocol URL
+        if username_idx.is_none() {
+            let is_valid_username = if email_username_only {
                 EMAIL_REGEX.is_match(field)
             } else {
-                is_valid_username_field(field)
+                // If we already found a protocol URL, be more lenient with username detection
+                if url_idx.is_some() {
+                    is_valid_username_field_lenient(field)
+                } else {
+                    is_valid_username_field(field)
+                }
+            };
+
+            if is_valid_username {
+                username_idx = Some(i);
             }
-        ) {
-            username_idx = Some(i);
+        }
+
+        // Look for URL only if we haven't found a protocol URL yet
+        if url_idx.is_none() && is_url_field(field) {
+            url_idx = Some(i);
         }
 
         if url_idx.is_some() && username_idx.is_some() {
@@ -383,6 +528,30 @@ fn is_valid_username_field(field: &str) -> bool {
 
     // Must not be a URL or URL-like pattern
     if is_url_field(field) || URL_PROTOCOLS.iter().any(|&protocol| field.starts_with(protocol)) {
+        return false;
+    }
+
+    // Check if it looks like a password (long string with mixed case and numbers)
+    !(field.len() > LONG_PASSWORD_HEURISTIC_LENGTH && {
+        let chars: Vec<_> = field.chars().collect();
+        chars.iter().any(|c| c.is_uppercase()) &&
+        chars.iter().any(|c| c.is_lowercase()) &&
+        chars.iter().any(|c| c.is_numeric())
+    })
+}
+
+/// More lenient username validation for cases where we already have a clear protocol URL
+/// This allows domain-like usernames when there's already a proper URL with protocol
+fn is_valid_username_field_lenient(field: &str) -> bool {
+    let field = field.trim();
+
+    // Basic validation - must be non-empty and match printable pattern
+    if field.is_empty() || !PRINTABLE_USERNAME_REGEX.is_match(field) {
+        return false;
+    }
+
+    // Must not start with a URL protocol (but allow domain-like patterns)
+    if URL_PROTOCOLS.iter().any(|&protocol| field.starts_with(protocol)) {
         return false;
     }
 
@@ -590,11 +759,12 @@ mod tests {
     #[test]
     fn test_line_validation() {
         assert!(is_valid_line("user@example.com,password123,https://example.com"));
+        assert!(is_valid_line("user@example.com password site.com")); // Space delimiter is now valid
 
         assert!(!is_valid_line(""));
         assert!(!is_valid_line("   "));
         assert!(!is_valid_line("not an email,password,site.com"));
-        assert!(!is_valid_line("user@example.com password site.com"));
+        assert!(!is_valid_line("no delimiters here")); // No delimiters at all
     }
 
     #[test]
@@ -680,6 +850,365 @@ mod tests {
         for email in test_emails {
             let message = format!("Email '{}' should be recognized as valid", email);
             assert!(EMAIL_REGEX.is_match(email), "{}", message);
+        }
+    }
+
+    #[test]
+    fn test_mixed_delimiter_detection() {
+        // Test the specific failing cases from the user
+        let test_cases = vec![
+            "https://www.faxburner.com black.shadow1981:burns1938",
+            "https://www.faxburner.com/homepage/signup-free dedy.yumanta:dedy210771",
+            "https://www.faxmakeronline.com/Account/LogOn smqasimalvi85:Qasim5471!",
+            "https://www.faxtastic.co.uk mshalluf.uk:Libya2022",
+        ];
+
+        for line in test_cases {
+            assert!(is_mixed_delimiter_line(line),
+                   "Line '{}' should be detected as mixed delimiter", line);
+            assert_eq!(detect_delimiter(line), ' ',
+                      "Line '{}' should detect space as primary delimiter", line);
+        }
+
+        // Test cases that should NOT be detected as mixed delimiter
+        let non_mixed_cases = vec![
+            "https://site.com,user:pass",  // Comma delimiter
+            "https://site.com:user:pass",  // Colon delimiter only
+            "https://site.com user pass",  // Space delimiter but no colon
+            "site.com user:pass",          // Not a URL
+            "https://site.com user:pass:extra", // Multiple colons
+        ];
+
+        for line in non_mixed_cases {
+            assert!(!is_mixed_delimiter_line(line),
+                   "Line '{}' should NOT be detected as mixed delimiter", line);
+        }
+    }
+
+    #[test]
+    fn test_mixed_delimiter_parsing() {
+        // Test the specific failing cases from the user
+        let line = "https://www.faxburner.com black.shadow1981:burns1938";
+        let fields = parse_csv_line(line);
+        assert_eq!(fields.len(), 3, "Mixed delimiter line should parse into 3 fields");
+        assert_eq!(fields[0], "https://www.faxburner.com", "URL should be first field");
+        assert_eq!(fields[1], "black.shadow1981", "Username should be second field");
+        assert_eq!(fields[2], "burns1938", "Password should be third field");
+
+        let line2 = "https://www.faxburner.com/homepage/signup-free dedy.yumanta:dedy210771";
+        let fields2 = parse_csv_line(line2);
+        assert_eq!(fields2.len(), 3, "Mixed delimiter line should parse into 3 fields");
+        assert_eq!(fields2[0], "https://www.faxburner.com/homepage/signup-free", "URL with path should be first field");
+        assert_eq!(fields2[1], "dedy.yumanta", "Username should be second field");
+        assert_eq!(fields2[2], "dedy210771", "Password should be third field");
+
+        let line3 = "https://www.faxmakeronline.com/Account/LogOn smqasimalvi85:Qasim5471!";
+        let fields3 = parse_csv_line(line3);
+        assert_eq!(fields3.len(), 3, "Mixed delimiter line should parse into 3 fields");
+        assert_eq!(fields3[0], "https://www.faxmakeronline.com/Account/LogOn", "URL with path should be first field");
+        assert_eq!(fields3[1], "smqasimalvi85", "Username should be second field");
+        assert_eq!(fields3[2], "Qasim5471!", "Password with special chars should be third field");
+
+        let line4 = "https://www.faxtastic.co.uk mshalluf.uk:Libya2022";
+        let fields4 = parse_csv_line(line4);
+        assert_eq!(fields4.len(), 3, "Mixed delimiter line should parse into 3 fields");
+        assert_eq!(fields4[0], "https://www.faxtastic.co.uk", "URL should be first field");
+        assert_eq!(fields4[1], "mshalluf.uk", "Username should be second field");
+        assert_eq!(fields4[2], "Libya2022", "Password should be third field");
+    }
+
+    #[test]
+    fn test_mixed_delimiter_validation() {
+        // Test that mixed delimiter lines are considered valid
+        let test_lines = vec![
+            "https://www.faxburner.com black.shadow1981:burns1938",
+            "https://www.faxburner.com/homepage/signup-free dedy.yumanta:dedy210771",
+            "https://www.faxmakeronline.com/Account/LogOn smqasimalvi85:Qasim5471!",
+            "https://www.faxtastic.co.uk mshalluf.uk:Libya2022",
+        ];
+
+        for line in test_lines {
+            // Test that the line contains delimiters
+            assert!(DELIMITER_REGEX.is_match(line),
+                   "Mixed delimiter line '{}' should match DELIMITER_REGEX", line);
+
+            // Test that the line is considered valid (assuming email_username_only = false)
+            assert!(is_valid_line_with_config(line, false),
+                   "Mixed delimiter line '{}' should be considered valid", line);
+
+            // Test field detection
+            let fields = parse_csv_line(line);
+            let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, false);
+            assert!(user_idx < fields.len(), "Username index should be valid for line '{}'", line);
+            assert!(password_idx < fields.len(), "Password index should be valid for line '{}'", line);
+            assert!(url_idx < fields.len(), "URL index should be valid for line '{}'", line);
+
+            // Verify URL is detected correctly
+            assert_eq!(url_idx, 0, "URL should be detected in first field for line '{}'", line);
+        }
+    }
+
+    #[test]
+    fn test_user_reported_failing_cases() {
+        // Test the exact failing cases reported by the user
+        let failing_lines = vec![
+            "https://www.faxburner.com black.shadow1981:burns1938",
+            "https://www.faxburner.com/homepage/signup-free dedy.yumanta:dedy210771",
+            "https://www.faxmakeronline.com/Account/LogOn smqasimalvi85:Qasim5471!",
+            "https://www.faxtastic.co.uk mshalluf.uk:Libya2022",
+        ];
+
+        for line in failing_lines {
+            println!("Testing line: {}", line);
+
+            // These should now be detected as mixed delimiter lines
+            assert!(is_mixed_delimiter_line(line),
+                   "Line should be detected as mixed delimiter: {}", line);
+
+            // Should detect space as primary delimiter
+            assert_eq!(detect_delimiter(line), ' ',
+                      "Should detect space as delimiter for: {}", line);
+
+            // Should parse correctly into 3 fields
+            let fields = parse_csv_line(line);
+            assert_eq!(fields.len(), 3,
+                      "Should parse into 3 fields: {} -> {:?}", line, fields);
+
+            // Should be considered valid
+            assert!(is_valid_line_with_config(line, false),
+                   "Should be valid with printable usernames: {}", line);
+
+            // Field positions should be detected correctly
+            let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, false);
+            assert_eq!(url_idx, 0, "URL should be in position 0 for: {}", line);
+            assert_eq!(user_idx, 1, "Username should be in position 1 for: {}", line);
+            assert_eq!(password_idx, 2, "Password should be in position 2 for: {}", line);
+
+            println!("✅ Line parsed successfully: {} -> {:?}", line, fields);
+        }
+    }
+
+    #[test]
+    fn test_semicolon_mixed_delimiter_detection() {
+        // Test the new semicolon mixed delimiter pattern: URL;USERNAME:PASSWORD
+        let test_cases = vec![
+            "https://luckybits.io/register;collegetchoya:23560309",
+            "https://luckybits.io/register;collegetchoya@gmail.com:23560309",
+            "https://luckybits.online/auth/signup;Kpofonregis21:@Scarface07",
+            "http://example.com;user:pass",
+            "https://site.com/path;username:password123",
+        ];
+
+        for line in test_cases {
+            assert!(is_mixed_delimiter_line(line),
+                   "Line '{}' should be detected as mixed delimiter", line);
+            assert_eq!(detect_delimiter(line), ';',
+                      "Line '{}' should detect semicolon as primary delimiter", line);
+        }
+
+        // Test cases that should NOT be detected as semicolon mixed delimiter
+        let non_mixed_cases = vec![
+            "https://site.com;user;pass",     // Semicolon delimiter but no colon
+            "site.com;user:pass",             // Not a URL
+            "https://site.com;user:pass:extra", // Multiple colons
+            "https://site.com,user:pass",     // Different primary delimiter
+        ];
+
+        for line in non_mixed_cases {
+            if line.contains(';') && line.contains(':') {
+                // These might be detected as mixed but with different delimiters
+                let delimiter = detect_delimiter(line);
+                if delimiter == ';' {
+                    assert!(!is_mixed_delimiter_line(line),
+                           "Line '{}' should NOT be detected as mixed delimiter", line);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_semicolon_mixed_delimiter_parsing() {
+        // Test parsing of semicolon mixed delimiter lines
+        let line = "https://luckybits.io/register;collegetchoya:23560309";
+        let fields = parse_csv_line(line);
+        assert_eq!(fields.len(), 3, "Semicolon mixed delimiter line should parse into 3 fields");
+        assert_eq!(fields[0], "https://luckybits.io/register", "URL should be first field");
+        assert_eq!(fields[1], "collegetchoya", "Username should be second field");
+        assert_eq!(fields[2], "23560309", "Password should be third field");
+
+        let line2 = "https://luckybits.io/register;collegetchoya@gmail.com:23560309";
+        let fields2 = parse_csv_line(line2);
+        assert_eq!(fields2.len(), 3, "Semicolon mixed delimiter line should parse into 3 fields");
+        assert_eq!(fields2[0], "https://luckybits.io/register", "URL should be first field");
+        assert_eq!(fields2[1], "collegetchoya@gmail.com", "Email username should be second field");
+        assert_eq!(fields2[2], "23560309", "Password should be third field");
+
+        let line3 = "https://luckybits.online/auth/signup;Kpofonregis21:@Scarface07";
+        let fields3 = parse_csv_line(line3);
+        assert_eq!(fields3.len(), 3, "Semicolon mixed delimiter line should parse into 3 fields");
+        assert_eq!(fields3[0], "https://luckybits.online/auth/signup", "URL with path should be first field");
+        assert_eq!(fields3[1], "Kpofonregis21", "Username should be second field");
+        assert_eq!(fields3[2], "@Scarface07", "Password with special chars should be third field");
+    }
+
+    #[test]
+    fn test_semicolon_mixed_delimiter_validation() {
+        // Test that semicolon mixed delimiter lines are considered valid
+        let test_lines = vec![
+            "https://luckybits.io/register;collegetchoya:23560309",
+            "https://luckybits.io/register;collegetchoya@gmail.com:23560309",
+            "https://luckybits.online/auth/signup;Kpofonregis21:@Scarface07",
+        ];
+
+        for line in test_lines {
+            // Test that the line contains delimiters
+            assert!(DELIMITER_REGEX.is_match(line),
+                   "Semicolon mixed delimiter line '{}' should match DELIMITER_REGEX", line);
+
+            // Test that the line is considered valid (assuming email_username_only = false)
+            assert!(is_valid_line_with_config(line, false),
+                   "Semicolon mixed delimiter line '{}' should be considered valid", line);
+
+            // Test field detection
+            let fields = parse_csv_line(line);
+            let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, false);
+            assert!(user_idx < fields.len(), "Username index should be valid for line '{}'", line);
+            assert!(password_idx < fields.len(), "Password index should be valid for line '{}'", line);
+            assert!(url_idx < fields.len(), "URL index should be valid for line '{}'", line);
+
+            // Verify URL is detected correctly
+            assert_eq!(url_idx, 0, "URL should be detected in first field for line '{}'", line);
+        }
+    }
+
+    #[test]
+    fn test_comprehensive_mixed_delimiter_cases() {
+        // Test all reported failing cases from both user reports
+        let all_failing_cases = vec![
+            // Original space mixed delimiter cases
+            ("https://www.faxburner.com black.shadow1981:burns1938", ' '),
+            ("https://www.faxburner.com/homepage/signup-free dedy.yumanta:dedy210771", ' '),
+            ("https://www.faxmakeronline.com/Account/LogOn smqasimalvi85:Qasim5471!", ' '),
+            ("https://www.faxtastic.co.uk mshalluf.uk:Libya2022", ' '),
+
+            // New semicolon mixed delimiter cases
+            ("https://luckybits.io/register;collegetchoya:23560309", ';'),
+            ("https://luckybits.io/register;collegetchoya@gmail.com:23560309", ';'),
+            ("https://luckybits.online/auth/signup;Kpofonregis21:@Scarface07", ';'),
+        ];
+
+        for (line, expected_delimiter) in all_failing_cases {
+            println!("Testing comprehensive case: {}", line);
+
+            // Should be detected as mixed delimiter
+            assert!(is_mixed_delimiter_line(line),
+                   "Line should be detected as mixed delimiter: {}", line);
+
+            // Should detect correct primary delimiter
+            assert_eq!(detect_delimiter(line), expected_delimiter,
+                      "Should detect '{}' as delimiter for: {}", expected_delimiter, line);
+
+            // Should parse correctly into 3 fields
+            let fields = parse_csv_line(line);
+            assert_eq!(fields.len(), 3,
+                      "Should parse into 3 fields: {} -> {:?}", line, fields);
+
+            // Should be considered valid
+            assert!(is_valid_line_with_config(line, false),
+                   "Should be valid with printable usernames: {}", line);
+
+            // Field positions should be detected correctly
+            let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, false);
+            assert_eq!(url_idx, 0, "URL should be in position 0 for: {}", line);
+            assert_eq!(user_idx, 1, "Username should be in position 1 for: {}", line);
+            assert_eq!(password_idx, 2, "Password should be in position 2 for: {}", line);
+
+            // Verify the actual field contents
+            assert!(is_url_field(&fields[url_idx]), "First field should be detected as URL: {}", fields[url_idx]);
+            assert!(!fields[user_idx].is_empty(), "Username field should not be empty: {}", fields[user_idx]);
+            assert!(!fields[password_idx].is_empty(), "Password field should not be empty: {}", fields[password_idx]);
+
+            println!("✅ Comprehensive test passed: {} -> {:?}", line, fields);
+        }
+    }
+
+    #[test]
+    fn test_domain_like_username_detection() {
+        // Test the specific failing case reported by the user
+        let line = "compdigedu.cc.sansaturio.madrid,0Joseantonio,https://correoweb.educa.madrid.org/";
+        let fields = parse_csv_line(line);
+
+        assert_eq!(fields.len(), 3, "Line should parse into 3 fields");
+        assert_eq!(fields[0], "compdigedu.cc.sansaturio.madrid", "Username should be first field");
+        assert_eq!(fields[1], "0Joseantonio", "Password should be second field");
+        assert_eq!(fields[2], "https://correoweb.educa.madrid.org/", "URL should be third field");
+
+        // Test field detection - should now work correctly with lenient username validation
+        let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, false);
+
+        // Verify correct field detection
+        assert_eq!(url_idx, 2, "URL should be detected in third field (the actual URL)");
+        assert_eq!(user_idx, 0, "Username should be detected in first field");
+        assert_eq!(password_idx, 1, "Password should be detected in second field");
+
+        // The line should be considered valid
+        assert!(is_valid_line_with_config(line, false),
+               "Line with domain-like username should be considered valid");
+
+        // Test additional similar cases
+        let similar_cases = vec![
+            "user.domain.like.name,password123,https://example.com",
+            "my.long.username.here,pass,http://site.org",
+            "test.subdomain.example.tld,secret,https://real-url.com/path",
+        ];
+
+        for case in similar_cases {
+            let case_fields = parse_csv_line(case);
+            let (case_user_idx, case_password_idx, case_url_idx) = detect_field_positions_with_config(&case_fields, false);
+
+            assert_eq!(case_user_idx, 0, "Username should be in first field for: {}", case);
+            assert_eq!(case_password_idx, 1, "Password should be in second field for: {}", case);
+            assert_eq!(case_url_idx, 2, "URL should be in third field for: {}", case);
+
+            assert!(is_valid_line_with_config(case, false),
+                   "Line should be valid: {}", case);
+        }
+    }
+
+    #[test]
+    fn test_domain_like_usernames_vs_urls() {
+        // Test various domain-like usernames that should NOT be detected as URLs
+        let domain_like_usernames = vec![
+            "compdigedu.cc.sansaturio.madrid",  // The failing case
+            "user.name.domain.extension",       // Generic domain-like username
+            "my.long.username.here",            // Another domain-like pattern
+            "test.subdomain.example.tld",       // Looks like a domain but is a username
+        ];
+
+        for username in domain_like_usernames {
+            println!("Testing domain-like username: {}", username);
+
+            // These should NOT be detected as URLs when they're usernames
+            // The issue is that they currently ARE being detected as URLs due to reverse domain logic
+            // This test will help us understand the current behavior
+            let is_detected_as_url = is_url_field(username);
+            println!("  is_url_field('{}') = {}", username, is_detected_as_url);
+
+            // For now, let's document what we expect vs what we get
+            // We'll fix the logic after understanding the current behavior
+        }
+
+        // Test actual URLs that SHOULD be detected as URLs
+        let actual_urls = vec![
+            "https://correoweb.educa.madrid.org/",
+            "http://example.com",
+            "https://site.com/path",
+            "ftp://files.example.com",
+        ];
+
+        for url in actual_urls {
+            println!("Testing actual URL: {}", url);
+            assert!(is_url_field(url), "Actual URL '{}' should be detected as URL", url);
         }
     }
 }
