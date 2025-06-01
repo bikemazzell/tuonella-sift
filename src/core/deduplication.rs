@@ -2,12 +2,14 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use anyhow::Result;
 use crate::config::model::{Config, DeduplicationConfig};
 use crate::core::record::Record;
 use crate::core::validation::{parse_csv_line, detect_field_positions, detect_field_positions_with_config, is_valid_line_with_config, EMAIL_REGEX, DELIMITER_REGEX};
 use crate::core::memory_manager::MemoryManager;
+use crate::core::performance_monitor::PerformanceMonitor;
+use crate::utils::system::{get_process_memory_usage, get_memory_info};
 use crate::constants::{
     VALIDATION_ERRORS_FILENAME, TEMP_FILE_PREFIX, FINAL_DEDUPLICATED_FILENAME,
     MIN_FIELD_COUNT, BYTES_PER_MB, PROTOCOL_HTTP, PROTOCOL_HTTPS, PROTOCOL_ANDROID,
@@ -95,14 +97,14 @@ pub fn process_csv_files_with_algorithm_streaming(
 
 /// Legacy function for backward compatibility
 ///
-/// This function maintains the old interface but uses a temporary memory manager
+/// This function maintains the old interface but uses config-based memory manager
 pub fn process_csv_files_with_validation(
     input_dir: &Path,
     config: &Config,
     verbose: bool,
 ) -> Result<Vec<PathBuf>> {
-    // Create a temporary memory manager for legacy compatibility
-    let mut memory_manager = MemoryManager::new(None)?;
+    // Create a config-based memory manager
+    let mut memory_manager = MemoryManager::from_config(config)?;
 
     // Delegate to the new algorithm-compliant implementation
     process_csv_files_with_algorithm_streaming(input_dir, config, &mut memory_manager, verbose)
@@ -147,16 +149,17 @@ fn process_single_csv_with_algorithm_streaming(
     for line_result in reader.lines() {
         let line = match line_result {
             Ok(line) => line,
-            Err(e) => {
+            Err(_e) => {
                 // Handle UTF-8 encoding errors gracefully
-                if verbose {
-                    println!("    ⚠️ UTF-8 encoding error at line {}: {}", total_lines + 1, e);
-                }
+                // Note: Console output commented out to reduce spam, but error logging preserved
+                // if verbose {
+                //     println!("    ⚠️ UTF-8 encoding error at line {}: {}", total_lines + 1, _e);
+                // }
                 // Skip this line and continue processing
                 total_lines += 1;
                 invalid_lines += 1;
                 writeln!(error_writer, "{}:{}: UTF-8 encoding error - {}",
-                    input_path.display(), total_lines, e)?;
+                    input_path.display(), total_lines, _e)?;
                 continue;
             }
         };
@@ -305,16 +308,17 @@ fn process_single_csv_file_with_validation(
     for line_result in reader.lines() {
         let line = match line_result {
             Ok(line) => line,
-            Err(e) => {
+            Err(_e) => {
                 // Handle UTF-8 encoding errors gracefully
-                if verbose {
-                    println!("    ⚠️ UTF-8 encoding error at line {}: {}", total_lines + 1, e);
-                }
+                // Note: Console output commented out to reduce spam, but error logging preserved
+                // if verbose {
+                //     println!("    ⚠️ UTF-8 encoding error at line {}: {}", total_lines + 1, _e);
+                // }
                 // Skip this line and continue processing
                 total_lines += 1;
                 invalid_lines += 1;
                 writeln!(error_writer, "{}:{}: UTF-8 encoding error - {}",
-                    input_path.display(), total_lines, e)?;
+                    input_path.display(), total_lines, _e)?;
                 continue;
             }
         };
@@ -403,12 +407,13 @@ fn process_single_csv_file_with_validation(
     Ok(())
 }
 
-/// The main deduplication function
+/// The main deduplication function with performance monitoring
 ///
 /// This function:
 /// 1. Processes all temporary files
 /// 2. Builds a deduplication map
 /// 3. Writes unique records to the output file
+/// 4. Monitors performance and resource usage
 pub fn deduplicate_records(
     temp_files: &[PathBuf],
     output_path: &Path,
@@ -422,6 +427,11 @@ pub fn deduplicate_records(
     let mut stats = ProcessingStats::default();
     stats.files_processed = temp_files.len();
 
+    // Initialize performance monitor
+    let mut performance_monitor = PerformanceMonitor::new();
+    let mut last_performance_report = Instant::now();
+    let performance_report_interval = Duration::from_secs(config.performance.report_interval_seconds);
+
     let output_file = File::create(output_path)?;
     let mut writer = BufWriter::new(output_file);
 
@@ -430,6 +440,11 @@ pub fn deduplicate_records(
 
     if verbose {
         println!("Memory limit: {} records", config.processing.max_memory_records);
+        if config.performance.enable_monitoring {
+            println!("🔍 Performance monitoring enabled - reports every {} seconds", config.performance.report_interval_seconds);
+        } else {
+            println!("🔍 Performance monitoring disabled");
+        }
     }
 
     for (i, temp_file) in temp_files.iter().enumerate() {
@@ -437,19 +452,22 @@ pub fn deduplicate_records(
             println!("Deduplicating file {}/{}: {}", i + 1, temp_files.len(), temp_file.display());
         }
 
+        let _file_start_time = Instant::now();
         let file = File::open(temp_file)?;
         let reader = BufReader::new(file);
 
         let mut records_batch = Vec::new();
+        let mut _file_records_processed = 0;
 
         for line_result in reader.lines() {
             let line = match line_result {
                 Ok(line) => line,
-                Err(e) => {
+                Err(_e) => {
                     // Handle UTF-8 encoding errors gracefully
-                    if verbose {
-                        println!("    ⚠️ UTF-8 encoding error in temp file {}: {}", temp_file.display(), e);
-                    }
+                    // Note: Console output commented out to reduce spam, but error handling preserved
+                    // if verbose {
+                    //     println!("    ⚠️ UTF-8 encoding error in temp file {}: {}", temp_file.display(), _e);
+                    // }
                     stats.invalid_records += 1;
                     continue;
                 }
@@ -459,9 +477,12 @@ pub fn deduplicate_records(
             // Parse the line to extract fields
             if let Some(record) = parse_line_to_record(&line, &config.deduplication) {
                 records_batch.push(record);
+                _file_records_processed += 1;
 
                 // Process batch when it reaches chunk size
                 if records_batch.len() >= config.processing.record_chunk_size {
+                    let batch_start_time = Instant::now();
+
                     process_record_batch(
                         &mut records_batch,
                         &mut dedup_map,
@@ -471,12 +492,46 @@ pub fn deduplicate_records(
                         &config.deduplication,
                     )?;
 
+                    let batch_processing_time = batch_start_time.elapsed();
+
+                    // Add performance sample (only if monitoring is enabled)
+                    if config.performance.enable_monitoring {
+                        let memory_usage = get_process_memory_usage() as f64 / (1024.0 * 1024.0 * 1024.0); // Convert to GB
+                        let memory_usage_percent = (memory_usage / (get_memory_info().0 * config.memory.memory_usage_percent as f64 / 100.0)) * 100.0;
+
+                        #[cfg(feature = "cuda")]
+                        let gpu_utilization = if let Some(processor) = cuda_processor {
+                            processor.get_gpu_utilization_percent().unwrap_or(0.0)
+                        } else {
+                            0.0
+                        };
+                        #[cfg(not(feature = "cuda"))]
+                        let gpu_utilization = 0.0;
+
+                        performance_monitor.add_sample(
+                            records_batch.capacity(),
+                            batch_processing_time,
+                            Duration::from_millis(0), // IO time (minimal for in-memory processing)
+                            memory_usage_percent,
+                            gpu_utilization,
+                        )?;
+                    }
+
                     // Check memory limit and flush if necessary
                     if dedup_map.len() >= config.processing.max_memory_records {
                         if verbose {
                             println!("  Memory limit reached ({} records), flushing to disk...", dedup_map.len());
                         }
                         flush_records_to_disk(&mut dedup_map, &mut writer)?;
+                    }
+
+                    // Performance reporting
+                    if config.performance.enable_monitoring && last_performance_report.elapsed() >= performance_report_interval {
+                        if verbose {
+                            println!("\n📊 Performance Report:");
+                            println!("{}", performance_monitor.format_performance_summary());
+                        }
+                        last_performance_report = Instant::now();
                     }
                 }
             } else {
@@ -540,6 +595,17 @@ pub fn deduplicate_records(
     stats.unique_records = dedup_map.len();
     stats.duplicates_removed = stats.total_records - stats.unique_records;
     stats.processing_time_seconds = start_time.elapsed().as_secs_f64();
+
+    // Final performance report
+    if verbose && config.performance.enable_monitoring {
+        println!("\n📊 Final Performance Report:");
+        println!("{}", performance_monitor.format_performance_summary());
+
+        let final_memory_usage = get_process_memory_usage() as f64 / (1024.0 * 1024.0 * 1024.0);
+        println!("💾 Final memory usage: {:.2} GB ({:.1}% of configured limit)",
+                final_memory_usage,
+                (final_memory_usage / (get_memory_info().0 * config.memory.memory_usage_percent as f64 / 100.0)) * 100.0);
+    }
 
     Ok(stats)
 }
@@ -682,11 +748,12 @@ fn process_single_temp_file_with_gpu(
     for line_result in reader.lines() {
         let line = match line_result {
             Ok(line) => line,
-            Err(e) => {
+            Err(_e) => {
                 // Handle UTF-8 encoding errors gracefully
-                if verbose {
-                    println!("    ⚠️ UTF-8 encoding error in GPU temp file {}: {}", temp_file.display(), e);
-                }
+                // Note: Console output commented out to reduce spam, but error handling preserved
+                // if verbose {
+                //     println!("    ⚠️ UTF-8 encoding error in GPU temp file {}: {}", temp_file.display(), _e);
+                // }
                 stats.invalid_records += 1;
                 continue;
             }
@@ -1302,8 +1369,7 @@ mod tests {
     use std::io::Write;
     use tempfile::tempdir;
     use crate::constants::{
-        TEST_MAX_RAM_USAGE_GB, TEST_CHUNK_SIZE_MB,
-        TEST_RECORD_CHUNK_SIZE, TEST_MAX_MEMORY_RECORDS
+        TEST_CHUNK_SIZE_MB, TEST_RECORD_CHUNK_SIZE, TEST_MAX_MEMORY_RECORDS
     };
 
     fn create_test_csv(path: &Path, lines: &[&str]) -> Result<()> {
@@ -1500,7 +1566,7 @@ mod tests {
         // Create config
         let config = Config {
             memory: crate::config::model::MemoryConfig {
-                max_ram_usage_gb: TEST_MAX_RAM_USAGE_GB,
+                memory_usage_percent: 10, // 10% for testing
                 auto_detect_memory: true,
             },
             processing: crate::config::model::ProcessingConfig {
@@ -1521,6 +1587,7 @@ mod tests {
             logging: crate::config::model::LoggingConfig {
                 verbosity: "normal".to_string(),
             },
+            performance: crate::config::model::PerformanceConfig::default(),
             #[cfg(feature = "cuda")]
             cuda: crate::config::model::CudaConfig::default(),
         };

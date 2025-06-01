@@ -5,7 +5,7 @@ use crate::constants::{
     PERFORMANCE_SAMPLE_WINDOW_RECORDS, ADAPTIVE_OPTIMIZATION_INTERVAL_RECORDS,
     MIN_THROUGHPUT_RECORDS_PER_SECOND, THROUGHPUT_IMPROVEMENT_THRESHOLD_PERCENT,
     MEMORY_PRESSURE_HIGH_THRESHOLD, MEMORY_PRESSURE_LOW_THRESHOLD,
-    THROUGHPUT_REDUCTION_FACTOR, IO_EFFICIENCY_HIGH_THRESHOLD,
+    THROUGHPUT_REDUCTION_FACTOR,
     CHUNK_SIZE_MIN_MB, CHUNK_SIZE_MAX_MB, GPU_UTILIZATION_LOW_THRESHOLD,
     GPU_UTILIZATION_HIGH_THRESHOLD, BATCH_SIZE_INCREASE_FACTOR_GPU,
     BATCH_SIZE_DECREASE_FACTOR_GPU, MIN_PARALLEL_THREADS,
@@ -234,10 +234,6 @@ impl PerformanceMonitor {
             recommended_size = (recommended_size as f64 * THROUGHPUT_REDUCTION_FACTOR) as usize;
         }
 
-        if self.current_metrics.io_efficiency > IO_EFFICIENCY_HIGH_THRESHOLD {
-            recommended_size = (recommended_size as f64 * BATCH_SIZE_INCREASE_FACTOR_GPU) as usize;
-        }
-
         recommended_size = recommended_size.max(CHUNK_SIZE_MIN_MB).min(CHUNK_SIZE_MAX_MB);
 
         self.current_metrics.recommended_chunk_size_mb = recommended_size;
@@ -298,7 +294,6 @@ impl PerformanceMonitor {
              📊 Average Throughput: {:.1} records/sec\n\
              🏆 Peak Throughput: {:.1} records/sec\n\
              🔄 Processing Efficiency: {:.1}%\n\
-             💾 I/O Efficiency: {:.1}%\n\
              🧠 Memory Pressure: {:.1}%\n\
              🖥️  GPU Utilization: {:.1}%\n\
              📈 Trend: {:?}\n\
@@ -307,7 +302,6 @@ impl PerformanceMonitor {
             self.current_metrics.average_throughput,
             self.current_metrics.peak_throughput,
             self.current_metrics.processing_efficiency * 100.0,
-            self.current_metrics.io_efficiency * 100.0,
             self.current_metrics.memory_pressure * 100.0,
             self.current_metrics.gpu_utilization,
             self.current_metrics.performance_trend,

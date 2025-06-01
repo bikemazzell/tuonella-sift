@@ -2,14 +2,14 @@ use sysinfo::{System, Pid};
 use std::time::{Duration, Instant};
 use crate::constants::{
     BYTES_PER_GB, ALGORITHM_RAM_ALLOCATION_PERCENT, MEMORY_SAFETY_MARGIN,
-    MAX_RAM_BUFFER_SIZE_GB, MEMORY_PRESSURE_THRESHOLD_PERCENT,
-    BYTES_PER_KB, SECONDS_PER_HOUR, SECONDS_PER_MINUTE,
+    MEMORY_PRESSURE_THRESHOLD_PERCENT,
+    SECONDS_PER_HOUR, SECONDS_PER_MINUTE,
     KB_AS_F64, MB_AS_F64, GB_AS_F64, TB_AS_F64,
     DECIMAL_PLACES, ZERO_F64, PERCENT_100
 };
 
 #[cfg(feature = "cuda")]
-use crate::constants::{MAX_GPU_BUFFER_SIZE_GB, ALGORITHM_GPU_ALLOCATION_PERCENT};
+use crate::constants::{ALGORITHM_GPU_ALLOCATION_PERCENT};
 use anyhow::Result;
 
 #[cfg(feature = "cuda")]
@@ -32,31 +32,30 @@ pub struct SystemResources {
 
 impl SystemResources {
     /// Query system resources dynamically as specified in algorithm step 1
-    pub fn query_system_resources(user_ram_limit_gb: Option<usize>) -> Result<Self> {
+    pub fn query_system_resources(
+        ram_memory_usage_percent: Option<f64>,
+        _gpu_memory_usage_percent: Option<f64>
+    ) -> Result<Self> {
         let mut system = System::new_all();
         system.refresh_all();
 
         let total_ram_bytes = system.total_memory() as usize;
         let available_ram_bytes = system.available_memory() as usize;
 
-        // Calculate RAM limit: min(available_ram, user_limit) * 90% as per algorithm
-        let user_ram_limit_bytes = user_ram_limit_gb
-            .map(|gb| gb * BYTES_PER_GB as usize)
-            .unwrap_or(available_ram_bytes);
-
-        let ram_limit_bytes = ((available_ram_bytes.min(user_ram_limit_bytes) as f64)
-            * ALGORITHM_RAM_ALLOCATION_PERCENT * MEMORY_SAFETY_MARGIN) as usize;
+        // Calculate RAM limit: Use percentage of available RAM as per algorithm
+        let ram_usage_percent = ram_memory_usage_percent.unwrap_or(50.0) / 100.0; // Default to 50%
+        let ram_limit_bytes = ((available_ram_bytes as f64) * ram_usage_percent * MEMORY_SAFETY_MARGIN) as usize;
 
         // RAM Buffer Size: Allocate ~90% of the RAM_limit for buffering file chunks
-        // Apply safety limit to prevent OOM during testing
+        // Use configured RAM limit as the maximum buffer size (with safety margin)
         let calculated_ram_buffer = (ram_limit_bytes as f64 * ALGORITHM_RAM_ALLOCATION_PERCENT) as usize;
-        let max_ram_buffer_bytes = (MAX_RAM_BUFFER_SIZE_GB * BYTES_PER_GB as f64) as usize;
+        let max_ram_buffer_bytes = (ram_limit_bytes as f64 * 0.8) as usize; // 80% of configured limit as buffer
         let ram_buffer_size_bytes = calculated_ram_buffer.min(max_ram_buffer_bytes);
 
         #[cfg(feature = "cuda")]
         let (gpu_properties, gpu_limit_bytes, gpu_buffer_size_bytes) = {
             // Try to get GPU properties - this will fail gracefully if no CUDA device
-            match Self::query_gpu_resources() {
+            match Self::query_gpu_resources(_gpu_memory_usage_percent) {
                 Ok((props, limit, buffer)) => (Some(props), limit, buffer),
                 Err(_) => (None, 0, 0),
             }
@@ -77,7 +76,7 @@ impl SystemResources {
     }
 
     #[cfg(feature = "cuda")]
-    fn query_gpu_resources() -> Result<(CudaDeviceProperties, usize, usize)> {
+    fn query_gpu_resources(gpu_memory_usage_percent: Option<f64>) -> Result<(CudaDeviceProperties, usize, usize)> {
         use cudarc::driver::result;
 
         // Query GPU memory directly without creating full context to avoid memory allocation
@@ -107,14 +106,14 @@ impl SystemResources {
             l2_cache_size,
         };
 
-        // Calculate GPU limit: 90% of available GPU memory as per algorithm
-        let gpu_limit_bytes = ((props.free_memory as f64)
-            * ALGORITHM_GPU_ALLOCATION_PERCENT * MEMORY_SAFETY_MARGIN) as usize;
+        // Calculate GPU limit: Use configured percentage of available GPU memory
+        let gpu_usage_percent = gpu_memory_usage_percent.unwrap_or(90.0) / 100.0; // Default to 90%
+        let gpu_limit_bytes = ((props.free_memory as f64) * gpu_usage_percent * MEMORY_SAFETY_MARGIN) as usize;
 
-        // GPU Chunk Size: Allocate ~90% of the GPU_limit for processing
-        // Apply safety limit to prevent OOM during testing
+        // GPU Chunk Size: Allocate ~80% of the GPU_limit for processing buffer
+        // Use configured limit as maximum (with safety margin)
         let calculated_gpu_buffer = (gpu_limit_bytes as f64 * ALGORITHM_GPU_ALLOCATION_PERCENT) as usize;
-        let max_gpu_buffer_bytes = (MAX_GPU_BUFFER_SIZE_GB * BYTES_PER_GB as f64) as usize;
+        let max_gpu_buffer_bytes = (gpu_limit_bytes as f64 * 0.8) as usize; // 80% of configured limit as buffer
         let gpu_buffer_size_bytes = calculated_gpu_buffer.min(max_gpu_buffer_bytes);
 
         Ok((props, gpu_limit_bytes, gpu_buffer_size_bytes))
@@ -195,7 +194,7 @@ pub fn get_process_memory_usage() -> usize {
 
     let pid = Pid::from_u32(std::process::id());
     if let Some(process) = system.process(pid) {
-        process.memory() as usize * BYTES_PER_KB // Convert KB to bytes
+        process.memory() as usize // sysinfo already returns bytes, no conversion needed
     } else {
         0
     }

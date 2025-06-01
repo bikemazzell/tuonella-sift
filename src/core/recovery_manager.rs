@@ -249,7 +249,7 @@ mod tests {
         let recovery_log_path = temp_dir.path().join("recovery.log");
 
         let mut error_handler = ErrorHandler::new(error_log_path).unwrap();
-        let mut memory_manager = MemoryManager::new(Some(1)).unwrap();
+        let mut memory_manager = MemoryManager::new(Some(10.0), None).unwrap();
 
         #[cfg(feature = "cuda")]
         let recovery_manager = RecoveryManager::new(

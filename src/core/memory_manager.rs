@@ -44,8 +44,21 @@ pub struct MemoryManager {
 }
 
 impl MemoryManager {
-    pub fn new(user_ram_limit_gb: Option<usize>) -> Result<Self> {
-        let resources = SystemResources::query_system_resources(user_ram_limit_gb)?;
+    /// Create a new MemoryManager with config-based resource limits
+    pub fn from_config(config: &crate::config::model::Config) -> Result<Self> {
+        let ram_percent = Some(config.memory.memory_usage_percent as f64);
+
+        #[cfg(feature = "cuda")]
+        let gpu_percent = Some(config.cuda.gpu_memory_usage_percent as f64);
+        #[cfg(not(feature = "cuda"))]
+        let gpu_percent = None;
+
+        Self::new(ram_percent, gpu_percent)
+    }
+
+    /// Create a new MemoryManager with explicit resource limits
+    pub fn new(ram_memory_usage_percent: Option<f64>, gpu_memory_usage_percent: Option<f64>) -> Result<Self> {
+        let resources = SystemResources::query_system_resources(ram_memory_usage_percent, gpu_memory_usage_percent)?;
 
         println!("🧠 Initializing Memory Manager...");
         println!("{}", resources.format_summary());
@@ -447,7 +460,7 @@ mod tests {
 
     #[test]
     fn test_memory_manager_creation() {
-        let manager = MemoryManager::new(None);
+        let manager = MemoryManager::new(None, None);
         assert!(manager.is_ok(), "Should create memory manager successfully");
 
         let manager = manager.unwrap();
@@ -458,7 +471,7 @@ mod tests {
 
     #[test]
     fn test_ram_buffer_operations() {
-        let mut manager = MemoryManager::new(Some(1)).unwrap(); // 1GB limit for testing
+        let mut manager = MemoryManager::new(Some(10.0), None).unwrap(); // 10% RAM limit for testing
 
         let test_data = b"test data for buffer";
 
@@ -476,7 +489,7 @@ mod tests {
 
     #[test]
     fn test_memory_stats() {
-        let manager = MemoryManager::new(None).unwrap();
+        let manager = MemoryManager::new(None, None).unwrap();
         let stats = manager.get_memory_stats();
         assert!(stats.is_ok(), "Should get memory stats successfully");
 
@@ -490,7 +503,7 @@ mod tests {
 
     #[test]
     fn test_dynamic_chunk_sizing() {
-        let mut manager = MemoryManager::new(Some(1)).unwrap(); // 1GB limit for testing
+        let mut manager = MemoryManager::new(Some(10.0), None).unwrap(); // 10% RAM limit for testing
 
         let initial_size = manager.get_current_chunk_size();
         assert!(initial_size > 0, "Initial chunk size should be positive");
@@ -515,7 +528,7 @@ mod tests {
 
     #[test]
     fn test_resource_cleanup() {
-        let mut manager = MemoryManager::new(Some(1)).unwrap(); // 1GB limit for testing
+        let mut manager = MemoryManager::new(Some(10.0), None).unwrap(); // 10% RAM limit for testing
 
         let test_data = b"test data for cleanup";
         let result = manager.add_to_ram_buffer(test_data);
@@ -533,7 +546,7 @@ mod tests {
     #[test]
     #[cfg(not(feature = "cuda"))]
     fn test_resource_usage_stats_cpu_only() {
-        let manager = MemoryManager::new(Some(1)).unwrap();
+        let manager = MemoryManager::new(Some(10.0), None).unwrap();
 
         let stats = manager.get_resource_usage_stats();
         assert!(stats.is_ok(), "Should get resource usage stats successfully");

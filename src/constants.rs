@@ -71,9 +71,8 @@ pub const ALGORITHM_GPU_ALLOCATION_PERCENT: f64 = MULTIPLIER_90;  // 90% of avai
 pub const MEMORY_SAFETY_MARGIN: f64 = MULTIPLIER_95;  // Additional safety margin
 pub const DYNAMIC_MEMORY_CHECK_INTERVAL_RECORDS: usize = 1000;  // Check memory every N records
 
-// Safety limits to prevent OOM during resource querying
-pub const MAX_RAM_BUFFER_SIZE_GB: f64 = 8.0;  // Maximum 8GB RAM buffer
-pub const MAX_GPU_BUFFER_SIZE_GB: f64 = 4.0;  // Maximum 4GB GPU buffer
+// Note: Buffer limits are now dynamically calculated from config.json
+// max_ram_usage_gb and gpu_memory_usage_percent settings
 
 // Double buffering for overlapping I/O and GPU processing
 pub const DOUBLE_BUFFER_SIZE_RATIO: f64 = MULTIPLIER_50;  // Each buffer gets 50% of available memory

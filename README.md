@@ -20,10 +20,10 @@ Designed to handle massive datasets (hundreds of GB to TB scale) with intelligen
 - **🛡️ Robust Error Handling**: Gracefully handles malformed records and encoding issues
 
 ### 💾 **Memory & Scalability**
-- **🧘 Memory Efficient**: Constant RAM usage regardless of dataset size (handles 200GB+ files with 32GB RAM)
-- **📈 Dynamic Scaling**: Adaptive chunk sizing based on available resources
+- **🧘 Memory Efficient**: Percentage-based memory allocation (handles 200GB+ files with configurable RAM usage)
+- **📈 Dynamic Scaling**: Adaptive chunk sizing based on available resources and configured percentages
 - **💽 Streaming Processing**: Processes files larger than available memory
-- **🔧 Resource Management**: Intelligent memory pressure detection and optimization
+- **🔧 Resource Management**: Intelligent memory pressure detection with percentage-based limits
 
 ## 🏆 Performance Benchmarks
 
@@ -32,7 +32,7 @@ Designed to handle massive datasets (hundreds of GB to TB scale) with intelligen
 - **📝 Write Throughput**: 1.4+ million records/second with 67%+ efficiency
 - **🧵 Parallel Efficiency**: 90%+ thread utilization with adaptive optimization
 - **💾 I/O Optimization**: 60%+ reduction in disk operations through intelligent batching
-- **🧘 Memory Usage**: Constant RAM usage regardless of dataset size (handles 200GB+ with 32GB RAM)
+- **🧘 Memory Usage**: Percentage-based RAM allocation (configurable 10-90% of system memory)
 
 ### 🚀 **CUDA Acceleration**
 - **⚡ GPU Speedup**: 5-15x performance improvement on compatible hardware
@@ -45,7 +45,7 @@ Designed to handle massive datasets (hundreds of GB to TB scale) with intelligen
 ### Prerequisites
 
 - **🦀 Rust 1.70+** - Install from [rustup.rs](https://rustup.rs/)
-- **🧠 Memory**: At least 8GB RAM (32-64GB recommended for large datasets)
+- **🧠 Memory**: At least 8GB RAM (16-64GB recommended for large datasets, configurable via percentage)
 - **💽 Storage**: Sufficient disk space (2x the size of your largest batch)
 
 ### 🎮 CUDA Prerequisites (Optional - for GPU acceleration)
@@ -53,7 +53,7 @@ Designed to handle massive datasets (hundreds of GB to TB scale) with intelligen
 - **🖥️ NVIDIA GPU** with compute capability 3.5 or higher
 - **🧰 CUDA Toolkit 11.0+** - Install via package manager or NVIDIA website
 - **🚗 NVIDIA drivers** (latest recommended)
-- **📝 GPU memory**: 4GB+ recommended for optimal performance
+- **📝 GPU memory**: 4GB+ recommended for optimal performance (configurable via percentage)
 
 ### 🔨 Build from Source
 
@@ -136,12 +136,14 @@ nvidia-smi
 - Monitor performance with built-in adaptive optimization
 
 **🐁 For Memory-Constrained Systems**
+- Set conservative memory percentage: `memory_usage_percent: 20-30`
 - Leverage streaming processing for files larger than RAM
 - Enable adaptive chunk sizing for optimal memory usage
 - Use batch write optimization to reduce memory pressure
 - Monitor with real-time memory pressure detection
 
 **🚀 For Maximum Performance**
+- Set aggressive memory percentages: `memory_usage_percent: 70-80`, `gpu_memory_usage_percent: 95`
 - Build with CUDA support: `./build.sh --cuda`
 - Enable parallel processing with optimal thread count
 - Use performance monitoring for automatic parameter tuning
@@ -164,7 +166,7 @@ The tool uses a configuration file in JSON format:
 ```json
 {
   "memory": {
-    "max_ram_usage_gb": 32,
+    "memory_usage_percent": 50,
     "auto_detect_memory": true
   },
   "processing": {
@@ -185,8 +187,13 @@ The tool uses a configuration file in JSON format:
   "logging": {
     "verbosity": "normal"
   },
+  "performance": {
+    "enable_monitoring": true,
+    "report_interval_seconds": 30,
+    "show_detailed_metrics": true
+  },
   "cuda": {
-    "gpu_memory_usage_percent": 80,
+    "gpu_memory_usage_percent": 95,
     "estimated_bytes_per_record": 500,
     "min_batch_size": 10000,
     "max_batch_size": 1000000,
@@ -206,8 +213,8 @@ The tool uses a configuration file in JSON format:
 ### 🔧 Key Configuration Options
 
 **💾 Memory Settings**
-- `max_ram_usage_gb`: Maximum RAM usage in GB
-- `auto_detect_memory`: Automatically configure memory settings
+- `memory_usage_percent`: Percentage of system RAM to use (10-90%, default: 50%)
+- `auto_detect_memory`: Automatically configure memory settings based on available resources
 
 **⚙️ Processing Settings**
 - `enable_cuda`: Enable GPU acceleration (requires CUDA build)
@@ -215,12 +222,106 @@ The tool uses a configuration file in JSON format:
 - `record_chunk_size`: Records per chunk
 - `max_memory_records`: Maximum records to hold in memory
 
+**🎮 CUDA Settings**
+- `gpu_memory_usage_percent`: Percentage of GPU memory to use (10-95%, default: 95%)
+- `estimated_bytes_per_record`: Memory estimation for batch sizing
+- `min_batch_size`/`max_batch_size`: GPU batch size limits
+
 **🧹 Deduplication Settings**
 - `case_sensitive_usernames`: Username case sensitivity (default: false)
 - `normalize_urls`: Enable URL normalization (default: true)
 - `email_username_only`: Require usernames to be email addresses (default: true)
   - `true`: Only email addresses are accepted as usernames (original behavior)
   - `false`: Any printable character string is accepted as username
+
+**📊 Performance Monitoring Settings**
+- `enable_monitoring`: Enable/disable performance monitoring (default: true)
+- `report_interval_seconds`: How often to display performance reports in seconds (default: 30)
+- `show_detailed_metrics`: Enable detailed performance metrics (default: true)
+
+### 📊 Percentage-Based Memory Configuration
+
+The tool now uses **percentage-based memory allocation** for both RAM and GPU memory, providing:
+
+**✅ Benefits:**
+- **🔄 Consistency**: Both RAM and GPU use percentage-based configuration
+- **🌍 Portability**: Works across different systems without hardcoded limits
+- **⚙️ Flexibility**: Easy to adjust for different environments and workloads
+- **📈 Scalability**: Automatically scales with available system resources
+
+**🎯 Recommended Settings:**
+- **🏠 Home/Development**: `memory_usage_percent: 30-50`, `gpu_memory_usage_percent: 80-90`
+- **🏢 Production/Server**: `memory_usage_percent: 50-70`, `gpu_memory_usage_percent: 90-95`
+- **🚀 High-Performance**: `memory_usage_percent: 70-80`, `gpu_memory_usage_percent: 95`
+
+**💡 Configuration Examples:**
+```json
+// Conservative (safe for shared systems)
+"memory": { "memory_usage_percent": 30 },
+"cuda": { "gpu_memory_usage_percent": 80 }
+
+// Balanced (recommended for most use cases)
+"memory": { "memory_usage_percent": 50 },
+"cuda": { "gpu_memory_usage_percent": 95 }
+
+// Aggressive (maximum performance)
+"memory": { "memory_usage_percent": 80 },
+"cuda": { "gpu_memory_usage_percent": 95 }
+```
+
+**🔄 Migration from GB-based Configuration:**
+If you're upgrading from an older version that used `max_ram_usage_gb`, simply replace it with `memory_usage_percent`:
+- `"max_ram_usage_gb": 32` on a 64GB system → `"memory_usage_percent": 50`
+- `"max_ram_usage_gb": 16` on a 32GB system → `"memory_usage_percent": 50`
+- The percentage approach automatically adapts to your system's available memory
+
+### 📊 Performance Monitoring Configuration
+
+The tool includes configurable performance monitoring that provides real-time insights into processing efficiency:
+
+**🎯 Performance Monitoring Features:**
+- **⚡ Real-time throughput**: Current, average, and peak records/second
+- **🧠 Memory pressure**: RAM usage and pressure detection
+- **🖥️ GPU utilization**: CUDA processing efficiency (when enabled)
+- **📈 Performance trends**: Automatic trend analysis (improving/stable/degrading)
+- **💡 Optimization recommendations**: Dynamic chunk size suggestions
+
+**⚙️ Configuration Examples:**
+```json
+// Default monitoring (recommended)
+"performance": {
+  "enable_monitoring": true,
+  "report_interval_seconds": 30,
+  "show_detailed_metrics": true
+}
+
+// Frequent monitoring (for debugging)
+"performance": {
+  "enable_monitoring": true,
+  "report_interval_seconds": 10,
+  "show_detailed_metrics": true
+}
+
+// Disabled monitoring (for minimal output)
+"performance": {
+  "enable_monitoring": false,
+  "report_interval_seconds": 30,
+  "show_detailed_metrics": false
+}
+```
+
+**📈 Sample Performance Report:**
+```
+📊 Performance Report:
+⚡ Current Throughput: 1,928,902.7 records/sec
+📊 Average Throughput: 23,515.6 records/sec
+🏆 Peak Throughput: 1,940,565.7 records/sec
+🔄 Processing Efficiency: 100.0%
+🧠 Memory Pressure: 41.1%
+🖥️ GPU Utilization: 2.3%
+📈 Trend: Stable
+💡 Recommended Chunk Size: 307 MB
+```
 
 ## 🛠️ Building and Testing
 
@@ -354,9 +455,9 @@ The most complete record is kept (based on the completeness score).
 ### 🔧 Common Issues & Solutions
 
 **💥 Memory Issues**
-- **Out of Memory**: Enable streaming processing for files larger than RAM
-- **Memory Pressure**: Use adaptive chunk sizing and memory pressure detection
-- **Swap Usage**: Leverage intelligent memory management with automatic scaling
+- **Out of Memory**: Reduce `memory_usage_percent` (try 20-30%) and enable streaming processing
+- **Memory Pressure**: Lower memory percentage and use adaptive chunk sizing
+- **Swap Usage**: Set conservative `memory_usage_percent` and leverage intelligent memory management
 
 **🐢 Performance Issues**
 - **Slow Processing**: Enable CUDA acceleration and parallel processing
@@ -370,8 +471,8 @@ The most complete record is kept (based on the completeness score).
 
 **🎮 CUDA Issues**
 - **GPU Not Detected**: Verify NVIDIA GPU and drivers with `nvidia-smi`
-- **Memory Errors**: Use dynamic GPU memory allocation and optimal batch sizing
-- **Poor GPU Utilization**: Enable double buffering for overlapping operations
+- **GPU Memory Errors**: Reduce `gpu_memory_usage_percent` (try 70-80%) and use dynamic allocation
+- **Poor GPU Utilization**: Increase `gpu_memory_usage_percent` and enable double buffering
 - **Compatibility**: Ensure compute capability 3.5+ and CUDA toolkit 11.0+
 
 ## 🔮 Why "Tuonella Sift"?

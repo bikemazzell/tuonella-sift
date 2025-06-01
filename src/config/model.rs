@@ -10,13 +10,14 @@ pub struct Config {
     pub io: IoConfig,
     pub deduplication: DeduplicationConfig,
     pub logging: LoggingConfig,
+    pub performance: PerformanceConfig,
     #[cfg(feature = "cuda")]
     pub cuda: CudaConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryConfig {
-    pub max_ram_usage_gb: usize,
+    pub memory_usage_percent: u8,
     pub auto_detect_memory: bool,
 }
 
@@ -44,6 +45,23 @@ pub struct DeduplicationConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoggingConfig {
     pub verbosity: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PerformanceConfig {
+    pub enable_monitoring: bool,
+    pub report_interval_seconds: u64,
+    pub show_detailed_metrics: bool,
+}
+
+impl Default for PerformanceConfig {
+    fn default() -> Self {
+        Self {
+            enable_monitoring: true,
+            report_interval_seconds: 30,
+            show_detailed_metrics: true,
+        }
+    }
 }
 
 #[cfg(feature = "cuda")]
@@ -110,7 +128,7 @@ impl Config {
         let user_ram_limit = if self.memory.auto_detect_memory {
             available_ram_bytes
         } else {
-            self.memory.max_ram_usage_gb * BYTES_PER_GB
+            ((total_ram_bytes as f64) * (self.memory.memory_usage_percent as f64 / 100.0)) as usize
         };
 
         let max_usable_gb = (available_ram_bytes.min(user_ram_limit)) as f64 / BYTES_PER_GB as f64;

@@ -143,7 +143,7 @@ mod tests {
 
     #[test]
     fn test_resource_manager_creation() {
-        let mut memory_manager = MemoryManager::new(Some(1)).unwrap();
+        let mut memory_manager = MemoryManager::new(Some(10.0), None).unwrap();
         
         #[cfg(feature = "cuda")]
         let resource_manager = ResourceManager::new(&mut memory_manager, None);
@@ -156,7 +156,7 @@ mod tests {
 
     #[test]
     fn test_resource_cleanup() {
-        let mut memory_manager = MemoryManager::new(Some(1)).unwrap();
+        let mut memory_manager = MemoryManager::new(Some(10.0), None).unwrap();
         
         #[cfg(feature = "cuda")]
         let mut resource_manager = ResourceManager::new(&mut memory_manager, None);
@@ -177,7 +177,7 @@ mod tests {
 
     #[test]
     fn test_adaptive_management() {
-        let mut memory_manager = MemoryManager::new(Some(1)).unwrap();
+        let mut memory_manager = MemoryManager::new(Some(10.0), None).unwrap();
         
         #[cfg(feature = "cuda")]
         let mut resource_manager = ResourceManager::new(&mut memory_manager, None);
