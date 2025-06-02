@@ -1570,7 +1570,6 @@ mod tests {
         let config = Config {
             memory: crate::config::model::MemoryConfig {
                 memory_usage_percent: 10, // 10% for testing
-                auto_detect_memory: true,
             },
             processing: crate::config::model::ProcessingConfig {
                 enable_cuda: false,

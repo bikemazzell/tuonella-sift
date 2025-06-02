@@ -1,7 +1,6 @@
 {
   "memory": {
-    "memory_usage_percent": 50,
-    "auto_detect_memory": true
+    "memory_usage_percent": 50
   },
   "processing": {
     "enable_cuda": true,

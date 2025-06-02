@@ -18,7 +18,6 @@ pub struct Config {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryConfig {
     pub memory_usage_percent: u8,
-    pub auto_detect_memory: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,13 +125,8 @@ impl Config {
         let total_ram_gb = total_ram_bytes as f64 / BYTES_PER_GB as f64;
         let available_ram_gb = available_ram_bytes as f64 / BYTES_PER_GB as f64;
 
-        let user_ram_limit = if self.memory.auto_detect_memory {
-            available_ram_bytes
-        } else {
-            ((total_ram_bytes as f64) * (self.memory.memory_usage_percent as f64 / 100.0)) as usize
-        };
-
-        let max_usable_gb = (available_ram_bytes.min(user_ram_limit)) as f64 / BYTES_PER_GB as f64;
+        let user_ram_limit = ((available_ram_bytes as f64) * (self.memory.memory_usage_percent as f64 / 100.0)) as usize;
+        let max_usable_gb = user_ram_limit as f64 / BYTES_PER_GB as f64;
 
         Ok((total_ram_gb, available_ram_gb, max_usable_gb))
     }
