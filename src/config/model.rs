@@ -40,6 +40,7 @@ pub struct DeduplicationConfig {
     pub case_sensitive_usernames: bool,
     pub normalize_urls: bool,
     pub email_username_only: bool,
+    pub allow_two_field_lines: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

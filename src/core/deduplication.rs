@@ -180,27 +180,29 @@ fn process_single_csv_with_algorithm_streaming(
         else if config.deduplication.email_username_only && !EMAIL_REGEX.is_match(&line) {
             skip_reason = Some("no email address found");
         }
-        else if !config.deduplication.email_username_only && !is_valid_line_with_config(&line, false) {
+        else if !config.deduplication.email_username_only && !is_valid_line_with_config(&line, false, config.deduplication.allow_two_field_lines) {
             skip_reason = Some("no valid username found");
         }
         // Perform more advanced validation on the CSV fields
         else {
             let fields = parse_csv_line(&line);
 
-            if fields.len() < MIN_FIELD_COUNT {
+            if config.deduplication.allow_two_field_lines && fields.len() == 2 {
+                let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, config.deduplication.email_username_only, true);
+                if user_idx >= fields.len() || password_idx >= fields.len() {
+                    skip_reason = Some("invalid field positions detected");
+                }
+            } else if fields.len() < MIN_FIELD_COUNT {
                 skip_reason = Some("fewer than 3 fields");
             } else {
-                // Check if the line has valid field positions
-                let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, config.deduplication.email_username_only);
-
+                let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, config.deduplication.email_username_only, config.deduplication.allow_two_field_lines);
                 if user_idx >= fields.len() || password_idx >= fields.len() || url_idx >= fields.len() {
                     skip_reason = Some("invalid field positions detected");
                 }
-                // Validate URL field - if we detect a URL protocol in a field that's not the URL field, skip it
                 else {
                     for (i, field) in fields.iter().enumerate() {
                         if i != url_idx &&
-                           (field.starts_with(PROTOCOL_HTTP) ||
+                            (field.starts_with(PROTOCOL_HTTP) ||
                             field.starts_with(PROTOCOL_HTTPS) ||
                             field.starts_with(PROTOCOL_ANDROID) ||
                             field.starts_with(PROTOCOL_FTP) ||
@@ -829,7 +831,7 @@ fn parse_line_to_cuda_record(line: &str, config: &DeduplicationConfig) -> Option
     }
 
     // Detect which fields are username, password, and URL
-    let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, config.email_username_only);
+    let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, config.email_username_only, true);
 
     if user_idx >= fields.len() || password_idx >= fields.len() || url_idx >= fields.len() {
         return None;
@@ -1217,7 +1219,7 @@ fn parse_line_to_record(line: &str, config: &DeduplicationConfig) -> Option<Reco
     }
 
     // Detect which fields are username, password, and URL
-    let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, config.email_username_only);
+    let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, config.email_username_only, config.allow_two_field_lines);
 
     if user_idx >= fields.len() || password_idx >= fields.len() || url_idx >= fields.len() {
         return None;
@@ -1388,6 +1390,7 @@ mod tests {
             case_sensitive_usernames: false,
             normalize_urls: true,
             email_username_only: true,
+            allow_two_field_lines: false,
         };
 
         // Valid line
@@ -1427,6 +1430,7 @@ mod tests {
             case_sensitive_usernames: false,
             normalize_urls: true,
             email_username_only: true,
+            allow_two_field_lines: false,
         };
 
         // Create test records using the proper constructor
@@ -1466,8 +1470,6 @@ mod tests {
         // Check results
         assert_eq!(dedup_map.len(), 2); // Should be 2 unique records (duplicate removed)
 
-
-
         assert!(dedup_map.contains_key("user1@example.com|pass1|example.com"));
         assert!(dedup_map.contains_key("user2@example.com|pass2|another.com"));
 
@@ -1487,6 +1489,7 @@ mod tests {
             case_sensitive_usernames: false,
             normalize_urls: true,
             email_username_only: true,
+            allow_two_field_lines: false,
         };
 
         // Valid line
@@ -1583,6 +1586,7 @@ mod tests {
                 case_sensitive_usernames: false,
                 normalize_urls: true,
                 email_username_only: true,
+                allow_two_field_lines: false,
             },
             logging: crate::config::model::LoggingConfig {
                 verbosity: "normal".to_string(),
@@ -1629,6 +1633,7 @@ mod tests {
             case_sensitive_usernames: false,
             normalize_urls: true,
             email_username_only: false,
+            allow_two_field_lines: false,
         };
 
         // Valid line with printable username (not email)
@@ -1669,6 +1674,7 @@ mod tests {
             case_sensitive_usernames: false,
             normalize_urls: true,
             email_username_only: true,
+            allow_two_field_lines: false,
         };
 
         // Should reject non-email usernames
@@ -1693,7 +1699,7 @@ mod tests {
             "https://example.com".to_string(),
         ];
 
-        let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, false);
+        let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, false, false);
         assert_eq!(user_idx, 0);  // john_doe should be detected as username
         assert_eq!(password_idx, 1);
         assert_eq!(url_idx, 2);
@@ -1705,7 +1711,7 @@ mod tests {
             "password456".to_string(),
         ];
 
-        let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, false);
+        let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, false, false);
         assert_eq!(url_idx, 0);   // URL should be detected first
         assert_eq!(user_idx, 1);  // username123 should be detected as username
         assert_eq!(password_idx, 2);
@@ -1717,7 +1723,7 @@ mod tests {
             "https://example.com".to_string(),
         ];
 
-        let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, true);
+        let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, true, false);
         assert_eq!(user_idx, 0);  // email should be detected as username
         assert_eq!(password_idx, 1);
         assert_eq!(url_idx, 2);
@@ -1729,27 +1735,60 @@ mod tests {
 
         // Test with email_username_only = false
         let line = "john_doe,password123,https://example.com";
-        assert!(is_valid_line_with_config(line, false));
+        assert!(is_valid_line_with_config(line, false, false));
 
         let line = "user@example.com,password123,https://example.com";
-        assert!(is_valid_line_with_config(line, false));
+        assert!(is_valid_line_with_config(line, false, false));
 
         // Valid - has a valid username field (password123 is a valid printable username)
         let line = ",password123,https://example.com";
-        assert!(is_valid_line_with_config(line, false));
+        assert!(is_valid_line_with_config(line, false, false));
 
         // Invalid - no valid username (all fields are URLs or empty)
         let line = ",https://password.com,https://example.com";
-        assert!(!is_valid_line_with_config(line, false));
+        assert!(!is_valid_line_with_config(line, false, false));
 
         // Test with email_username_only = true
         let line = "user@example.com,password123,https://example.com";
-        assert!(is_valid_line_with_config(line, true));
+        assert!(is_valid_line_with_config(line, true, false));
 
         // Should be invalid for non-email usernames when email_username_only = true
         let line = "john_doe,password123,https://example.com";
         // Note: is_valid_line_with_config with email_username_only=true should check for email presence
         // This test depends on the EMAIL_REGEX matching the line
-        assert!(!is_valid_line_with_config(line, true));
+        assert!(!is_valid_line_with_config(line, true, false));
+    }
+
+    #[test]
+    fn test_two_field_mode_username_password() {
+        let config = DeduplicationConfig {
+            case_sensitive_usernames: false,
+            normalize_urls: true,
+            email_username_only: false,
+            allow_two_field_lines: true,
+        };
+
+        // Two lines with same username, different passwords
+        let line1 = "user@email.com:123";
+        let line2 = "user@email.com:456";
+        let fields1 = parse_csv_line(line1);
+        let fields2 = parse_csv_line(line2);
+        // Should detect username and password
+        let (user_idx1, pass_idx1, url_idx1) = detect_field_positions_with_config(&fields1, false, true);
+        let (user_idx2, pass_idx2, url_idx2) = detect_field_positions_with_config(&fields2, false, true);
+        assert_eq!(fields1.len(), 2);
+        assert_eq!(fields2.len(), 2);
+        assert!(user_idx1 < 2 && pass_idx1 < 2);
+        assert!(user_idx2 < 2 && pass_idx2 < 2);
+        assert_ne!(fields1[pass_idx1], fields2[pass_idx2]);
+        // Both should be valid lines
+        assert!(is_valid_line_with_config(line1, false, true));
+        assert!(is_valid_line_with_config(line2, false, true));
+        // Simulate deduplication: both should be retained as unique
+        use std::collections::HashSet;
+        let mut seen = HashSet::new();
+        seen.insert(format!("{}|{}", fields1[user_idx1], fields1[pass_idx1]));
+        seen.insert(format!("{}|{}", fields2[user_idx2], fields2[pass_idx2]));
+        assert_eq!(seen.len(), 2);
     }
 }

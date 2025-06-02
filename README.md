@@ -182,7 +182,8 @@ The tool uses a configuration file in JSON format:
   "deduplication": {
     "case_sensitive_usernames": false,
     "normalize_urls": true,
-    "email_username_only": true
+    "email_username_only": true,
+    "allow_two_field_lines": false
   },
   "logging": {
     "verbosity": "normal"
@@ -233,6 +234,9 @@ The tool uses a configuration file in JSON format:
 - `email_username_only`: Require usernames to be email addresses (default: true)
   - `true`: Only email addresses are accepted as usernames (original behavior)
   - `false`: Any printable character string is accepted as username
+- `allow_two_field_lines`: **Enable support for username:password lines without a URL** (default: false)
+  - `true`: Accepts lines with only two fields (username and password), bypassing the URL check. Useful for combo lists and datasets that do not include a URL field.
+  - `false`: Requires the usual minimum field count (username, password, and URL)
 
 **📊 Performance Monitoring Settings**
 - `enable_monitoring`: Enable/disable performance monitoring (default: true)
@@ -268,12 +272,6 @@ The tool now uses **percentage-based memory allocation** for both RAM and GPU me
 "memory": { "memory_usage_percent": 80 },
 "cuda": { "gpu_memory_usage_percent": 95 }
 ```
-
-**🔄 Migration from GB-based Configuration:**
-If you're upgrading from an older version that used `max_ram_usage_gb`, simply replace it with `memory_usage_percent`:
-- `"max_ram_usage_gb": 32` on a 64GB system → `"memory_usage_percent": 50`
-- `"max_ram_usage_gb": 16` on a 32GB system → `"memory_usage_percent": 50`
-- The percentage approach automatically adapts to your system's available memory
 
 ### 📊 Performance Monitoring Configuration
 
@@ -340,52 +338,6 @@ make run-cuda
 
 # Install system-wide
 make install
-```
-
-### 🚀 Performance Optimization Examples
-
-```bash
-# Run performance optimization demo
-cargo run --features cuda --example performance_optimizations_demo
-
-# Test double buffering (CUDA only)
-cargo run --features cuda --example test_gpu_processing
-
-# Test adaptive optimization
-cargo run --example test_memory_manager
-
-# Test parallel processing
-cargo run --example test_algorithm_streaming
-```
-
-## 📁 Project Structure
-
-```
-tuonella-sift/
-├── src/
-│   ├── bin/                    # Executable entry points
-│   ├── config/                 # Configuration handling
-│   ├── core/                   # Core deduplication logic
-│   │   ├── batch_writer.rs     # Batch write optimization
-│   │   ├── double_buffer.rs    # Double buffering (CUDA)
-│   │   ├── parallel_processor.rs # Parallel processing
-│   │   ├── performance_monitor.rs # Adaptive optimization
-│   │   ├── memory_manager.rs   # Memory management
-│   │   └── ...                 # Other core modules
-│   ├── cuda/                   # CUDA acceleration
-│   └── utils/                  # Utility functions
-├── docs/
-│   ├── algorithm.md            # Complete algorithm specification
-│   ├── cuda_implementation.md  # CUDA implementation details
-│   └── requirements.md         # System requirements
-├── examples/
-│   ├── performance_optimizations_demo.rs # Performance demo
-│   ├── test_gpu_processing.rs  # GPU processing examples
-│   └── ...                     # Other examples
-├── build.sh                    # Build script
-├── Makefile                    # Build system
-├── config.json                 # Default configuration
-└── README.md                   # This file
 ```
 
 ## 🧙‍♂️ How It Works

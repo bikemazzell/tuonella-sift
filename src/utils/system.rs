@@ -5,7 +5,7 @@ use crate::constants::{
     MEMORY_PRESSURE_THRESHOLD_PERCENT,
     SECONDS_PER_HOUR, SECONDS_PER_MINUTE,
     KB_AS_F64, MB_AS_F64, GB_AS_F64, TB_AS_F64,
-    DECIMAL_PLACES, ZERO_F64, PERCENT_100
+    DECIMAL_PLACES, ZERO_F64, PERCENT_100, MAX_RAM_BUFFER_SIZE_GB, MAX_GPU_BUFFER_SIZE_GB
 };
 
 #[cfg(feature = "cuda")]
@@ -326,7 +326,7 @@ mod tests {
     #[test]
     fn test_system_resources_query() {
         // Test basic resource querying with conservative limits
-        let resources = SystemResources::query_system_resources(Some(TEST_RAM_LIMIT_GB)); // Limit to 1GB to be safe
+        let resources = SystemResources::query_system_resources(Some(TEST_RAM_LIMIT_GB as f64), None);
         assert!(resources.is_ok(), "Should be able to query system resources");
 
         let resources = resources.unwrap();

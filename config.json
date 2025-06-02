@@ -16,7 +16,8 @@
   "deduplication": {
     "case_sensitive_usernames": false,
     "normalize_urls": true,
-    "email_username_only": false
+    "email_username_only": false,
+    "allow_two_field_lines": true
   },
   "logging": {
     "verbosity": "normal"

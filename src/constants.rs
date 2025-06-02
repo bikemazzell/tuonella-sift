@@ -184,7 +184,6 @@ pub const URL_FIELD_INDEX: usize = 2;  // Index of URL field in output
 pub const EXTRA_FIELDS_START_INDEX: usize = 3;  // Starting index for extra fields
 
 // Test configuration constants
-pub const TEST_MAX_RAM_USAGE_GB: usize = 1;  // Test RAM limit in GB
 pub const TEST_CHUNK_SIZE_MB: usize = 1;  // Test chunk size in MB
 pub const TEST_RECORD_CHUNK_SIZE: usize = 10;  // Test record chunk size
 pub const TEST_MAX_MEMORY_RECORDS: usize = 1000;  // Test memory record limit
@@ -299,3 +298,6 @@ pub const CUDA_BATCH_MERGE_THRESHOLD: usize = 1000;  // Threshold for merging sm
 // Missing GPU constants for deduplication
 pub const GPU_CHUNK_PROCESSING_BATCH_SIZE: usize = 50000;  // GPU chunk processing batch size
 pub const GPU_TEMP_FILE_READ_CHUNK_SIZE_MB: usize = 128;  // GPU temp file read chunk size in MB
+
+pub const MAX_RAM_BUFFER_SIZE_GB: f64 = 8.0;
+pub const MAX_GPU_BUFFER_SIZE_GB: f64 = 8.0;

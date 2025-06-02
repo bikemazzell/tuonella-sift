@@ -1,6 +1,6 @@
 [package]
 name = "tuonella-sift"
-version = "0.1.0"
+version = "0.1.5"
 edition = "2021"
 description = "A high-performance CSV deduplication tool that sifts through massive datasets like Tuonella sifts souls"
 authors = ["Tuonella Sift Team"]
@@ -70,18 +70,6 @@ debug = 1
 [[bin]]
 name = "tuonella-sift"
 path = "src/bin/tuonella-sift.rs"
-
-[[example]]
-name = "test_gpu_processing"
-path = "examples/test_gpu_processing.rs"
-
-[[example]]
-name = "complete_algorithm_demo"
-path = "examples/complete_algorithm_demo.rs"
-
-[[example]]
-name = "test_composite_deduplication"
-path = "examples/test_composite_deduplication.rs"
 
 [lib]
 name = "tuonella_sift"

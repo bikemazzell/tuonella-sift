@@ -188,12 +188,27 @@ pub fn normalize_url(url: &str) -> String {
 }
 
 pub fn parse_csv_line(line: &str) -> Vec<String> {
-    let delimiter = detect_delimiter(line);
-    parse_csv_line_with_delimiter(line, delimiter)
+    // Special case: if line contains a colon and ends with a comma, treat colon as delimiter and ignore trailing comma
+    let trimmed_line = if line.ends_with(',') && line.contains(':') {
+        line.trim_end_matches(',')
+    } else {
+        line
+    };
+    let delimiter = detect_delimiter(trimmed_line);
+    let mut fields = parse_csv_line_with_delimiter(trimmed_line, delimiter);
+    // Trim trailing empty fields
+    while let Some(last) = fields.last() {
+        if last.is_empty() {
+            fields.pop();
+        } else {
+            break;
+        }
+    }
+    fields
 }
 
 pub fn parse_csv_line_with_delimiter(line: &str, delimiter: char) -> Vec<String> {
-    if delimiter == ' ' && is_space_mixed_delimiter_line(line) {
+    let mut fields = if delimiter == ' ' && is_space_mixed_delimiter_line(line) {
         parse_space_mixed_delimiter_line(line)
     } else if delimiter == ';' && is_semicolon_mixed_delimiter_line(line) {
         parse_semicolon_mixed_delimiter_line(line)
@@ -201,7 +216,16 @@ pub fn parse_csv_line_with_delimiter(line: &str, delimiter: char) -> Vec<String>
         parse_colon_delimited_line(line)
     } else {
         parse_standard_delimited_line(line, delimiter)
+    };
+    // Trim trailing empty fields
+    while let Some(last) = fields.last() {
+        if last.is_empty() {
+            fields.pop();
+        } else {
+            break;
+        }
     }
+    fields
 }
 
 fn parse_space_mixed_delimiter_line(line: &str) -> Vec<String> {
@@ -401,7 +425,18 @@ pub fn detect_field_positions(fields: &[String]) -> (usize, usize, usize) {
     positions
 }
 
-pub fn detect_field_positions_with_config(fields: &[String], email_username_only: bool) -> (usize, usize, usize) {
+pub fn detect_field_positions_with_config(fields: &[String], email_username_only: bool, allow_two_field_lines: bool) -> (usize, usize, usize) {
+    if allow_two_field_lines && fields.len() == 2 {
+        // Only username and password, no URL
+        let username_idx = if email_username_only {
+            if EMAIL_REGEX.is_match(&fields[0]) { 0 } else if EMAIL_REGEX.is_match(&fields[1]) { 1 } else { fields.len() }
+        } else {
+            if is_valid_username_field(&fields[0]) { 0 } else if is_valid_username_field(&fields[1]) { 1 } else { fields.len() }
+        };
+        let password_idx = if username_idx == 0 { 1 } else if username_idx == 1 { 0 } else { fields.len() };
+        // No URL, so set to fields.len()
+        return (username_idx, password_idx, fields.len());
+    }
     if fields.len() < MIN_FIELD_COUNT {
         return (fields.len(), fields.len(), fields.len());
     }
@@ -564,19 +599,24 @@ fn is_valid_username_field_lenient(field: &str) -> bool {
     })
 }
 
-pub fn is_valid_line_with_config(line: &str, email_username_only: bool) -> bool {
-    // Basic line validation
+pub fn is_valid_line_with_config(line: &str, email_username_only: bool, allow_two_field_lines: bool) -> bool {
     if !line.chars().any(|c| c.is_ascii_graphic()) || !DELIMITER_REGEX.is_match(line) {
         return false;
     }
-
-    // Email-only mode validation
     if email_username_only {
         return EMAIL_REGEX.is_match(line);
     }
-
-    // General validation
     let fields = parse_csv_line(line);
+    if allow_two_field_lines && fields.len() == 2 {
+        // Accept if either field is a valid username (or email) and the other is not empty
+        let valid_user = if email_username_only {
+            EMAIL_REGEX.is_match(&fields[0]) || EMAIL_REGEX.is_match(&fields[1])
+        } else {
+            is_valid_username_field(&fields[0]) || is_valid_username_field(&fields[1])
+        };
+        let valid_pass = !fields[0].is_empty() && !fields[1].is_empty();
+        return valid_user && valid_pass;
+    }
     fields.len() >= MIN_FIELD_COUNT && fields.iter().any(|field| is_valid_username_field(field))
 }
 
@@ -615,8 +655,6 @@ pub fn discover_csv_files(dir: &Path) -> Result<Vec<std::path::PathBuf>> {
     csv_files.sort();
     Ok(csv_files)
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -723,11 +761,11 @@ mod tests {
         // Test that colon-delimited lines are now considered valid
         let line = "https://accounts.google.com/ServiceLogin:jawahar84@gmail.com:jawahar123";
         assert!(DELIMITER_REGEX.is_match(line), "Line with colon delimiter should match DELIMITER_REGEX");
-        assert!(is_valid_line_with_config(line, true), "Colon-delimited line should be considered valid");
+        assert!(is_valid_line_with_config(line, true, false), "Colon-delimited line should be considered valid");
 
         // Test field detection with colon-delimited data
         let fields = parse_csv_line(line);
-        let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, true);
+        let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, true, false);
         assert_eq!(url_idx, 0, "URL should be detected in first field");
         assert_eq!(user_idx, 1, "Email should be detected in second field");
         assert_eq!(password_idx, 2, "Password should be detected in third field");
@@ -776,7 +814,7 @@ mod tests {
             "https://us.battle.net/login/en-gb/".to_string()
         ];
 
-        let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, true);
+        let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, true, false);
         assert_eq!(user_idx, 0, "Email should be detected as username");
         assert_eq!(password_idx, 1, "Special character string should be detected as password");
         assert_eq!(url_idx, 2, "URL should be detected as URL field");
@@ -809,7 +847,7 @@ mod tests {
         assert_eq!(fields.len(), 3, "Line should be parsed into three fields");
 
         // Verify the line is considered valid
-        assert!(is_valid_line_with_config(line, true),
+        assert!(is_valid_line_with_config(line, true, false),
                "Line with special character password should be considered valid");
     }
 
@@ -819,7 +857,7 @@ mod tests {
         let line = "root@her0in.de,As26013069!\",https://wannafake.com/signup";
 
         // Test that the line is considered valid
-        assert!(is_valid_line_with_config(line, true),
+        assert!(is_valid_line_with_config(line, true, false),
                "Line with quoted password should be considered valid");
 
         // Test field parsing
@@ -831,7 +869,7 @@ mod tests {
         assert!(EMAIL_REGEX.is_match(&fields[0]), "Email should be recognized as valid");
 
         // Test field detection
-        let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, true);
+        let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, true, false);
         assert_eq!(user_idx, 0, "Email should be detected as username");
         assert_eq!(password_idx, 1, "Password field should be detected");
         assert_eq!(url_idx, 2, "URL field should be detected");
@@ -933,12 +971,12 @@ mod tests {
                    "Mixed delimiter line '{}' should match DELIMITER_REGEX", line);
 
             // Test that the line is considered valid (assuming email_username_only = false)
-            assert!(is_valid_line_with_config(line, false),
+            assert!(is_valid_line_with_config(line, false, false),
                    "Mixed delimiter line '{}' should be considered valid", line);
 
             // Test field detection
             let fields = parse_csv_line(line);
-            let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, false);
+            let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, false, false);
             assert!(user_idx < fields.len(), "Username index should be valid for line '{}'", line);
             assert!(password_idx < fields.len(), "Password index should be valid for line '{}'", line);
             assert!(url_idx < fields.len(), "URL index should be valid for line '{}'", line);
@@ -975,11 +1013,11 @@ mod tests {
                       "Should parse into 3 fields: {} -> {:?}", line, fields);
 
             // Should be considered valid
-            assert!(is_valid_line_with_config(line, false),
+            assert!(is_valid_line_with_config(line, false, false),
                    "Should be valid with printable usernames: {}", line);
 
             // Field positions should be detected correctly
-            let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, false);
+            let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, false, false);
             assert_eq!(url_idx, 0, "URL should be in position 0 for: {}", line);
             assert_eq!(user_idx, 1, "Username should be in position 1 for: {}", line);
             assert_eq!(password_idx, 2, "Password should be in position 2 for: {}", line);
@@ -1066,12 +1104,12 @@ mod tests {
                    "Semicolon mixed delimiter line '{}' should match DELIMITER_REGEX", line);
 
             // Test that the line is considered valid (assuming email_username_only = false)
-            assert!(is_valid_line_with_config(line, false),
+            assert!(is_valid_line_with_config(line, false, false),
                    "Semicolon mixed delimiter line '{}' should be considered valid", line);
 
             // Test field detection
             let fields = parse_csv_line(line);
-            let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, false);
+            let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, false, false);
             assert!(user_idx < fields.len(), "Username index should be valid for line '{}'", line);
             assert!(password_idx < fields.len(), "Password index should be valid for line '{}'", line);
             assert!(url_idx < fields.len(), "URL index should be valid for line '{}'", line);
@@ -1114,11 +1152,11 @@ mod tests {
                       "Should parse into 3 fields: {} -> {:?}", line, fields);
 
             // Should be considered valid
-            assert!(is_valid_line_with_config(line, false),
+            assert!(is_valid_line_with_config(line, false, false),
                    "Should be valid with printable usernames: {}", line);
 
             // Field positions should be detected correctly
-            let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, false);
+            let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, false, false);
             assert_eq!(url_idx, 0, "URL should be in position 0 for: {}", line);
             assert_eq!(user_idx, 1, "Username should be in position 1 for: {}", line);
             assert_eq!(password_idx, 2, "Password should be in position 2 for: {}", line);
@@ -1144,7 +1182,7 @@ mod tests {
         assert_eq!(fields[2], "https://correoweb.educa.madrid.org/", "URL should be third field");
 
         // Test field detection - should now work correctly with lenient username validation
-        let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, false);
+        let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, false, false);
 
         // Verify correct field detection
         assert_eq!(url_idx, 2, "URL should be detected in third field (the actual URL)");
@@ -1152,7 +1190,7 @@ mod tests {
         assert_eq!(password_idx, 1, "Password should be detected in second field");
 
         // The line should be considered valid
-        assert!(is_valid_line_with_config(line, false),
+        assert!(is_valid_line_with_config(line, false, false),
                "Line with domain-like username should be considered valid");
 
         // Test additional similar cases
@@ -1164,13 +1202,13 @@ mod tests {
 
         for case in similar_cases {
             let case_fields = parse_csv_line(case);
-            let (case_user_idx, case_password_idx, case_url_idx) = detect_field_positions_with_config(&case_fields, false);
+            let (case_user_idx, case_password_idx, case_url_idx) = detect_field_positions_with_config(&case_fields, false, false);
 
             assert_eq!(case_user_idx, 0, "Username should be in first field for: {}", case);
             assert_eq!(case_password_idx, 1, "Password should be in second field for: {}", case);
             assert_eq!(case_url_idx, 2, "URL should be in third field for: {}", case);
 
-            assert!(is_valid_line_with_config(case, false),
+            assert!(is_valid_line_with_config(case, false, false),
                    "Line should be valid: {}", case);
         }
     }
@@ -1209,6 +1247,56 @@ mod tests {
         for url in actual_urls {
             println!("Testing actual URL: {}", url);
             assert!(is_url_field(url), "Actual URL '{}' should be detected as URL", url);
+        }
+    }
+
+    #[test]
+    fn test_two_field_mode_with_trailing_comma() {
+        let config = crate::config::model::DeduplicationConfig {
+            case_sensitive_usernames: false,
+            normalize_urls: true,
+            email_username_only: false,
+            allow_two_field_lines: true,
+        };
+        let lines = vec![
+            "gewy:zxc/.,",
+            "giftoboy:giftos,",
+            "jhobakill:636363,",
+            "LAN112:XA3.b9,",
+            "LutinRose:bhtn5b,",
+        ];
+        for line in lines {
+            let fields = parse_csv_line(line);
+            assert_eq!(fields.len(), 2, "Should parse as 2 fields: {:?}", fields);
+            let (user_idx, pass_idx, _url_idx) = crate::core::validation::detect_field_positions_with_config(&fields, false, true);
+            assert!(user_idx < 2 && pass_idx < 2, "Should detect valid username and password indices for line: {}", line);
+            assert!(is_valid_line_with_config(line, false, true), "Should be valid in 2-field mode: {}", line);
+        }
+    }
+
+    #[test]
+    fn test_two_field_colon_with_trailing_comma() {
+        let config = crate::config::model::DeduplicationConfig {
+            case_sensitive_usernames: false,
+            normalize_urls: true,
+            email_username_only: false,
+            allow_two_field_lines: true,
+        };
+        let lines = vec![
+            "gewy:zxc/.,",
+            "giftoboy:giftos,",
+            "jhobakill:636363,",
+            "LAN112:XA3.b9,",
+            "LutinRose:bhtn5b,",
+            "gewy:zxc/. ,", // with space before comma
+            "gewy:zxc/. ",   // with space only
+        ];
+        for line in lines {
+            let fields = parse_csv_line(line);
+            assert_eq!(fields.len(), 2, "Should parse as 2 fields: {:?}", fields);
+            let (user_idx, pass_idx, _url_idx) = crate::core::validation::detect_field_positions_with_config(&fields, false, true);
+            assert!(user_idx < 2 && pass_idx < 2, "Should detect valid username and password indices for line: {}", line);
+            assert!(is_valid_line_with_config(line, false, true), "Should be valid in 2-field mode: {}", line);
         }
     }
 }
