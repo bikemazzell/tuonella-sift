@@ -1,6 +1,6 @@
 [package]
 name = "tuonella-sift"
-version = "0.1.5"
+version = "0.5.0"
 edition = "2021"
 description = "A high-performance CSV deduplication tool that sifts through massive datasets like Tuonella sifts souls"
 authors = ["Tuonella Sift Team"]
@@ -31,9 +31,10 @@ once_cell = "1.19"
 memmap2 = "0.9"
 crossbeam = "0.8"
 parking_lot = "0.12.4"
+bytes = "1.5"
 
-# System utilities
-sysinfo = "0.35.1"
+# System ut0.35.2s
+sysinfo = "0.35.2"
 walkdir = "2.4"
 clap = { version = "4.5.39", features = ["derive"] }
 num_cpus = "1.17.0"

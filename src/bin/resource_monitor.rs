@@ -5,9 +5,6 @@ use std::thread;
 use sysinfo::{System, Pid};
 use tuonella_sift::config::Config;
 
-#[cfg(feature = "cuda")]
-use tuonella_sift::cuda::processor::CudaProcessor;
-
 #[derive(Parser)]
 #[command(name = "resource-monitor")]
 #[command(about = "🔍 Resource Monitor: Real-time system resource monitoring for Tuonella Sift")]

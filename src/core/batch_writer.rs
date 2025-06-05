@@ -4,6 +4,8 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 use anyhow::Result;
 use crate::core::record::Record;
+use crate::core::buffer_pool::{BufferPool, PooledBuffer};
+use bytes::{BytesMut, BufMut};
 use crate::constants::{
     WRITE_BATCH_SIZE_RECORDS, WRITE_BUFFER_SIZE_MB, MAX_WRITE_BATCH_SIZE_RECORDS,
     BYTES_PER_MB, ZERO_DURATION_SECS, ZERO_DURATION_NANOS, ZERO_F64, ZERO_USIZE,
@@ -23,6 +25,10 @@ pub struct BatchWriter {
     write_buffer_size: usize,
     metrics: BatchWriteMetrics,
     last_flush: Instant,
+    // Buffer pool for efficient memory reuse
+    buffer_pool: BufferPool,
+    // Estimated bytes per record for buffer sizing
+    estimated_record_size: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -64,6 +70,13 @@ impl BatchWriter {
         let write_buffer_size = WRITE_BUFFER_SIZE_MB * BYTES_PER_MB;
         let writer = BufWriter::with_capacity(write_buffer_size, file);
 
+        // Estimate average record size for buffer pre-allocation
+        let estimated_record_size = 128; // Conservative estimate: 50 chars avg per field * 3 fields + overhead
+        let buffer_capacity = batch_size * estimated_record_size;
+        
+        // Create buffer pool with reasonable defaults
+        let buffer_pool = BufferPool::new(buffer_capacity, 8); // Pool up to 8 buffers
+        
         Ok(Self {
             record_buffer: Vec::with_capacity(batch_size),
             writer,
@@ -72,6 +85,8 @@ impl BatchWriter {
             write_buffer_size,
             metrics: BatchWriteMetrics::default(),
             last_flush: Instant::now(),
+            buffer_pool,
+            estimated_record_size,
         })
     }
 
@@ -112,12 +127,27 @@ impl BatchWriter {
             bytes_written += header.len();
         }
 
+        // Get a buffer from the pool
+        let mut pooled_buffer = PooledBuffer::new(self.buffer_pool.clone());
+        let write_buf = pooled_buffer.get_mut();
+        
+        // Pre-allocate buffer capacity based on estimated size
+        let estimated_total_size = record_count * self.estimated_record_size;
+        if write_buf.capacity() < estimated_total_size {
+            write_buf.reserve(estimated_total_size - write_buf.capacity());
+        }
+        
+        // Write all records to buffer in one go
         let records_to_write: Vec<Record> = self.record_buffer.drain(..).collect();
         for record in records_to_write {
-            let line = self.format_record_as_csv(&record);
-            self.writer.write_all(line.as_bytes())?;
-            bytes_written += line.len();
+            Self::format_record_as_csv_bytes(&record, write_buf);
         }
+        
+        // Single write operation
+        bytes_written += write_buf.len();
+        self.writer.write_all(write_buf)?;
+        
+        // Buffer will be automatically returned to pool when pooled_buffer goes out of scope
 
         self.writer.flush()?;
 
@@ -129,22 +159,36 @@ impl BatchWriter {
         Ok(())
     }
 
-    fn format_record_as_csv(&self, record: &Record) -> String {
-        let user = self.escape_csv_field(&record.user);
-        let password = self.escape_csv_field(&record.password);
-        let url = self.escape_csv_field(&record.url);
-
-        format!("{},{},{}\n", user, password, url)
+    // Zero-copy CSV formatting directly to byte buffer
+    fn format_record_as_csv_bytes(record: &Record, buf: &mut BytesMut) {
+        Self::write_csv_field_bytes(&record.user, buf);
+        buf.put_u8(b',');
+        Self::write_csv_field_bytes(&record.password, buf);
+        buf.put_u8(b',');
+        Self::write_csv_field_bytes(&record.url, buf);
+        buf.put_u8(b'\n');
     }
-
-    fn escape_csv_field(&self, field: &str) -> String {
-        if field.contains(',') || field.contains('"') || field.contains('\n') || field.contains('\r') {
-            let escaped = field.replace('"', "\"\"");
-            format!("\"{}\"", escaped)
-        } else {
-            field.to_string()
+    
+    fn write_csv_field_bytes(field: &str, buf: &mut BytesMut) {
+        // Fast path: no special characters
+        if !field.bytes().any(|b| b == b',' || b == b'"' || b == b'\n' || b == b'\r') {
+            buf.extend_from_slice(field.as_bytes());
+            return;
         }
+        
+        // Slow path: escape special characters
+        buf.put_u8(b'"');
+        for byte in field.bytes() {
+            if byte == b'"' {
+                buf.put_u8(b'"');
+                buf.put_u8(b'"');
+            } else {
+                buf.put_u8(byte);
+            }
+        }
+        buf.put_u8(b'"');
     }
+
 
     fn update_metrics(&mut self, record_count: usize, bytes_written: usize, write_time: Duration, force: bool) {
         self.metrics.total_records_written += record_count;
@@ -207,6 +251,10 @@ impl BatchWriter {
 
     pub fn get_metrics(&self) -> &BatchWriteMetrics {
         &self.metrics
+    }
+
+    pub fn get_buffer_pool_stats(&self) -> crate::core::buffer_pool::BufferPoolStats {
+        self.buffer_pool.stats()
     }
 
     pub fn optimize_batch_size(&mut self) -> Result<usize> {

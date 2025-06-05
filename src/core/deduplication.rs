@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use anyhow::Result;
 use crate::config::model::{Config, DeduplicationConfig};
@@ -103,11 +105,95 @@ pub fn process_csv_files_with_validation(
     config: &Config,
     verbose: bool,
 ) -> Result<Vec<PathBuf>> {
+    process_csv_files_with_validation_and_shutdown(input_dir, config, verbose, None)
+}
+
+/// Process CSV files with validation and optional shutdown flag
+pub fn process_csv_files_with_validation_and_shutdown(
+    input_dir: &Path,
+    config: &Config,
+    verbose: bool,
+    shutdown_flag: Option<Arc<AtomicBool>>,
+) -> Result<Vec<PathBuf>> {
     // Create a config-based memory manager
     let mut memory_manager = MemoryManager::from_config(config)?;
 
     // Delegate to the new algorithm-compliant implementation
-    process_csv_files_with_algorithm_streaming(input_dir, config, &mut memory_manager, verbose)
+    process_csv_files_with_algorithm_streaming_with_shutdown(input_dir, config, &mut memory_manager, verbose, shutdown_flag)
+}
+
+/// Process CSV files with algorithm-compliant streaming and shutdown support
+fn process_csv_files_with_algorithm_streaming_with_shutdown(
+    input_dir: &Path,
+    config: &Config,
+    memory_manager: &mut MemoryManager,
+    verbose: bool,
+    shutdown_flag: Option<Arc<AtomicBool>>,
+) -> Result<Vec<PathBuf>> {
+    let mut temp_files = Vec::new();
+    let csv_files = super::validation::discover_csv_files(input_dir)?;
+
+    // Create temporary directory if it doesn't exist
+    fs::create_dir_all(&config.io.temp_directory)?;
+
+    // Create error log file
+    let error_log_path = Path::new(&config.io.temp_directory).join(VALIDATION_ERRORS_FILENAME);
+    let error_file = File::create(&error_log_path)?;
+    let mut error_writer = BufWriter::new(error_file);
+
+    if verbose {
+        println!("🔄 Processing {} CSV files with algorithm-compliant streaming...", csv_files.len());
+        println!("📊 Memory Manager Status:");
+        let stats = memory_manager.get_memory_stats()?;
+        println!("{}", stats.format_summary());
+    }
+
+    for (i, csv_file) in csv_files.iter().enumerate() {
+        // Check for shutdown signal before processing each file
+        if let Some(ref flag) = shutdown_flag {
+            if flag.load(Ordering::Relaxed) {
+                if verbose {
+                    println!("🛑 Shutdown signal received. Stopping file processing.");
+                }
+                break;
+            }
+        }
+
+        if verbose {
+            println!("📂 Processing file {}/{}: {}", i + 1, csv_files.len(), csv_file.display());
+        }
+
+        let temp_file = Path::new(&config.io.temp_directory)
+            .join(format!("{}{}.csv", TEMP_FILE_PREFIX, i));
+
+        process_single_csv_with_algorithm_streaming_with_shutdown(
+            csv_file,
+            &temp_file,
+            &mut error_writer,
+            memory_manager,
+            config,
+            verbose,
+            shutdown_flag.clone(),
+        )?;
+
+        temp_files.push(temp_file);
+    }
+
+    error_writer.flush()?;
+    if verbose {
+        println!("📝 Error log written to: {}", error_log_path.display());
+        if let Some(ref flag) = shutdown_flag {
+            if flag.load(Ordering::Relaxed) {
+                println!("⚠️ Processing interrupted by shutdown signal");
+            } else {
+                println!("✅ Algorithm-compliant file processing complete!");
+            }
+        } else {
+            println!("✅ Algorithm-compliant file processing complete!");
+        }
+    }
+
+    Ok(temp_files)
 }
 
 /// Process a single CSV file with algorithm-compliant streaming and RAM buffering
@@ -125,6 +211,21 @@ fn process_single_csv_with_algorithm_streaming(
     memory_manager: &mut MemoryManager,
     config: &Config,
     verbose: bool
+) -> Result<()> {
+    process_single_csv_with_algorithm_streaming_with_shutdown(
+        input_path, output_path, error_writer, memory_manager, config, verbose, None
+    )
+}
+
+/// Process a single CSV file with algorithm-compliant streaming and shutdown support
+fn process_single_csv_with_algorithm_streaming_with_shutdown(
+    input_path: &Path,
+    output_path: &Path,
+    error_writer: &mut BufWriter<File>,
+    memory_manager: &mut MemoryManager,
+    config: &Config,
+    verbose: bool,
+    shutdown_flag: Option<Arc<AtomicBool>>,
 ) -> Result<()> {
     if verbose {
         println!("  📖 Streaming file: {}", input_path.display());
@@ -147,6 +248,17 @@ fn process_single_csv_with_algorithm_streaming(
 
     // Stream files line by line as per algorithm with UTF-8 error handling
     for line_result in reader.lines() {
+        // Check for shutdown signal periodically (every 1000 lines for performance)
+        if total_lines % 1000 == 0 {
+            if let Some(ref flag) = shutdown_flag {
+                if flag.load(Ordering::Relaxed) {
+                    if verbose {
+                        println!("    🛑 Shutdown signal received during line processing at line {}", total_lines);
+                    }
+                    break;
+                }
+            }
+        }
         let line = match line_result {
             Ok(line) => line,
             Err(_e) => {
@@ -188,7 +300,7 @@ fn process_single_csv_with_algorithm_streaming(
             let fields = parse_csv_line(&line);
 
             if config.deduplication.allow_two_field_lines && fields.len() == 2 {
-                let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, config.deduplication.email_username_only, true);
+                let (user_idx, password_idx, _url_idx) = detect_field_positions_with_config(&fields, config.deduplication.email_username_only, true);
                 if user_idx >= fields.len() || password_idx >= fields.len() {
                     skip_reason = Some("invalid field positions detected");
                 }
@@ -424,6 +536,22 @@ pub fn deduplicate_records(
     cuda_processor: Option<&CudaProcessor>,
     verbose: bool,
 ) -> Result<ProcessingStats> {
+    deduplicate_records_with_shutdown(temp_files, output_path, config,
+        #[cfg(feature = "cuda")]
+        cuda_processor,
+        verbose, None)
+}
+
+/// Deduplicate records with shutdown support
+pub fn deduplicate_records_with_shutdown(
+    temp_files: &[PathBuf],
+    output_path: &Path,
+    config: &Config,
+    #[cfg(feature = "cuda")]
+    cuda_processor: Option<&CudaProcessor>,
+    verbose: bool,
+    shutdown_flag: Option<Arc<AtomicBool>>,
+) -> Result<ProcessingStats> {
     let start_time = Instant::now();
     let mut dedup_map: HashMap<String, Record> = HashMap::new();
     let mut stats = ProcessingStats::default();
@@ -450,6 +578,16 @@ pub fn deduplicate_records(
     }
 
     for (i, temp_file) in temp_files.iter().enumerate() {
+        // Check for shutdown signal before processing each temp file
+        if let Some(ref flag) = shutdown_flag {
+            if flag.load(Ordering::Relaxed) {
+                if verbose {
+                    println!("🛑 Shutdown signal received during deduplication. Stopping at file {}/{}", i + 1, temp_files.len());
+                }
+                break;
+            }
+        }
+
         if verbose {
             println!("Deduplicating file {}/{}: {}", i + 1, temp_files.len(), temp_file.display());
         }
@@ -465,8 +603,6 @@ pub fn deduplicate_records(
             let line = match line_result {
                 Ok(line) => line,
                 Err(_e) => {
-                    // Handle UTF-8 encoding errors gracefully
-                    // Note: Console output commented out to reduce spam, but error handling preserved
                     // if verbose {
                     //     println!("    ⚠️ UTF-8 encoding error in temp file {}: {}", temp_file.display(), _e);
                     // }
@@ -1580,6 +1716,7 @@ mod tests {
             io: crate::config::model::IoConfig {
                 temp_directory: temp_dir.path().to_string_lossy().to_string(),
                 output_directory: temp_dir.path().to_string_lossy().to_string(),
+                checkpoint_auto_save_interval_seconds: 30,
             },
             deduplication: DeduplicationConfig {
                 case_sensitive_usernames: false,
@@ -1760,7 +1897,7 @@ mod tests {
 
     #[test]
     fn test_two_field_mode_username_password() {
-        let config = DeduplicationConfig {
+        let _config = DeduplicationConfig {
             case_sensitive_usernames: false,
             normalize_urls: true,
             email_username_only: false,
@@ -1773,8 +1910,8 @@ mod tests {
         let fields1 = parse_csv_line(line1);
         let fields2 = parse_csv_line(line2);
         // Should detect username and password
-        let (user_idx1, pass_idx1, url_idx1) = detect_field_positions_with_config(&fields1, false, true);
-        let (user_idx2, pass_idx2, url_idx2) = detect_field_positions_with_config(&fields2, false, true);
+        let (user_idx1, pass_idx1, _url_idx1) = detect_field_positions_with_config(&fields1, false, true);
+        let (user_idx2, pass_idx2, _url_idx2) = detect_field_positions_with_config(&fields2, false, true);
         assert_eq!(fields1.len(), 2);
         assert_eq!(fields2.len(), 2);
         assert!(user_idx1 < 2 && pass_idx1 < 2);

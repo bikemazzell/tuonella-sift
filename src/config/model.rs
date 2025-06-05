@@ -32,6 +32,7 @@ pub struct ProcessingConfig {
 pub struct IoConfig {
     pub temp_directory: String,
     pub output_directory: String,
+    pub checkpoint_auto_save_interval_seconds: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

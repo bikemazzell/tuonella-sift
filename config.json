@@ -10,7 +10,8 @@
   },
   "io": {
     "temp_directory": "./temp",
-    "output_directory": "./output"
+    "output_directory": "./output",
+    "checkpoint_auto_save_interval_seconds": 30
   },
   "deduplication": {
     "case_sensitive_usernames": false,

@@ -110,6 +110,9 @@ nvidia-smi
 
 # Force CPU processing even with CUDA build
 ./tuonella-sift --input /path/to/csv/files --output /path/to/output/file.csv --force-cpu
+
+# Resume from previous checkpoint (if interrupted)
+./tuonella-sift --input /path/to/csv/files --output /path/to/output/file.csv --resume
 ```
 
 ## 📚 Operation Instructions
@@ -125,6 +128,9 @@ nvidia-smi
 
 # Verbose output for debugging
 ./tuonella-sift --input /path/to/input --output /path/to/output/file.csv --verbose
+
+# Resume from checkpoint after interruption
+./tuonella-sift --input /path/to/input --output /path/to/output/file.csv --resume
 ```
 
 ### 🏎️ Performance Optimization Guide
@@ -156,8 +162,48 @@ nvidia-smi
 - `--config <PATH>`: Configuration file path (default: config.json)
 - `--verbose`: Enable verbose output
 - `--force-cpu`: Force CPU processing (disable CUDA even if available)
+- `--resume`: Resume from previous checkpoint (if available)
 - `--help`: Show help information
 - `--version`: Show version information
+
+## 💾 Checkpointing & Resume Functionality
+
+Tuonella Sift includes robust checkpointing functionality for long-running processing sessions:
+
+### 🔄 **Automatic Checkpointing**
+- **⏰ Auto-save**: Checkpoints are automatically saved at configurable intervals (default: 30 seconds)
+- **🛑 Graceful shutdown**: Press `Ctrl+C` to interrupt processing and save a checkpoint
+- **📁 Checkpoint location**: Saved to `./temp/checkpoint.json` (configurable via temp directory)
+- **🔒 State preservation**: Maintains processing progress, statistics, and temporary file references
+- **⚙️ Configurable interval**: Set `checkpoint_auto_save_interval_seconds` in config.json
+
+### 🚀 **Resume Processing**
+```bash
+# Resume from previous checkpoint
+./tuonella-sift --input /path/to/csv/files --output /path/to/output/file.csv --resume
+
+# Resume with verbose output to see progress details
+./tuonella-sift --input /path/to/csv/files --output /path/to/output/file.csv --resume --verbose
+```
+
+### 📊 **Checkpoint Information**
+When resuming, the tool displays:
+- **📅 Checkpoint timestamp**: When the checkpoint was created
+- **📈 Progress percentage**: How much processing was completed
+- **📊 Processing statistics**: Records processed, unique records found, duplicates removed
+- **📁 Temporary files**: List of intermediate files preserved for resume
+
+### ⚠️ **Important Notes**
+- **🎯 Exact parameters**: Use the same `--input`, `--output`, and `--config` parameters when resuming
+- **📁 Temp folder**: Don't delete the temp folder between runs when planning to resume
+- **🧹 Auto-cleanup**: Checkpoint files are automatically removed on successful completion
+- **🔄 Fresh start**: Run without `--resume` to start fresh processing (ignores existing checkpoints)
+
+### 🛠️ **Use Cases**
+- **⏳ Long-running jobs**: Process large datasets over multiple sessions
+- **🔌 System maintenance**: Safely interrupt processing for system updates
+- **💻 Resource management**: Pause processing during high system load periods
+- **🚨 Error recovery**: Resume after unexpected interruptions or system crashes
 
 ## ⚙️ Configuration
 
@@ -177,7 +223,8 @@ The tool uses a configuration file in JSON format:
   },
   "io": {
     "temp_directory": "./temp",
-    "output_directory": "./output"
+    "output_directory": "./output",
+    "checkpoint_auto_save_interval_seconds": 30
   },
   "deduplication": {
     "case_sensitive_usernames": false,
@@ -242,6 +289,11 @@ The tool uses a configuration file in JSON format:
 - `enable_monitoring`: Enable/disable performance monitoring (default: true)
 - `report_interval_seconds`: How often to display performance reports in seconds (default: 30)
 - `show_detailed_metrics`: Enable detailed performance metrics (default: true)
+
+**📁 I/O Settings**
+- `temp_directory`: Directory for temporary files (default: "./temp")
+- `output_directory`: Default output directory (default: "./output")
+- `checkpoint_auto_save_interval_seconds`: How often to auto-save checkpoints in seconds (default: 30)
 
 ### 📊 Percentage-Based Memory Configuration
 

@@ -1252,7 +1252,7 @@ mod tests {
 
     #[test]
     fn test_two_field_mode_with_trailing_comma() {
-        let config = crate::config::model::DeduplicationConfig {
+        let _config = crate::config::model::DeduplicationConfig {
             case_sensitive_usernames: false,
             normalize_urls: true,
             email_username_only: false,
@@ -1276,7 +1276,7 @@ mod tests {
 
     #[test]
     fn test_two_field_colon_with_trailing_comma() {
-        let config = crate::config::model::DeduplicationConfig {
+        let _config = crate::config::model::DeduplicationConfig {
             case_sensitive_usernames: false,
             normalize_urls: true,
             email_username_only: false,
