@@ -1,6 +1,6 @@
 [package]
 name = "tuonella-sift"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 description = "A high-performance CSV deduplication tool that sifts through massive datasets like Tuonella sifts souls"
 authors = ["Tuonella Sift Team"]

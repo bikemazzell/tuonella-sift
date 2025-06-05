@@ -301,3 +301,110 @@ pub const GPU_TEMP_FILE_READ_CHUNK_SIZE_MB: usize = 128;  // GPU temp file read 
 
 pub const MAX_RAM_BUFFER_SIZE_GB: f64 = 8.0;
 pub const MAX_GPU_BUFFER_SIZE_GB: f64 = 8.0;
+
+// SIMD processing constants
+pub const SIMD_AVX512_WIDTH_BYTES: usize = 64;
+pub const SIMD_AVX2_WIDTH_BYTES: usize = 32;
+pub const SIMD_SSE_NEON_WIDTH_BYTES: usize = 16;
+pub const SIMD_SCALAR_WIDTH_BYTES: usize = 1;
+pub const SIMD_AVX512_CHUNK_SIZE: usize = 8192;
+pub const SIMD_AVX2_CHUNK_SIZE: usize = 4096;
+pub const SIMD_SSE_NEON_CHUNK_SIZE: usize = 2048;
+pub const SIMD_SCALAR_CHUNK_SIZE: usize = 1024;
+pub const SIMD_AVX2_PROCESS_SIZE: usize = 32;
+pub const SIMD_NEON_PROCESS_SIZE: usize = 16;
+pub const SIMD_CACHE_SIZE_LIMIT: usize = 8192;
+
+// FNV-1a hash algorithm constants
+pub const FNV1A_OFFSET_BASIS: u64 = 14695981039346656037;
+pub const FNV1A_PRIME: u64 = 1099511628211;
+
+// External sort constants
+pub const EXTERNAL_SORT_MEMORY_FACTOR: f64 = 0.8;
+pub const EXTERNAL_SORT_MIN_MEMORY_BYTES: usize = 1024 * 1024 * 1024;
+pub const EXTERNAL_SORT_BUFFER_SIZE_BYTES: usize = 64 * 1024 * 1024;
+pub const EXTERNAL_SORT_MIN_THREADS: usize = 4;
+pub const EXTERNAL_SORT_PROGRESS_INTERVAL: usize = 100_000;
+pub const EXTERNAL_SORT_MERGE_PROGRESS_INTERVAL: usize = 1_000_000;
+pub const EXTERNAL_SORT_RECORD_OVERHEAD_BYTES: usize = 64;
+pub const EXTERNAL_SORT_DISK_SPACE_FACTOR: f64 = 2.2;
+pub const EXTERNAL_SORT_MEMORY_THRESHOLD_FACTOR: f64 = 0.6;
+
+// CUDA optimization constants
+#[cfg(feature = "cuda")]
+pub const CUDA_SHARED_MEMORY_SIZE_BYTES: u32 = 16384;
+#[cfg(feature = "cuda")]
+pub const CUDA_MAX_BLOCKS_PER_SM: u32 = 16;
+#[cfg(feature = "cuda")]
+pub const CUDA_UPPERCASE_MASK_A: u32 = 0x40404040;
+#[cfg(feature = "cuda")]
+pub const CUDA_UPPERCASE_MASK_Z: u32 = 0x5B5B5B5B;
+#[cfg(feature = "cuda")]
+pub const CUDA_LOWERCASE_OFFSET: u32 = 0x20202020;
+#[cfg(feature = "cuda")]
+pub const DEFAULT_CUDA_BATCH_SIZE_FALLBACK: usize = 1000;
+#[cfg(feature = "cuda")]
+pub const UTILIZATION_CALCULATION_FACTOR: f64 = 10.0;
+
+// Pinned memory constants
+#[cfg(feature = "cuda")]
+pub const PINNED_BUFFER_SMALL_BYTES: usize = 65536;
+#[cfg(feature = "cuda")]
+pub const PINNED_BUFFER_MEDIUM_BYTES: usize = 1048576;
+#[cfg(feature = "cuda")]
+pub const PINNED_BUFFER_LARGE_BYTES: usize = 16777216;
+#[cfg(feature = "cuda")]
+pub const PINNED_BUFFER_XLARGE_BYTES: usize = 67108864;
+#[cfg(feature = "cuda")]
+pub const PINNED_BUFFER_MAX_AGE_SECS: u64 = 3600;
+#[cfg(feature = "cuda")]
+pub const PINNED_POOL_SIZE_SMALL: usize = 64;
+#[cfg(feature = "cuda")]
+pub const PINNED_POOL_SIZE_MEDIUM: usize = 32;
+#[cfg(feature = "cuda")]
+pub const PINNED_POOL_SIZE_LARGE: usize = 16;
+#[cfg(feature = "cuda")]
+pub const PINNED_POOL_SIZE_XLARGE: usize = 8;
+#[cfg(feature = "cuda")]
+pub const FRAGMENTATION_THRESHOLD_PERCENT: f64 = 25.0;
+
+// Adaptive memory management constants
+#[cfg(feature = "cuda")]
+pub const MEMORY_HISTORY_MAX_SIZE: usize = 50;
+#[cfg(feature = "cuda")]
+pub const MEMORY_PREDICTION_WINDOW_SECS: u64 = 30;
+#[cfg(feature = "cuda")]
+pub const MEMORY_ADJUSTMENT_COOLDOWN_SECS: u64 = 10;
+#[cfg(feature = "cuda")]
+pub const MEMORY_USAGE_INCREASE_THRESHOLD: f64 = 70.0;
+#[cfg(feature = "cuda")]
+pub const MEMORY_USAGE_MAINTAIN_THRESHOLD: f64 = 85.0;
+#[cfg(feature = "cuda")]
+pub const MEMORY_USAGE_REDUCE_THRESHOLD: f64 = 95.0;
+#[cfg(feature = "cuda")]
+pub const MEMORY_INCREASE_FACTOR: f64 = 1.2;
+#[cfg(feature = "cuda")]
+pub const MEMORY_REDUCE_FACTOR: f64 = 0.8;
+#[cfg(feature = "cuda")]
+pub const MEMORY_EMERGENCY_FACTOR: f64 = 0.6;
+
+// Buffer pool constants
+pub const BUFFER_CAPACITY_MULTIPLIER: usize = 4;
+pub const DEFAULT_BUFFER_POOL_SIZE: usize = 8;
+pub const ESTIMATED_RECORD_SIZE_BYTES: usize = 128;
+
+// Async processing constants
+pub const MIN_CONCURRENT_TASKS: usize = 1;
+pub const MAX_CONCURRENT_TASKS: usize = 64;
+pub const RESULT_CHANNEL_CAPACITY: usize = 1000;
+pub const PROGRESS_REPORT_INTERVAL: usize = 100;
+
+// Error handling constants
+pub const ERROR_LOG_FLUSH_INTERVAL_SECS: u64 = 5;
+pub const MAX_RECOVERY_CHECKPOINTS: usize = 10;
+pub const MAX_ALLOCATION_HISTORY: usize = 1000;
+
+// Email validation constants
+pub const MIN_EMAIL_LENGTH: usize = 5;
+pub const ASCII_CONTROL_LIMIT: u8 = 32;
+pub const ASCII_PRINTABLE_LIMIT: u8 = 126;

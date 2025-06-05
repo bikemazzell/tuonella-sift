@@ -10,6 +10,8 @@ use std::collections::HashMap;
 use parking_lot::Mutex;
 #[cfg(feature = "cuda")]
 use std::time::Instant;
+#[cfg(feature = "cuda")]
+use crate::constants::*;
 
 #[cfg(feature = "cuda")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -24,19 +26,19 @@ pub enum BufferSize {
 impl BufferSize {
     pub fn from_size(size: usize) -> Self {
         match size {
-            0..=65536 => BufferSize::Small,
-            65537..=1048576 => BufferSize::Medium, 
-            1048577..=16777216 => BufferSize::Large,
+            0..=PINNED_BUFFER_SMALL_BYTES => BufferSize::Small,
+            PINNED_BUFFER_SMALL_BYTES..=PINNED_BUFFER_MEDIUM_BYTES => BufferSize::Medium,
+            PINNED_BUFFER_MEDIUM_BYTES..=PINNED_BUFFER_LARGE_BYTES => BufferSize::Large,
             _ => BufferSize::XLarge,
         }
     }
     
     pub fn to_bytes(&self) -> usize {
         match self {
-            BufferSize::Small => 65536,    // 64KB
-            BufferSize::Medium => 1048576, // 1MB
-            BufferSize::Large => 16777216, // 16MB
-            BufferSize::XLarge => 67108864, // 64MB
+            BufferSize::Small => PINNED_BUFFER_SMALL_BYTES,
+            BufferSize::Medium => PINNED_BUFFER_MEDIUM_BYTES,
+            BufferSize::Large => PINNED_BUFFER_LARGE_BYTES,
+            BufferSize::XLarge => PINNED_BUFFER_XLARGE_BYTES,
         }
     }
 }

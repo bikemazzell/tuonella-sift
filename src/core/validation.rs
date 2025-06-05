@@ -2,12 +2,8 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use std::path::Path;
 use anyhow::Result;
-use crate::constants::{
-    PRINTABLE_USERNAME_MIN_LENGTH, PRINTABLE_USERNAME_MAX_LENGTH,
-    PROTOCOL_HTTP, PROTOCOL_HTTPS, PROTOCOL_ANDROID, PROTOCOL_FTP, PROTOCOL_MAILTO,
-    URL_WWW_PREFIX, CSV_EXTENSION, LONG_PASSWORD_HEURISTIC_LENGTH,
-    REVERSE_DOMAIN_MIN_LENGTH, REVERSE_DOMAIN_MIN_PARTS, MIN_FIELD_COUNT
-};
+use crate::constants::*;
+use crate::core::simd_string_ops::SimdStringProcessor;
 
 pub static EMAIL_REGEX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}").unwrap()
@@ -22,17 +18,11 @@ pub static PRINTABLE_USERNAME_REGEX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(&pattern).unwrap()
 });
 
-/// Detect if a line uses mixed delimiters
-/// Patterns:
-/// - URL SPACE USERNAME:PASSWORD
-/// - URL;USERNAME:PASSWORD
 pub fn is_mixed_delimiter_line(line: &str) -> bool {
-    // Check for space-separated pattern: URL SPACE USERNAME:PASSWORD
     if is_space_mixed_delimiter_line(line) {
         return true;
     }
 
-    // Check for semicolon-separated pattern: URL;USERNAME:PASSWORD
     if is_semicolon_mixed_delimiter_line(line) {
         return true;
     }
@@ -40,7 +30,6 @@ pub fn is_mixed_delimiter_line(line: &str) -> bool {
     false
 }
 
-/// Detect if a line uses space mixed delimiters: URL SPACE USERNAME:PASSWORD
 fn is_space_mixed_delimiter_line(line: &str) -> bool {
     let parts: Vec<&str> = line.split(' ').collect();
     if parts.len() != 2 {
@@ -50,16 +39,12 @@ fn is_space_mixed_delimiter_line(line: &str) -> bool {
     let url_part = parts[0];
     let credentials_part = parts[1];
 
-    // Check if first part looks like a URL
     let is_url = is_url_field(url_part);
-
-    // Check if second part contains exactly one colon (for username:password)
     let colon_count = count_non_protocol_colons(credentials_part);
 
     is_url && colon_count == 1
 }
 
-/// Detect if a line uses semicolon mixed delimiters: URL;USERNAME:PASSWORD
 fn is_semicolon_mixed_delimiter_line(line: &str) -> bool {
     let parts: Vec<&str> = line.split(';').collect();
     if parts.len() != 2 {
@@ -69,32 +54,24 @@ fn is_semicolon_mixed_delimiter_line(line: &str) -> bool {
     let url_part = parts[0];
     let credentials_part = parts[1];
 
-    // Check if first part looks like a URL
     let is_url = is_url_field(url_part);
-
-    // Check if second part contains exactly one colon (for username:password)
     let colon_count = count_non_protocol_colons(credentials_part);
 
     is_url && colon_count == 1
 }
 
-/// Detect the delimiter used in a line by counting occurrences
-/// Returns the most common delimiter found, defaulting to comma if none found
-/// Special handling for colons to avoid counting protocol colons (http:, https:, etc.)
-/// Special handling for mixed delimiter lines (space + colon, semicolon + colon)
 pub fn detect_delimiter(line: &str) -> char {
-    // Check for mixed delimiter patterns first
     if is_space_mixed_delimiter_line(line) {
-        return ' '; // Return space as primary delimiter for space mixed pattern
+        return ' ';
     }
 
     if is_semicolon_mixed_delimiter_line(line) {
-        return ';'; // Return semicolon as primary delimiter for semicolon mixed pattern
+        return ';';
     }
 
     let delimiters = [',', ';', '\t', '|', ':', ' '];
     let mut max_count = 0;
-    let mut detected_delimiter = ','; // Default to comma
+    let mut detected_delimiter = ',';
 
     for &delimiter in &delimiters {
         let count = if delimiter == ':' {
@@ -112,12 +89,10 @@ pub fn detect_delimiter(line: &str) -> char {
     detected_delimiter
 }
 
-/// Count colons that are not part of URL protocols
 fn count_non_protocol_colons(line: &str) -> usize {
     let protocols = ["http:", "https:", "ftp:", "mailto:", "android:"];
     let mut count = line.matches(':').count();
 
-    // Subtract protocol colons
     for protocol in &protocols {
         count = count.saturating_sub(line.matches(protocol).count());
     }
@@ -125,7 +100,6 @@ fn count_non_protocol_colons(line: &str) -> usize {
     count
 }
 
-// Common URL protocols
 const URL_PROTOCOLS: &[&str] = &[
     PROTOCOL_HTTP,
     PROTOCOL_HTTPS,
@@ -188,7 +162,6 @@ pub fn normalize_url(url: &str) -> String {
 }
 
 pub fn parse_csv_line(line: &str) -> Vec<String> {
-    // Special case: if line contains a colon and ends with a comma, treat colon as delimiter and ignore trailing comma
     let trimmed_line = if line.ends_with(',') && line.contains(':') {
         line.trim_end_matches(',')
     } else {
@@ -196,7 +169,6 @@ pub fn parse_csv_line(line: &str) -> Vec<String> {
     };
     let delimiter = detect_delimiter(trimmed_line);
     let mut fields = parse_csv_line_with_delimiter(trimmed_line, delimiter);
-    // Trim trailing empty fields
     while let Some(last) = fields.last() {
         if last.is_empty() {
             fields.pop();
@@ -217,7 +189,7 @@ pub fn parse_csv_line_with_delimiter(line: &str, delimiter: char) -> Vec<String>
     } else {
         parse_standard_delimited_line(line, delimiter)
     };
-    // Trim trailing empty fields
+    
     while let Some(last) = fields.last() {
         if last.is_empty() {
             fields.pop();
@@ -229,20 +201,15 @@ pub fn parse_csv_line_with_delimiter(line: &str, delimiter: char) -> Vec<String>
 }
 
 fn parse_space_mixed_delimiter_line(line: &str) -> Vec<String> {
-    // Handle space mixed delimiter pattern: URL SPACE USERNAME:PASSWORD
     let parts: Vec<&str> = line.split(' ').collect();
     if parts.len() != 2 {
-        // Fallback to space-delimited parsing if pattern doesn't match
         return parse_standard_delimited_line(line, ' ');
     }
 
     let url_part = parts[0].trim();
     let credentials_part = parts[1].trim();
-
-    // Split credentials by colon
     let cred_parts: Vec<&str> = credentials_part.splitn(2, ':').collect();
     if cred_parts.len() != 2 {
-        // Fallback if no colon found in credentials
         return vec![url_part.to_string(), credentials_part.to_string()];
     }
 
@@ -254,20 +221,15 @@ fn parse_space_mixed_delimiter_line(line: &str) -> Vec<String> {
 }
 
 fn parse_semicolon_mixed_delimiter_line(line: &str) -> Vec<String> {
-    // Handle semicolon mixed delimiter pattern: URL;USERNAME:PASSWORD
     let parts: Vec<&str> = line.split(';').collect();
     if parts.len() != 2 {
-        // Fallback to semicolon-delimited parsing if pattern doesn't match
         return parse_standard_delimited_line(line, ';');
     }
 
     let url_part = parts[0].trim();
     let credentials_part = parts[1].trim();
-
-    // Split credentials by colon
     let cred_parts: Vec<&str> = credentials_part.splitn(2, ':').collect();
     if cred_parts.len() != 2 {
-        // Fallback if no colon found in credentials
         return vec![url_part.to_string(), credentials_part.to_string()];
     }
 
@@ -323,15 +285,12 @@ fn parse_standard_delimited_line(line: &str, delimiter: char) -> Vec<String> {
 }
 
 fn parse_colon_delimited_line(line: &str) -> Vec<String> {
-    // First, replace protocol colons with a placeholder to avoid splitting on them
     let mut temp_line = line.to_string();
     let protocols = ["https://", "http://", "ftp://", "mailto://", "android://"];
 
     for protocol in &protocols {
         temp_line = temp_line.replace(protocol, &protocol.replace("://", "___PROTOCOL___"));
     }
-
-    // Parse with quote handling
     let mut fields = Vec::new();
     let mut current_field = String::new();
     let mut in_quotes = false;
@@ -379,8 +338,6 @@ pub fn detect_field_positions(fields: &[String]) -> (usize, usize, usize) {
     if fields.is_empty() {
         return (0, 0, 0);
     }
-
-    // Find URL and email positions in a single pass
     let mut url_idx = None;
     let mut email_idx = None;
 
@@ -395,8 +352,6 @@ pub fn detect_field_positions(fields: &[String]) -> (usize, usize, usize) {
             break;
         }
     }
-
-    // If no email found, return invalid positions
     let email_idx = match email_idx {
         Some(idx) => idx,
         None => return (fields.len(), fields.len(), fields.len())
@@ -404,12 +359,10 @@ pub fn detect_field_positions(fields: &[String]) -> (usize, usize, usize) {
 
     let url_idx = url_idx.unwrap_or(2);
 
-    // Find first available position for password that's not email or url
     let password_idx = (0..fields.len())
         .find(|&i| i != email_idx && i != url_idx)
         .unwrap_or((email_idx + 1) % fields.len());
 
-    // Ensure positions are unique and within bounds
     let len = fields.len();
     let positions = if email_idx == url_idx || email_idx == password_idx || password_idx == url_idx {
         let base = url_idx.min(len - 1);
@@ -427,25 +380,21 @@ pub fn detect_field_positions(fields: &[String]) -> (usize, usize, usize) {
 
 pub fn detect_field_positions_with_config(fields: &[String], email_username_only: bool, allow_two_field_lines: bool) -> (usize, usize, usize) {
     if allow_two_field_lines && fields.len() == 2 {
-        // Only username and password, no URL
         let username_idx = if email_username_only {
             if EMAIL_REGEX.is_match(&fields[0]) { 0 } else if EMAIL_REGEX.is_match(&fields[1]) { 1 } else { fields.len() }
         } else {
             if is_valid_username_field(&fields[0]) { 0 } else if is_valid_username_field(&fields[1]) { 1 } else { fields.len() }
         };
         let password_idx = if username_idx == 0 { 1 } else if username_idx == 1 { 0 } else { fields.len() };
-        // No URL, so set to fields.len()
         return (username_idx, password_idx, fields.len());
     }
     if fields.len() < MIN_FIELD_COUNT {
         return (fields.len(), fields.len(), fields.len());
     }
 
-    // Find URL with priority: protocol URLs first, then domain-like patterns
     let mut url_idx = None;
     let mut username_idx = None;
 
-    // First pass: Look for URLs with protocols (highest priority)
     for (i, field) in fields.iter().enumerate() {
         if URL_PROTOCOLS.iter().any(|&protocol| field.starts_with(protocol)) {
             url_idx = Some(i);
@@ -453,19 +402,15 @@ pub fn detect_field_positions_with_config(fields: &[String], email_username_only
         }
     }
 
-    // Second pass: Look for usernames and fallback URLs
     for (i, field) in fields.iter().enumerate() {
-        // Skip if this field is already identified as a protocol URL
         if url_idx == Some(i) {
             continue;
         }
 
-        // Look for username - be more lenient when we already have a protocol URL
         if username_idx.is_none() {
             let is_valid_username = if email_username_only {
                 EMAIL_REGEX.is_match(field)
             } else {
-                // If we already found a protocol URL, be more lenient with username detection
                 if url_idx.is_some() {
                     is_valid_username_field_lenient(field)
                 } else {
@@ -488,7 +433,6 @@ pub fn detect_field_positions_with_config(fields: &[String], email_username_only
         }
     }
 
-    // If no valid username found, return invalid positions
     let username_idx = match username_idx {
         Some(idx) => idx,
         None => return (fields.len(), fields.len(), fields.len())
@@ -496,12 +440,10 @@ pub fn detect_field_positions_with_config(fields: &[String], email_username_only
 
     let url_idx = url_idx.unwrap_or(2);
 
-    // Find first available position for password
     let password_idx = (0..fields.len())
         .find(|&i| i != username_idx && i != url_idx)
         .unwrap_or((username_idx + 1) % fields.len());
 
-    // Ensure positions are unique and within bounds
     let len = fields.len();
     if username_idx == url_idx || username_idx == password_idx || password_idx == url_idx {
         let base = url_idx.min(len - 1);
@@ -516,18 +458,15 @@ pub fn detect_field_positions_with_config(fields: &[String], email_username_only
 }
 
 fn is_url_field(field: &str) -> bool {
-    // Check for standard URL protocols
     if URL_PROTOCOLS.iter().any(|&protocol| field.starts_with(protocol)) {
         return true;
     }
 
-    // Check for domain-like structure with path/query/fragment
     if field.contains('.') &&
        (field.contains('/') || field.contains('?') || field.contains('#')) {
         let domain_part = field.split('.').next().unwrap_or("");
         let after_dot = field.split('.').nth(1).unwrap_or("");
 
-        // Validate domain-like structure
         let is_valid_domain = domain_part.len() >= 2 &&
             !domain_part.starts_with(&['/', '@', '#', '?'] as &[char]) &&
             domain_part.chars().all(|c| c.is_alphanumeric() || c == '-') &&
@@ -538,7 +477,6 @@ fn is_url_field(field: &str) -> bool {
         }
     }
 
-    // Check for reverse domain notation
     if field.contains('.') &&
        field.split('.').count() >= REVERSE_DOMAIN_MIN_PARTS &&
        !field.contains('@') &&
@@ -556,17 +494,14 @@ fn is_url_field(field: &str) -> bool {
 fn is_valid_username_field(field: &str) -> bool {
     let field = field.trim();
 
-    // Basic validation - must be non-empty and match printable pattern
     if field.is_empty() || !PRINTABLE_USERNAME_REGEX.is_match(field) {
         return false;
     }
 
-    // Must not be a URL or URL-like pattern
     if is_url_field(field) || URL_PROTOCOLS.iter().any(|&protocol| field.starts_with(protocol)) {
         return false;
     }
 
-    // Check if it looks like a password (long string with mixed case and numbers)
     !(field.len() > LONG_PASSWORD_HEURISTIC_LENGTH && {
         let chars: Vec<_> = field.chars().collect();
         chars.iter().any(|c| c.is_uppercase()) &&
@@ -575,22 +510,17 @@ fn is_valid_username_field(field: &str) -> bool {
     })
 }
 
-/// More lenient username validation for cases where we already have a clear protocol URL
-/// This allows domain-like usernames when there's already a proper URL with protocol
 fn is_valid_username_field_lenient(field: &str) -> bool {
     let field = field.trim();
 
-    // Basic validation - must be non-empty and match printable pattern
     if field.is_empty() || !PRINTABLE_USERNAME_REGEX.is_match(field) {
         return false;
     }
 
-    // Must not start with a URL protocol (but allow domain-like patterns)
     if URL_PROTOCOLS.iter().any(|&protocol| field.starts_with(protocol)) {
         return false;
     }
 
-    // Check if it looks like a password (long string with mixed case and numbers)
     !(field.len() > LONG_PASSWORD_HEURISTIC_LENGTH && {
         let chars: Vec<_> = field.chars().collect();
         chars.iter().any(|c| c.is_uppercase()) &&
@@ -608,7 +538,6 @@ pub fn is_valid_line_with_config(line: &str, email_username_only: bool, allow_tw
     }
     let fields = parse_csv_line(line);
     if allow_two_field_lines && fields.len() == 2 {
-        // Accept if either field is a valid username (or email) and the other is not empty
         let valid_user = if email_username_only {
             EMAIL_REGEX.is_match(&fields[0]) || EMAIL_REGEX.is_match(&fields[1])
         } else {
@@ -1298,5 +1227,220 @@ mod tests {
             assert!(user_idx < 2 && pass_idx < 2, "Should detect valid username and password indices for line: {}", line);
             assert!(is_valid_line_with_config(line, false, true), "Should be valid in 2-field mode: {}", line);
         }
+    }
+}
+
+/// SIMD-accelerated batch validation functions
+pub mod simd {
+    use super::*;
+
+    /// Global SIMD processor instance for validation operations
+    static SIMD_PROCESSOR: Lazy<Option<SimdStringProcessor>> = Lazy::new(|| {
+        SimdStringProcessor::new().ok()
+    });
+
+    /// Batch normalize URLs using SIMD acceleration
+    pub fn normalize_urls_batch(urls: &[String]) -> Result<Vec<String>> {
+        if let Some(processor) = SIMD_PROCESSOR.as_ref() {
+            processor.normalize_urls_to_lowercase(urls)
+        } else {
+            // Fallback to scalar processing
+            Ok(urls.iter().map(|url| normalize_url(url)).collect())
+        }
+    }
+
+    /// Batch validate emails using SIMD acceleration  
+    pub fn validate_emails_batch(emails: &[String]) -> Result<Vec<bool>> {
+        if let Some(processor) = SIMD_PROCESSOR.as_ref() {
+            processor.validate_emails_simd(emails)
+        } else {
+            // Fallback to scalar processing
+            Ok(emails.iter().map(|email| EMAIL_REGEX.is_match(email)).collect())
+        }
+    }
+
+    /// Batch parse CSV lines using SIMD acceleration
+    pub fn parse_csv_lines_batch(lines: &[String], delimiter: char) -> Result<Vec<Vec<String>>> {
+        if let Some(processor) = SIMD_PROCESSOR.as_ref() {
+            processor.parse_csv_fields_simd(lines, delimiter)
+        } else {
+            // Fallback to scalar processing
+            Ok(lines.iter().map(|line| {
+                parse_csv_line(line)
+            }).collect())
+        }
+    }
+
+    /// Batch generate hashes for strings using SIMD acceleration
+    pub fn hash_strings_batch(strings: &[String]) -> Result<Vec<u64>> {
+        if let Some(processor) = SIMD_PROCESSOR.as_ref() {
+            processor.hash_strings_simd(strings)
+        } else {
+            // Fallback to scalar processing
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            
+            Ok(strings.iter().map(|s| {
+                let mut hasher = DefaultHasher::new();
+                s.hash(&mut hasher);
+                hasher.finish()
+            }).collect())
+        }
+    }
+
+    /// Get SIMD capabilities information
+    pub fn get_simd_info() -> Option<String> {
+        if let Some(processor) = SIMD_PROCESSOR.as_ref() {
+            let caps = processor.get_capabilities();
+            Some(format!(
+                "SIMD enabled: AVX2={}, AVX512={}, NEON={}, max_width={}B, speedup={:.1}x",
+                caps.cpu_features.has_avx2,
+                caps.cpu_features.has_avx512, 
+                caps.cpu_features.has_neon,
+                caps.max_vector_width,
+                caps.theoretical_speedup
+            ))
+        } else {
+            None
+        }
+    }
+
+    /// Check if SIMD acceleration is available
+    pub fn is_simd_available() -> bool {
+        SIMD_PROCESSOR.is_some()
+    }
+
+    /// Benchmark SIMD vs scalar performance
+    pub fn benchmark_simd_performance(test_data: &[String]) -> Result<SimdBenchmarkResult> {
+        use std::time::Instant;
+
+        let start_scalar = Instant::now();
+        let _scalar_results: Vec<String> = test_data.iter().map(|s| s.to_lowercase()).collect();
+        let scalar_time = start_scalar.elapsed();
+
+        let start_simd = Instant::now();
+        let _simd_results = normalize_urls_batch(test_data)?;
+        let simd_time = start_simd.elapsed();
+
+        let speedup = if simd_time.as_nanos() > 0 {
+            scalar_time.as_nanos() as f64 / simd_time.as_nanos() as f64
+        } else {
+            1.0
+        };
+
+        Ok(SimdBenchmarkResult {
+            scalar_time_ms: scalar_time.as_millis() as f64,
+            simd_time_ms: simd_time.as_millis() as f64,
+            speedup_factor: speedup,
+            data_size: test_data.len(),
+            simd_available: is_simd_available(),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SimdBenchmarkResult {
+    pub scalar_time_ms: f64,
+    pub simd_time_ms: f64,
+    pub speedup_factor: f64,
+    pub data_size: usize,
+    pub simd_available: bool,
+}
+
+#[cfg(test)]
+mod simd_tests {
+    use super::*;
+
+    #[test]
+    fn test_simd_batch_url_normalization() {
+        let urls = vec![
+            "HTTP://EXAMPLE.COM".to_string(),
+            "HTTPS://TEST.ORG/PATH".to_string(),
+            "FTP://FILES.COM".to_string(),
+        ];
+        
+        let result = simd::normalize_urls_batch(&urls);
+        assert!(result.is_ok());
+        
+        let normalized = result.unwrap();
+        assert_eq!(normalized[0], "http://example.com");
+        assert_eq!(normalized[1], "https://test.org/path");
+        assert_eq!(normalized[2], "ftp://files.com");
+    }
+
+    #[test]
+    fn test_simd_batch_email_validation() {
+        let emails = vec![
+            "test@example.com".to_string(),
+            "invalid-email".to_string(),
+            "user@domain.org".to_string(),
+            "short".to_string(),
+        ];
+        
+        let result = simd::validate_emails_batch(&emails);
+        assert!(result.is_ok());
+        
+        let validation = result.unwrap();
+        assert_eq!(validation[0], true);  // Valid email
+        assert_eq!(validation[1], false); // No @ or .
+        assert_eq!(validation[2], true);  // Valid email
+        assert_eq!(validation[3], false); // Too short
+    }
+
+    #[test]
+    fn test_simd_batch_csv_parsing() {
+        let lines = vec![
+            "field1,field2,field3".to_string(),
+            "a,b,c,d".to_string(),
+            "single".to_string(),
+        ];
+        
+        let result = simd::parse_csv_lines_batch(&lines, ',');
+        assert!(result.is_ok());
+        
+        let parsed = result.unwrap();
+        assert_eq!(parsed[0], vec!["field1", "field2", "field3"]);
+        assert_eq!(parsed[1], vec!["a", "b", "c", "d"]);
+        assert_eq!(parsed[2], vec!["single"]);
+    }
+
+    #[test]
+    fn test_simd_batch_hashing() {
+        let strings = vec![
+            "test1".to_string(),
+            "test2".to_string(),
+            "test1".to_string(), // Duplicate
+        ];
+        
+        let result = simd::hash_strings_batch(&strings);
+        assert!(result.is_ok());
+        
+        let hashes = result.unwrap();
+        assert_eq!(hashes.len(), 3);
+        assert_eq!(hashes[0], hashes[2]); // Same string should have same hash
+        assert_ne!(hashes[0], hashes[1]); // Different strings should have different hashes
+    }
+
+    #[test]
+    fn test_simd_info() {
+        let info = simd::get_simd_info();
+        println!("SIMD info: {:?}", info);
+        
+        let available = simd::is_simd_available();
+        println!("SIMD available: {}", available);
+    }
+
+    #[test]
+    fn test_simd_benchmark() {
+        let test_data: Vec<String> = (0..1000).map(|i| format!("HTTP://EXAMPLE{}.COM/PATH", i)).collect();
+        
+        let result = simd::benchmark_simd_performance(&test_data);
+        assert!(result.is_ok());
+        
+        let benchmark = result.unwrap();
+        println!("Benchmark results: {:?}", benchmark);
+        
+        assert!(benchmark.speedup_factor > 0.0);
+        assert_eq!(benchmark.data_size, 1000);
     }
 }

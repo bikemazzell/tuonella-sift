@@ -2,8 +2,6 @@ use std::sync::{Arc, Mutex};
 use std::collections::VecDeque;
 use bytes::BytesMut;
 
-/// A thread-safe buffer pool for reusing BytesMut instances
-/// to reduce memory allocations and improve performance
 #[derive(Debug, Clone)]
 pub struct BufferPool {
     pool: Arc<Mutex<VecDeque<BytesMut>>>,

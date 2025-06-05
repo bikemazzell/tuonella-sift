@@ -15,10 +15,7 @@ use crate::cuda::processor::{CudaRecord, CudaDeviceProperties, CudaProcessor};
 #[cfg(feature = "cuda")]
 use crate::config::model::CudaConfig;
 #[cfg(feature = "cuda")]
-use crate::constants::{
-    DEFAULT_CUDA_GRID_DIM, DEFAULT_CUDA_SHARED_MEM_BYTES,
-    CUDA_WARP_SIZE, CUDA_MAX_THREADS_PER_BLOCK, DEFAULT_MIN_BUFFER_SIZE
-};
+use crate::constants::*;
 
 #[cfg(feature = "cuda")]
 #[derive(Debug, Clone)]
@@ -36,8 +33,8 @@ impl Default for StreamMetrics {
         Self {
             stream_id: 0,
             total_batches_processed: 0,
-            total_processing_time: std::time::Duration::new(0, 0),
-            average_batch_time: std::time::Duration::new(0, 0),
+            total_processing_time: std::time::Duration::new(ZERO_DURATION_SECS, ZERO_DURATION_NANOS),
+            average_batch_time: std::time::Duration::new(ZERO_DURATION_SECS, ZERO_DURATION_NANOS),
             utilization_percentage: 0.0,
         }
     }

@@ -13,3 +13,5 @@ pub mod performance_monitor;
 pub mod recovery_manager;
 pub mod resource_manager;
 pub mod validation;
+pub mod simd_string_ops;
+pub mod external_sort_dedup;
