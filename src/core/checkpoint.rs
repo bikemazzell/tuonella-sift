@@ -1,10 +1,22 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use chrono::Utc;
+use sha2::{Sha256, Digest};
+
+/// Represents the processing phase when checkpoint was created
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum ProcessingPhase {
+    FileDiscovery,
+    FileProcessing { file_index: usize },
+    Deduplication,
+    FinalMerge,
+    Completed,
+}
 
 /// Represents the current state of processing that can be saved and resumed
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,10 +35,16 @@ pub struct ProcessingState {
     pub current_file_index: usize,
     /// Number of lines processed in the current file
     pub current_file_lines_processed: usize,
+    /// Exact byte offset in the current file for precise resume
+    pub current_file_byte_offset: u64,
     /// Total lines in the current file
     pub current_file_total_lines: usize,
     /// List of temporary files created so far
     pub temp_files_created: Vec<PathBuf>,
+    /// Checksums of temp files for integrity verification
+    pub temp_file_checksums: HashMap<PathBuf, String>,
+    /// Processing phase when checkpoint was created
+    pub processing_phase: ProcessingPhase,
     /// Total records processed across all files
     pub total_records_processed: usize,
     /// Total unique records found so far
@@ -45,6 +63,8 @@ pub struct ProcessingState {
     pub current_chunk_size: usize,
     /// Memory usage configuration
     pub memory_usage_percent: u8,
+    /// Files that have been completely processed (for skipping)
+    pub completed_files: Vec<PathBuf>,
 }
 
 impl ProcessingState {
@@ -72,8 +92,11 @@ impl ProcessingState {
             discovered_files: Vec::new(),
             current_file_index: 0,
             current_file_lines_processed: 0,
+            current_file_byte_offset: 0,
             current_file_total_lines: 0,
             temp_files_created: Vec::new(),
+            temp_file_checksums: HashMap::new(),
+            processing_phase: ProcessingPhase::FileDiscovery,
             total_records_processed: 0,
             unique_records_count: 0,
             duplicates_removed: 0,
@@ -83,19 +106,90 @@ impl ProcessingState {
             verbose_mode,
             current_chunk_size: 0,
             memory_usage_percent,
+            completed_files: Vec::new(),
         }
     }
 
-    /// Update file processing progress
+    /// Update file processing progress with byte offset
     pub fn update_file_progress(&mut self, file_index: usize, lines_processed: usize, total_lines: usize) {
         self.current_file_index = file_index;
         self.current_file_lines_processed = lines_processed;
         self.current_file_total_lines = total_lines;
     }
 
+    /// Update file processing progress with precise byte offset
+    pub fn update_file_progress_with_offset(&mut self, file_index: usize, lines_processed: usize, total_lines: usize, byte_offset: u64) {
+        self.current_file_index = file_index;
+        self.current_file_lines_processed = lines_processed;
+        self.current_file_total_lines = total_lines;
+        self.current_file_byte_offset = byte_offset;
+    }
+
+    /// Update processing phase
+    pub fn update_phase(&mut self, phase: ProcessingPhase) {
+        self.processing_phase = phase;
+    }
+
+    /// Mark a file as completely processed
+    pub fn mark_file_completed(&mut self, file_path: PathBuf) {
+        if !self.completed_files.contains(&file_path) {
+            self.completed_files.push(file_path);
+        }
+    }
+
     /// Add a temporary file to the list
     pub fn add_temp_file(&mut self, temp_file: PathBuf) {
         self.temp_files_created.push(temp_file);
+    }
+
+    /// Add a temporary file with checksum for integrity verification
+    pub fn add_temp_file_with_checksum(&mut self, temp_file: PathBuf) -> Result<()> {
+        let checksum = Self::calculate_file_checksum(&temp_file)?;
+        self.temp_file_checksums.insert(temp_file.clone(), checksum);
+        self.temp_files_created.push(temp_file);
+        Ok(())
+    }
+
+    /// Calculate SHA256 checksum of a file
+    fn calculate_file_checksum(file_path: &Path) -> Result<String> {
+        let mut file = File::open(file_path)?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0; 8192];
+        
+        loop {
+            let bytes_read = file.read(&mut buffer)?;
+            if bytes_read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..bytes_read]);
+        }
+        
+        Ok(format!("{:x}", hasher.finalize()))
+    }
+
+    /// Verify integrity of temp files using checksums
+    pub fn verify_temp_file_integrity(&self) -> Result<Vec<PathBuf>> {
+        let mut corrupted_files = Vec::new();
+        
+        for (file_path, expected_checksum) in &self.temp_file_checksums {
+            if !file_path.exists() {
+                corrupted_files.push(file_path.clone());
+                continue;
+            }
+            
+            match Self::calculate_file_checksum(file_path) {
+                Ok(actual_checksum) => {
+                    if actual_checksum != *expected_checksum {
+                        corrupted_files.push(file_path.clone());
+                    }
+                }
+                Err(_) => {
+                    corrupted_files.push(file_path.clone());
+                }
+            }
+        }
+        
+        Ok(corrupted_files)
     }
 
     /// Update processing statistics
@@ -139,6 +233,9 @@ pub struct CheckpointManager {
     temp_directory: PathBuf,
     auto_save_interval: u64, // seconds
     last_save_time: SystemTime,
+    incremental_save_enabled: bool,
+    records_processed_since_save: usize,
+    auto_save_record_threshold: usize,
 }
 
 impl CheckpointManager {
@@ -151,6 +248,28 @@ impl CheckpointManager {
             temp_directory: temp_directory.to_path_buf(),
             auto_save_interval,
             last_save_time: SystemTime::now(),
+            incremental_save_enabled: true,
+            records_processed_since_save: 0,
+            auto_save_record_threshold: 100_000, // Save every 100k records
+        }
+    }
+
+    /// Create a new checkpoint manager with custom thresholds
+    pub fn new_with_thresholds(
+        temp_directory: &Path, 
+        auto_save_interval: u64, 
+        record_threshold: usize
+    ) -> Self {
+        let checkpoint_path = temp_directory.join("checkpoint.json");
+        
+        Self {
+            checkpoint_path,
+            temp_directory: temp_directory.to_path_buf(),
+            auto_save_interval,
+            last_save_time: SystemTime::now(),
+            incremental_save_enabled: true,
+            records_processed_since_save: 0,
+            auto_save_record_threshold: record_threshold,
         }
     }
 
@@ -182,7 +301,18 @@ impl CheckpointManager {
         serde_json::to_writer_pretty(writer, state)?;
         
         self.last_save_time = SystemTime::now();
+        self.reset_records_counter();
         Ok(())
+    }
+
+    /// Save checkpoint if incremental conditions are met
+    pub fn auto_save_if_needed(&mut self, state: &ProcessingState) -> Result<bool> {
+        if self.should_incremental_save() {
+            self.save_checkpoint(state)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     /// Check if it's time for an automatic save
@@ -192,6 +322,32 @@ impl CheckpointManager {
         } else {
             true // If we can't determine elapsed time, save to be safe
         }
+    }
+
+    /// Track records processed and check if incremental save is needed
+    pub fn track_records_processed(&mut self, count: usize) -> bool {
+        if !self.incremental_save_enabled {
+            return false;
+        }
+        
+        self.records_processed_since_save += count;
+        self.records_processed_since_save >= self.auto_save_record_threshold
+    }
+
+    /// Check if incremental save should be triggered (time or record count)
+    pub fn should_incremental_save(&self) -> bool {
+        self.should_auto_save() || 
+        (self.incremental_save_enabled && self.records_processed_since_save >= self.auto_save_record_threshold)
+    }
+
+    /// Reset the records counter after save
+    pub fn reset_records_counter(&mut self) {
+        self.records_processed_since_save = 0;
+    }
+
+    /// Enable or disable incremental saving
+    pub fn set_incremental_save(&mut self, enabled: bool) {
+        self.incremental_save_enabled = enabled;
     }
 
     /// Remove the checkpoint file (called on successful completion)
@@ -241,7 +397,34 @@ impl CheckpointManager {
             }
         }
 
+        // Verify temp file integrity using checksums
+        let corrupted_files = state.verify_temp_file_integrity()?;
+        if !corrupted_files.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Checkpoint temp file integrity check failed for {} files: {:?}",
+                corrupted_files.len(),
+                corrupted_files
+            ));
+        }
+
         Ok(())
+    }
+
+    /// Get files that can be skipped (already completed)
+    pub fn get_remaining_files(&self, state: &ProcessingState) -> Vec<PathBuf> {
+        state.discovered_files
+            .iter()
+            .skip(state.current_file_index)
+            .filter(|file| !state.completed_files.contains(file))
+            .cloned()
+            .collect()
+    }
+
+    /// Resume from a specific byte offset in a file
+    pub fn seek_to_checkpoint_position(&self, state: &ProcessingState, file_path: &Path) -> Result<File> {
+        let mut file = File::open(file_path)?;
+        file.seek(SeekFrom::Start(state.current_file_byte_offset))?;
+        Ok(file)
     }
 
     /// Get the checkpoint file path

@@ -6,12 +6,32 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use tuonella_sift::config::Config;
 use tuonella_sift::core::checkpoint::{CheckpointManager, ProcessingState};
+use tuonella_sift::core::deduplication::ProcessingStats;
 // Note: Using fully qualified paths for shutdown-aware functions
 use tuonella_sift::utils::system::format_duration;
 use tokio::signal;
 
 #[cfg(feature = "cuda")]
 use tuonella_sift::cuda::processor::CudaProcessor;
+
+fn print_completion_stats(stats: ProcessingStats, start_time: Instant, state: &ProcessingState, output_path: &Path) {
+    let elapsed = start_time.elapsed();
+    let total_elapsed_secs = state.get_elapsed_time() + elapsed.as_secs();
+    let processing_rate = stats.total_records as f64 / elapsed.as_secs_f64().max(f64::EPSILON);
+
+    println!("\n🎉 Resume completed successfully! 🎉");
+    println!("=======================================");
+    println!("📊 Total records: {}", stats.total_records);
+    println!("✨ Unique records preserved: {}", stats.unique_records);
+    println!("🗑️ Duplicates banished: {} ({:.2}%)",
+             stats.duplicates_removed,
+             100.0 * stats.duplicates_removed as f64 / stats.total_records.max(1) as f64);
+    println!("⚠️ Invalid records: {}", stats.invalid_records);
+    println!("⏱️ Resume session time: {}", format_duration(elapsed));
+    println!("⏱️ Total processing time: {} seconds", total_elapsed_secs);
+    println!("🔄 Processing rate: {:.2} rec/sec", processing_rate);
+    println!("📜 Output written to: {}", output_path.display());
+}
 
 async fn resume_processing_from_checkpoint(
     state: ProcessingState,
@@ -21,55 +41,113 @@ async fn resume_processing_from_checkpoint(
     cuda_processor: Option<&tuonella_sift::cuda::processor::CudaProcessor>,
     verbose: bool,
     shutdown_flag: Arc<AtomicBool>,
-    checkpoint_manager: CheckpointManager,
+    mut checkpoint_manager: CheckpointManager,
 ) -> Result<()> {
     println!("🔄 Resuming processing from checkpoint...");
-
-    // For now, we'll implement a simplified resume that continues from where we left off
-    // In a full implementation, this would:
-    // 1. Skip already processed files
-    // 2. Resume from the current file position
-    // 3. Use existing temp files
-    // 4. Continue with the same configuration
+    
+    // Enhanced resume implementation with proper file skipping and temp file reuse
+    println!("📊 Checkpoint info:");
+    println!("   • Processing phase: {:?}", state.processing_phase);
+    println!("   • Files completed: {}/{}", state.completed_files.len(), state.discovered_files.len());
+    println!("   • Temp files available: {}", state.temp_files_created.len());
+    println!("   • Current file position: {}% in file {}", 
+        if state.current_file_total_lines > 0 { 
+            (state.current_file_lines_processed * 100) / state.current_file_total_lines 
+        } else { 0 },
+        state.current_file_index
+    );
 
     let start_time = Instant::now();
 
-    // Get the list of files that still need processing
-    let remaining_files: Vec<PathBuf> = state.discovered_files
-        .iter()
-        .skip(state.current_file_index)
-        .cloned()
-        .collect();
+    // Use the enhanced logic to get remaining files (excludes completed ones)
+    let remaining_files = checkpoint_manager.get_remaining_files(&state);
+
+    // Handle different processing phases
+    match state.processing_phase {
+        tuonella_sift::core::checkpoint::ProcessingPhase::Completed => {
+            println!("✅ Processing was already completed in the previous session!");
+            
+            // Clean up checkpoint since we're done
+            if let Err(e) = checkpoint_manager.cleanup_checkpoint() {
+                if verbose {
+                    println!("⚠️ Failed to clean up checkpoint: {}", e);
+                }
+            }
+            
+            println!("📜 Output should be available at: {}", output_path.display());
+            return Ok(());
+        }
+        tuonella_sift::core::checkpoint::ProcessingPhase::Deduplication => {
+            println!("🔗 Resuming from deduplication phase with {} existing temp files", state.temp_files_created.len());
+            
+            // Skip file processing and go straight to deduplication
+            let stats = tuonella_sift::core::deduplication::deduplicate_records_with_shutdown(
+                &state.temp_files_created,
+                output_path,
+                config,
+                #[cfg(feature = "cuda")]
+                cuda_processor,
+                verbose,
+                Some(shutdown_flag.clone()),
+            )?;
+            
+            print_completion_stats(stats, start_time, &state, output_path);
+            return Ok(());
+        }
+        _ => {
+            // Continue with file processing
+        }
+    }
 
     if remaining_files.is_empty() {
-        println!("✅ All files were already processed in the previous session!");
-
-        // Clean up checkpoint since we're done
-        if let Err(e) = checkpoint_manager.cleanup_checkpoint() {
-            if verbose {
-                println!("⚠️ Failed to clean up checkpoint: {}", e);
-            }
-        }
-
-        println!("📜 Previous output should be available at: {}", output_path.display());
+        println!("✅ All files were already processed! Moving to deduplication phase.");
+        
+        // Update phase and save checkpoint
+        let mut updated_state = state.clone();
+        updated_state.update_phase(tuonella_sift::core::checkpoint::ProcessingPhase::Deduplication);
+        let _ = checkpoint_manager.save_checkpoint(&updated_state);
+        
+        // Proceed to deduplication
+        let stats = tuonella_sift::core::deduplication::deduplicate_records_with_shutdown(
+            &state.temp_files_created,
+            output_path,
+            config,
+            #[cfg(feature = "cuda")]
+            cuda_processor,
+            verbose,
+            Some(shutdown_flag.clone()),
+        )?;
+        
+        print_completion_stats(stats, start_time, &state, output_path);
         return Ok(());
     }
 
     println!("📁 Resuming with {} remaining files to process", remaining_files.len());
+    println!("♻️ Reusing {} existing temp files", state.temp_files_created.len());
 
-    // Resume from last working file
-    
+    // Resume from last working file    
     let temp_dir = Path::new(&config.io.temp_directory);
     std::fs::create_dir_all(temp_dir)?;
 
     let mut new_temp_files = Vec::new();
+    let mut updated_state = state.clone();
+    
     for (i, file_path) in remaining_files.iter().enumerate() {
         if shutdown_flag.load(Ordering::Relaxed) {
             println!("🛑 Processing interrupted during resume.");
+            
+            // Save updated checkpoint with current progress
+            updated_state.temp_files_created.extend(new_temp_files.clone());
+            let _ = checkpoint_manager.save_checkpoint(&updated_state);
             return Ok(());
         }
 
-        let _single_file_temp_dir = temp_dir.join(format!("single_file_{}", i));
+        // Update processing phase
+        updated_state.update_phase(tuonella_sift::core::checkpoint::ProcessingPhase::FileProcessing { 
+            file_index: state.current_file_index + i 
+        });
+
+        let _single_file_temp_dir = temp_dir.join(format!("single_file_{}", state.current_file_index + i));
         std::fs::create_dir_all(&_single_file_temp_dir)?;
 
         let single_file_dir = file_path.parent().unwrap_or(Path::new("."));
@@ -81,6 +159,17 @@ async fn resume_processing_from_checkpoint(
         )?;
 
         new_temp_files.extend(temp_files_for_this_file);
+        updated_state.mark_file_completed(file_path.clone());
+
+        // Incremental checkpoint save
+        if checkpoint_manager.track_records_processed(10000) { // Estimate records per file
+            updated_state.temp_files_created.extend(new_temp_files.iter().cloned());
+            if let Ok(saved) = checkpoint_manager.auto_save_if_needed(&updated_state) {
+                if saved && verbose {
+                    println!("💾 Incremental checkpoint saved");
+                }
+            }
+        }
 
         if verbose {
             println!("📁 Processed remaining file {}/{}: {}",
