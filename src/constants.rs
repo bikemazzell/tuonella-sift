@@ -3,6 +3,7 @@ pub const ZERO_USIZE: usize = 0;
 pub const ZERO_U32: u32 = 0;
 pub const ZERO_U64: u64 = 0;
 pub const ZERO_F64: f64 = 0.0;
+pub const ONE_F64: f64 = 1.0;
 
 // Memory size constants (integer)
 pub const BYTES_PER_KB: usize = 1024;
@@ -18,25 +19,28 @@ pub const TB_AS_F64: f64 = GB_AS_F64 * 1024.0;
 
 // Percentage constants
 pub const PERCENT_100: f64 = 100.0;
+pub const PERCENT_98: f64 = 98.0;
 pub const PERCENT_95: f64 = 95.0;
 pub const PERCENT_90: f64 = 90.0;
 pub const PERCENT_80: f64 = 80.0;
+pub const PERCENT_75: f64 = 75.0;
 pub const PERCENT_60: f64 = 60.0;
 pub const PERCENT_50: f64 = 50.0;
 pub const PERCENT_25: f64 = 25.0;
 
 // Percentage multipliers (0.0-1.0)
-pub const MULTIPLIER_95: f64 = 0.95;  // Memory safety margin
-pub const MULTIPLIER_90: f64 = 0.90;  // RAM/GPU allocation
-pub const MULTIPLIER_80: f64 = 0.80;  // Memory pressure threshold
-pub const MULTIPLIER_60: f64 = 0.60;  // Low memory threshold
-pub const MULTIPLIER_50: f64 = 0.50;  // Buffer split factor
-pub const MULTIPLIER_25: f64 = 0.25;  // Minimum chunk size
-pub const MULTIPLIER_20: f64 = 0.20;  // GPU memory headroom
+pub const MULTIPLIER_95: f64 = 0.95;
+pub const MULTIPLIER_90: f64 = 0.90;
+pub const MULTIPLIER_80: f64 = 0.80;
+pub const MULTIPLIER_60: f64 = 0.60;
+pub const MULTIPLIER_50: f64 = 0.50;
+pub const MULTIPLIER_25: f64 = 0.25;
+pub const MULTIPLIER_20: f64 = 0.20;
 
 // Time constants
 pub const SECONDS_PER_MINUTE: u64 = 60;
 pub const SECONDS_PER_HOUR: u64 = SECONDS_PER_MINUTE * 60;
+pub const ONE_HOUR_SECONDS: u64 = 3600;
 
 // Duration constants
 pub const ZERO_DURATION_SECS: u64 = 0;
@@ -65,31 +69,24 @@ pub const DEFAULT_GPU_MIN_SEGMENT_SIZE_MB: usize = 16;
 #[cfg(feature = "cuda")]
 pub const CONSERVATIVE_RECORD_BYTES_MULTIPLIER: usize = 3;
 
-// Algorithm-specific memory allocation constants
-pub const ALGORITHM_RAM_ALLOCATION_PERCENT: f64 = MULTIPLIER_90;  // 90% of available RAM
-pub const ALGORITHM_GPU_ALLOCATION_PERCENT: f64 = MULTIPLIER_90;  // 90% of available GPU memory
-pub const MEMORY_SAFETY_MARGIN: f64 = MULTIPLIER_95;  // Additional safety margin
-pub const DYNAMIC_MEMORY_CHECK_INTERVAL_RECORDS: usize = 1000;  // Check memory every N records
-
-// Note: Buffer limits are now dynamically calculated from config.json
-// max_ram_usage_gb and gpu_memory_usage_percent settings
-
-// Double buffering for overlapping I/O and GPU processing
-pub const DOUBLE_BUFFER_SIZE_RATIO: f64 = MULTIPLIER_50;  // Each buffer gets 50% of available memory
-pub const BUFFER_SWAP_THRESHOLD_PERCENT: f64 = PERCENT_80;  // Swap when buffer is 80% full
-pub const ASYNC_IO_TIMEOUT_SECONDS: u64 = 30;  // Timeout for async I/O operations
-
-// Memory pressure thresholds
-pub const MEMORY_PRESSURE_THRESHOLD_PERCENT: f64 = PERCENT_80;  // Consider 80% as pressure threshold
-pub const MEMORY_CRITICAL_THRESHOLD_PERCENT: f64 = PERCENT_90;  // Consider 90% as critical threshold
-pub const LOW_MEMORY_THRESHOLD_FACTOR: f64 = 0.6;  // 60% memory threshold
+// Memory allocation and pressure thresholds
+pub const ALGORITHM_RAM_ALLOCATION_PERCENT: f64 = MULTIPLIER_90;
+pub const ALGORITHM_GPU_ALLOCATION_PERCENT: f64 = MULTIPLIER_90;
+pub const MEMORY_SAFETY_MARGIN: f64 = MULTIPLIER_95;
+pub const DYNAMIC_MEMORY_CHECK_INTERVAL_RECORDS: usize = 1000;
+pub const DOUBLE_BUFFER_SIZE_RATIO: f64 = MULTIPLIER_50;
+pub const BUFFER_SWAP_THRESHOLD_PERCENT: f64 = PERCENT_80;
+pub const ASYNC_IO_TIMEOUT_SECONDS: u64 = 30;
+pub const MEMORY_PRESSURE_THRESHOLD_PERCENT: f64 = PERCENT_80;
+pub const MEMORY_CRITICAL_THRESHOLD_PERCENT: f64 = PERCENT_90;
+pub const LOW_MEMORY_THRESHOLD_FACTOR: f64 = MULTIPLIER_60;
 
 // Chunk size adjustment factors
-pub const CHUNK_SIZE_REDUCTION_FACTOR: f64 = 0.75;  // Reduce chunk size by 25% under pressure
-pub const CHUNK_SIZE_INCREASE_FACTOR: f64 = 1.25;  // Increase chunk size by 25% when memory is available
-pub const MIN_CHUNK_SIZE_REDUCTION_LIMIT: f64 = MULTIPLIER_25;  // Don't reduce below 25% of original size
-pub const MAX_CHUNK_SIZE_INCREASE_LIMIT: f64 = 2.0;  // Don't increase above 200% of original size
-pub const CHUNK_SIZE_ADJUSTMENT_COOLDOWN_RECORDS: usize = 5000;  // Wait N records between adjustments
+pub const CHUNK_SIZE_REDUCTION_FACTOR: f64 = 0.75;
+pub const CHUNK_SIZE_INCREASE_FACTOR: f64 = 1.25;
+pub const MIN_CHUNK_SIZE_REDUCTION_LIMIT: f64 = MULTIPLIER_25;
+pub const MAX_CHUNK_SIZE_INCREASE_LIMIT: f64 = 2.0;
+pub const CHUNK_SIZE_ADJUSTMENT_COOLDOWN_RECORDS: usize = 5000;
 
 // Batch constants
 pub const DEFAULT_SAMPLE_SIZE: usize = 1000;
@@ -101,38 +98,45 @@ pub const BINARY_HEADER_SIZE_BYTES: usize = 16;
 pub const DEFAULT_PROGRESS_INTERVAL_SECONDS: u64 = 30;
 pub const VERBOSE_PROGRESS_INTERVAL_SECONDS: u64 = 5;
 
-// Batch writer constants
-pub const WRITE_BATCH_SIZE_RECORDS: usize = 5000;  // Batch multiple records for single write
-pub const WRITE_BUFFER_SIZE_MB: usize = 64;  // Write buffer size in MB
-pub const MAX_WRITE_BATCH_SIZE_RECORDS: usize = 50000;  // Maximum write batch size
-pub const MIN_BATCH_SIZE: usize = 100;  // Minimum batch size for writer
-pub const MIN_OPERATIONS_FOR_OPTIMIZATION: usize = 3;  // Minimum operations before optimization
-pub const LOW_THROUGHPUT_THRESHOLD: f64 = 1000.0;  // Low throughput threshold (records/sec)
-pub const HIGH_THROUGHPUT_THRESHOLD: f64 = 5000.0;  // High throughput threshold (records/sec)
-pub const IO_THROUGHPUT_THRESHOLD: f64 = 50.0;  // I/O throughput threshold (MB/sec)
-pub const BATCH_SIZE_REDUCTION_FACTOR: f64 = 0.8;  // Factor to reduce batch size
-pub const BATCH_SIZE_INCREASE_FACTOR: f64 = 1.2;  // Factor to increase batch size
-pub const THROUGHPUT_EFFICIENCY_THRESHOLD: f64 = 10000.0;  // Throughput efficiency threshold
-pub const BYTES_PER_MB_FLOAT: f64 = MB_AS_F64;  // Bytes per MB as float
-pub const EFFICIENCY_COMPONENTS_COUNT: f64 = 3.0;  // Number of efficiency components
+// Batch processing constants
+pub const WRITE_BATCH_SIZE_RECORDS: usize = 5000;
+pub const WRITE_BUFFER_SIZE_MB: usize = 64;
+pub const MAX_WRITE_BATCH_SIZE_RECORDS: usize = 50000;
+pub const MIN_BATCH_SIZE: usize = 100;
+pub const MIN_OPERATIONS_FOR_OPTIMIZATION: usize = 3;
+pub const LOW_THROUGHPUT_THRESHOLD: f64 = 1000.0;
+pub const HIGH_THROUGHPUT_THRESHOLD: f64 = 5000.0;
+pub const IO_THROUGHPUT_THRESHOLD: f64 = 50.0;
+pub const BATCH_SIZE_REDUCTION_FACTOR: f64 = 0.8;
+pub const BATCH_SIZE_INCREASE_FACTOR: f64 = 1.2;
+pub const THROUGHPUT_EFFICIENCY_THRESHOLD: f64 = 10000.0;
+pub const BYTES_PER_MB_FLOAT: f64 = MB_AS_F64;
+pub const EFFICIENCY_COMPONENTS_COUNT: f64 = 3.0;
 
-// Streaming and parallel processing
-pub const PARALLEL_FILE_PROCESSING_THREADS: usize = 4;  // Number of parallel file processing threads
-pub const STREAMING_CHUNK_SIZE_MB: usize = 128;  // Streaming chunk size for large files
-pub const PARALLEL_IO_QUEUE_SIZE: usize = 16;  // Queue size for parallel I/O operations
+// Parallel processing constants
+pub const PARALLEL_FILE_PROCESSING_THREADS: usize = 4;
+pub const STREAMING_CHUNK_SIZE_MB: usize = 128;
+pub const PARALLEL_IO_QUEUE_SIZE: usize = 16;
 
 // Error handling and recovery constants
-pub const MAX_RETRY_ATTEMPTS: usize = 3;  // Maximum number of retry attempts for failed operations
-pub const RETRY_DELAY_MS: u64 = 100;  // Initial delay between retries in milliseconds
-pub const RETRY_BACKOFF_MULTIPLIER: f64 = 2.0;  // Exponential backoff multiplier
-pub const CHUNK_SPLIT_FACTOR: f64 = 0.5;  // Split chunks to 50% of original size on error
-pub const MIN_CHUNK_SIZE_RECORDS: usize = 10;  // Minimum chunk size in records
-pub const ERROR_LOG_BUFFER_SIZE: usize = 1000;  // Buffer size for error logging
-pub const RECOVERY_CHECKPOINT_INTERVAL: usize = 10000;  // Save recovery checkpoint every N records
+pub const MAX_RETRY_ATTEMPTS: usize = 3;
+pub const RETRY_DELAY_MS: u64 = 100;
+pub const RETRY_BACKOFF_MULTIPLIER: f64 = 2.0;
+pub const CHUNK_SPLIT_FACTOR: f64 = MULTIPLIER_50;
+pub const MIN_CHUNK_SIZE_RECORDS: usize = 10;
+pub const ERROR_LOG_BUFFER_SIZE: usize = 1000;
+pub const RECOVERY_CHECKPOINT_INTERVAL: usize = 10000;
 
-// Username validation constants
-pub const PRINTABLE_USERNAME_MIN_LENGTH: usize = 1;  // Minimum length for printable username
-pub const PRINTABLE_USERNAME_MAX_LENGTH: usize = 320;  // Maximum length for printable username (RFC 5321 limit)
+// Validation constants
+pub const PRINTABLE_USERNAME_MIN_LENGTH: usize = 1;
+pub const PRINTABLE_USERNAME_MAX_LENGTH: usize = 320;
+pub const MIN_FIELD_COUNT: usize = 3;
+pub const LONG_PASSWORD_HEURISTIC_LENGTH: usize = 50;
+pub const REVERSE_DOMAIN_MIN_LENGTH: usize = 30;
+pub const REVERSE_DOMAIN_MIN_PARTS: usize = 4;
+pub const MIN_DOMAIN_PART_LENGTH: usize = 2;
+pub const MIN_DOMAIN_PARTS: usize = 2;
+pub const MIN_EMAIL_LENGTH: usize = 5;
 
 // Protocol and URL constants
 pub const PROTOCOL_HTTP: &str = "http://";
@@ -146,11 +150,6 @@ pub const URL_WWW_PREFIX: &str = "www.";
 pub const CSV_EXTENSION: &str = "csv";
 pub const TEMP_FILE_EXTENSION: &str = ".tmp";
 
-// Field validation constants
-pub const MIN_FIELD_COUNT: usize = 3;  // Minimum fields required for a valid record
-pub const LONG_PASSWORD_HEURISTIC_LENGTH: usize = 50;  // Length threshold for password detection heuristic
-pub const REVERSE_DOMAIN_MIN_LENGTH: usize = 30;  // Minimum length for reverse domain notation detection
-pub const REVERSE_DOMAIN_MIN_PARTS: usize = 4;  // Minimum parts for reverse domain notation
 
 // CSV header constants
 pub const DEFAULT_USERNAME_HEADER: &str = "username";
@@ -196,21 +195,19 @@ pub const TEST_BATCH_SIZE: usize = 100;  // Test batch size
 pub const TEST_COMPLETENESS_SCORE: f32 = 0.8;  // Test completeness score
 pub const TEST_FIELD_COUNT: usize = 5;  // Test field count
 
-// Performance monitoring and adaptive optimization
-pub const PERFORMANCE_SAMPLE_WINDOW_RECORDS: usize = 10000;  // Sample window for performance metrics
-pub const ADAPTIVE_OPTIMIZATION_INTERVAL_RECORDS: usize = 50000;  // Adjust parameters every N records
-pub const MIN_THROUGHPUT_RECORDS_PER_SECOND: f64 = 1000.0;  // Minimum acceptable throughput
-pub const THROUGHPUT_IMPROVEMENT_THRESHOLD_PERCENT: f64 = 10.0;  // Minimum improvement to keep changes
+// Performance monitoring constants
+pub const PERFORMANCE_SAMPLE_WINDOW_RECORDS: usize = 10000;
+pub const ADAPTIVE_OPTIMIZATION_INTERVAL_RECORDS: usize = 50000;
+pub const MIN_THROUGHPUT_RECORDS_PER_SECOND: f64 = 1000.0;
+pub const THROUGHPUT_IMPROVEMENT_THRESHOLD_PERCENT: f64 = 10.0;
 
-// Memory management defaults
-pub const DEFAULT_CHUNK_ADJUSTMENT_FACTOR: f64 = 1.0;  // No adjustment
-pub const MIN_CHUNK_SIZE_LIMIT: usize = 1024;  // 1KB minimum chunk size
-pub const DEFAULT_GPU_MEMORY_FREE: usize = 0;  // Default free GPU memory
-pub const DEFAULT_GPU_MEMORY_TOTAL: usize = 0;  // Default total GPU memory
-pub const DEFAULT_GPU_PRESSURE: bool = false;  // Default GPU pressure state
-
-// Buffer management
-pub const BUFFER_SIZE_RESET_VALUE: usize = 0;
+// Memory and buffer management defaults
+pub const DEFAULT_CHUNK_ADJUSTMENT_FACTOR: f64 = ONE_F64;
+pub const MIN_CHUNK_SIZE_LIMIT: usize = BYTES_PER_KB;
+pub const DEFAULT_GPU_MEMORY_FREE: usize = ZERO_USIZE;
+pub const DEFAULT_GPU_MEMORY_TOTAL: usize = ZERO_USIZE;
+pub const DEFAULT_GPU_PRESSURE: bool = false;
+pub const BUFFER_SIZE_RESET_VALUE: usize = ZERO_USIZE;
 pub const INITIAL_BUFFER_A_ACTIVE: bool = true;
 
 // Test duration constants
@@ -223,40 +220,37 @@ pub const TEST_RAM_LIMIT_GB: usize = 1;
 pub const DECIMAL_PLACES: usize = 2;
 
 // Performance monitoring thresholds
-pub const MEMORY_PRESSURE_HIGH_THRESHOLD: f64 = 0.8;  // 80% memory pressure threshold
-pub const MEMORY_PRESSURE_LOW_THRESHOLD: f64 = 0.5;  // 50% memory pressure threshold
-pub const THROUGHPUT_REDUCTION_FACTOR: f64 = 0.7;  // 70% throughput reduction factor
-pub const IO_EFFICIENCY_HIGH_THRESHOLD: f64 = 0.6;  // 60% I/O efficiency threshold
-pub const CHUNK_SIZE_MIN_MB: usize = 64;  // Minimum chunk size in MB
-pub const CHUNK_SIZE_MAX_MB: usize = 2048;  // Maximum chunk size in MB
-pub const GPU_UTILIZATION_LOW_THRESHOLD: f64 = 70.0;  // Low GPU utilization threshold
-pub const GPU_UTILIZATION_HIGH_THRESHOLD: f64 = 95.0;  // High GPU utilization threshold
-pub const BATCH_SIZE_INCREASE_FACTOR_GPU: f64 = 1.2;  // Increase batch size by 20% when GPU utilization is low
-pub const BATCH_SIZE_DECREASE_FACTOR_GPU: f64 = 0.9;  // Decrease batch size by 10% when GPU utilization is high
-pub const MIN_PARALLEL_THREADS: usize = 1;  // Minimum number of parallel threads
-pub const MAX_PARALLEL_THREADS: usize = 16;  // Maximum number of parallel threads
-pub const MIN_BATCH_SIZE_RECORDS: usize = 1000;  // Minimum batch size in records
-pub const MAX_BATCH_SIZE_RECORDS: usize = 100000;  // Maximum batch size in records
-pub const MIN_BUFFER_SIZE_MB: usize = 256;  // Minimum buffer size in MB
-pub const MAX_BUFFER_SIZE_MB: usize = 4096;  // Maximum buffer size in MB
+pub const MEMORY_PRESSURE_HIGH_THRESHOLD: f64 = MULTIPLIER_80;
+pub const MEMORY_PRESSURE_LOW_THRESHOLD: f64 = MULTIPLIER_50;
+pub const THROUGHPUT_REDUCTION_FACTOR: f64 = 0.7;
+pub const IO_EFFICIENCY_HIGH_THRESHOLD: f64 = MULTIPLIER_60;
+pub const CHUNK_SIZE_MIN_MB: usize = 64;
+pub const CHUNK_SIZE_MAX_MB: usize = 2048;
+pub const GPU_UTILIZATION_LOW_THRESHOLD: f64 = 70.0;
+pub const GPU_UTILIZATION_HIGH_THRESHOLD: f64 = PERCENT_95;
+pub const BATCH_SIZE_INCREASE_FACTOR_GPU: f64 = 1.2;
+pub const BATCH_SIZE_DECREASE_FACTOR_GPU: f64 = 0.9;
+pub const MIN_PARALLEL_THREADS: usize = NUMERIC_ONE;
+pub const MAX_PARALLEL_THREADS: usize = NUMERIC_SIXTEEN;
+pub const MIN_BATCH_SIZE_RECORDS: usize = 1000;
+pub const MAX_BATCH_SIZE_RECORDS: usize = 100000;
+pub const MIN_BUFFER_SIZE_MB: usize = 256;
+pub const MAX_BUFFER_SIZE_MB: usize = 4096;
 
 // Default optimization parameters
-pub const DEFAULT_CHUNK_SIZE_MB: usize = 256;  // Default chunk size in MB
-pub const DEFAULT_BATCH_SIZE: usize = 10000;  // Default batch size
-pub const DEFAULT_PARALLEL_THREADS: usize = 4;  // Default number of parallel threads
-pub const DEFAULT_BUFFER_SIZE_MB: usize = 512;  // Default buffer size in MB
-pub const MIN_THREAD_COUNT: usize = 1;  // Minimum thread count
-pub const MAX_THREAD_COUNT: usize = 32;  // Maximum thread count
-pub const PERFORMANCE_SAMPLE_WINDOW_DIVISOR: usize = 1000;  // Divisor for sample window size
-pub const PERCENTAGE_MULTIPLIER: f64 = 100.0;  // Multiplier to convert ratio to percentage
+pub const DEFAULT_CHUNK_SIZE_MB: usize = 256;
+pub const DEFAULT_BATCH_SIZE: usize = 10000;
+pub const DEFAULT_PARALLEL_THREADS: usize = NUMERIC_FOUR;
+pub const DEFAULT_BUFFER_SIZE_MB: usize = 512;
+pub const MIN_THREAD_COUNT: usize = NUMERIC_ONE;
+pub const MAX_THREAD_COUNT: usize = NUMERIC_THIRTY_TWO;
+pub const PERFORMANCE_SAMPLE_WINDOW_DIVISOR: usize = 1000;
+pub const PERCENTAGE_MULTIPLIER: f64 = PERCENT_100;
 
-// Record validation constants
-pub const MIN_DOMAIN_PART_LENGTH: usize = 2;  // Minimum length for each domain part
-pub const MIN_DOMAIN_PARTS: usize = 2;  // Minimum number of domain parts (e.g. example.com)
 
 // Record scoring constants
-pub const BASE_FIELD_SCORE: f64 = 1.0;  // Base score for each field
-pub const FIELD_LENGTH_WEIGHT: f64 = 0.1;  // Weight for field length in scoring
+pub const BASE_FIELD_SCORE: f64 = ONE_F64;
+pub const FIELD_LENGTH_WEIGHT: f64 = 0.1;
 
 // CUDA kernel configuration constants
 #[cfg(feature = "cuda")]
@@ -404,7 +398,95 @@ pub const ERROR_LOG_FLUSH_INTERVAL_SECS: u64 = 5;
 pub const MAX_RECOVERY_CHECKPOINTS: usize = 10;
 pub const MAX_ALLOCATION_HISTORY: usize = 1000;
 
-// Email validation constants
-pub const MIN_EMAIL_LENGTH: usize = 5;
+// ASCII constants
 pub const ASCII_CONTROL_LIMIT: u8 = 32;
 pub const ASCII_PRINTABLE_LIMIT: u8 = 126;
+
+// Additional numeric constants for CUDA modules
+pub const NUMERIC_ONE: usize = 1;
+pub const NUMERIC_TWO: usize = 2;
+pub const NUMERIC_THREE: usize = 3;
+pub const NUMERIC_FOUR: usize = 4;
+pub const NUMERIC_FIVE: usize = 5;
+pub const NUMERIC_EIGHT: usize = 8;
+pub const NUMERIC_TEN: usize = 10;
+pub const NUMERIC_SIXTEEN: usize = 16;
+pub const NUMERIC_THIRTY_TWO: usize = 32;
+pub const NUMERIC_SIXTY_FOUR: usize = 64;
+
+// Memory division factors
+pub const MEMORY_DIVISION_FACTOR_QUARTER: usize = 4;
+pub const MEMORY_DIVISION_FACTOR_HALF: usize = 2;
+
+// Threshold percentages for GPU utilization
+pub const GPU_MEMORY_USAGE_MIN_THRESHOLD: f64 = 5.0;
+pub const GPU_UTILIZATION_MAX_ESTIMATE: f64 = 85.0;
+
+
+// String processing constants
+pub const STRING_LENGTH_THRESHOLD: usize = NUMERIC_THIRTY_TWO;
+pub const MAX_CHARS_PER_THREAD: usize = 256;
+
+// Test memory values (bytes)
+pub const TEST_GPU_TOTAL_MEMORY_8GB: usize = 8000000000;
+pub const TEST_GPU_FREE_MEMORY_2GB: usize = 2000000000;
+
+// GPU hardware limits
+#[cfg(feature = "cuda")]
+pub const MAX_REGISTERS_PER_SM_TYPICAL: u32 = 65536;
+
+// Test values for CUDA device properties
+#[cfg(feature = "cuda")]
+pub const TEST_MAX_THREADS_PER_BLOCK: u32 = 1024;
+#[cfg(feature = "cuda")]
+pub const TEST_MAX_SHARED_MEMORY_PER_BLOCK: u32 = 49152;
+#[cfg(feature = "cuda")]
+pub const TEST_MAX_SHARED_MEMORY_PER_SM: u32 = 98304;
+#[cfg(feature = "cuda")]
+pub const TEST_MAX_BLOCKS_PER_SM: u32 = 16;
+#[cfg(feature = "cuda")]
+pub const TEST_MAX_THREADS_PER_SM: u32 = 2048;
+#[cfg(feature = "cuda")]
+pub const TEST_WARP_SIZE: u32 = 32;
+#[cfg(feature = "cuda")]
+pub const TEST_COMPUTE_CAPABILITY_MAJOR: u32 = 7;
+#[cfg(feature = "cuda")]
+pub const TEST_COMPUTE_CAPABILITY_MINOR: u32 = 5;
+#[cfg(feature = "cuda")]
+pub const TEST_MULTIPROCESSOR_COUNT: u32 = 20;
+#[cfg(feature = "cuda")]
+pub const TEST_MAX_REGISTERS_PER_BLOCK: u32 = 65536;
+
+// Test workload values
+#[cfg(feature = "cuda")]
+pub const TEST_WORKLOAD_NUM_ELEMENTS: u32 = 10000;
+#[cfg(feature = "cuda")]
+pub const TEST_WORKLOAD_ELEMENT_SIZE_BYTES: u32 = 64;
+#[cfg(feature = "cuda")]
+pub const TEST_WORKLOAD_AVG_STRING_LENGTH: u32 = 32;
+#[cfg(feature = "cuda")]
+pub const TEST_WORKLOAD_MAX_STRING_LENGTH: u32 = 255;
+
+// Additional decimal constants
+pub const DECIMAL_ZERO: f64 = ZERO_F64;
+pub const DECIMAL_ONE: f64 = ONE_F64;
+pub const DECIMAL_ONE_POINT_TWO: f64 = 1.2;
+pub const DECIMAL_ZERO_POINT_EIGHT: f64 = MULTIPLIER_80;
+pub const DECIMAL_ZERO_POINT_SIX: f64 = MULTIPLIER_60;
+
+// Memory sizes for testing (bytes)
+pub const TEST_MEMORY_8GB: usize = 8000000000;
+pub const TEST_MEMORY_2GB: usize = 2000000000;
+pub const TEST_MEMORY_6GB: usize = 6000000000;
+pub const TEST_MEMORY_4GB: usize = 4000000000;
+pub const TEST_MEMORY_500MB: usize = 500000000;
+
+// Memory sizes (MB)
+pub const MEMORY_64MB: usize = 64;
+pub const MEMORY_16MB: usize = 16;
+pub const MEMORY_256MB: usize = 256;
+
+// Array/collection index constants
+pub const INDEX_ZERO: usize = ZERO_USIZE;
+pub const INDEX_ONE: usize = NUMERIC_ONE;
+

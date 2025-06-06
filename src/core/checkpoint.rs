@@ -43,6 +43,12 @@ pub struct ProcessingState {
     pub temp_files_created: Vec<PathBuf>,
     /// Checksums of temp files for integrity verification
     pub temp_file_checksums: HashMap<PathBuf, String>,
+    /// List of temp files already processed during deduplication
+    pub temp_files_processed: Vec<PathBuf>,
+    /// Number of records in existing output file (for resumption)
+    pub output_records_count: usize,
+    /// Checksum of existing output file (for integrity verification)
+    pub output_file_checksum: Option<String>,
     /// Processing phase when checkpoint was created
     pub processing_phase: ProcessingPhase,
     /// Total records processed across all files
@@ -96,6 +102,9 @@ impl ProcessingState {
             current_file_total_lines: 0,
             temp_files_created: Vec::new(),
             temp_file_checksums: HashMap::new(),
+            temp_files_processed: Vec::new(),
+            output_records_count: 0,
+            output_file_checksum: None,
             processing_phase: ProcessingPhase::FileDiscovery,
             total_records_processed: 0,
             unique_records_count: 0,

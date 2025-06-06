@@ -2,6 +2,7 @@ pub mod record;
 pub mod batch_writer;
 pub mod buffer_pool;
 pub mod checkpoint;
+pub mod checkpoint_handler;
 pub mod deduplication;
 pub mod double_buffer;
 pub mod error_handler;

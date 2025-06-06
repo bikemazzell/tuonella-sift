@@ -1,17 +1,13 @@
 #[cfg(feature = "cuda")]
 use anyhow::Result;
 #[cfg(feature = "cuda")]
-use cudarc::driver::safe::{CudaContext, CudaFunction};
-#[cfg(feature = "cuda")]
-use cudarc::driver::{LaunchConfig, PushKernelArg};
-#[cfg(feature = "cuda")]
 use std::sync::Arc;
 #[cfg(feature = "cuda")]
 use std::time::Instant;
 #[cfg(feature = "cuda")]
 use parking_lot::Mutex;
 #[cfg(feature = "cuda")]
-use crate::cuda::processor::{CudaRecord, CudaDeviceProperties, CudaProcessor};
+use crate::cuda::processor::{CudaRecord, CudaProcessor};
 #[cfg(feature = "cuda")]
 use crate::config::model::CudaConfig;
 #[cfg(feature = "cuda")]
@@ -226,7 +222,7 @@ impl MultiStreamCudaProcessor {
         if !self.processors.is_empty() {
             self.processors[0].get_optimal_batch_size()
         } else {
-            1000 // Default fallback
+            DEFAULT_CUDA_BATCH_SIZE_FALLBACK // Default fallback
         }
     }
 

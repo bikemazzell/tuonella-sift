@@ -9,9 +9,7 @@ use std::time::{Instant, Duration};
 #[cfg(feature = "cuda")]
 use parking_lot::Mutex;
 #[cfg(feature = "cuda")]
-use crate::cuda::processor::CudaDeviceProperties;
-#[cfg(feature = "cuda")]
-use crate::constants::MEMORY_PRESSURE_THRESHOLD_PERCENT;
+use crate::constants::*;
 
 #[cfg(feature = "cuda")]
 #[derive(Debug, Clone)]
@@ -28,7 +26,7 @@ pub struct MemoryUsageSnapshot {
 impl MemoryUsageSnapshot {
     pub fn new(total_memory: usize, free_memory: usize) -> Self {
         let used_memory = total_memory - free_memory;
-        let usage_percentage = (used_memory as f64 / total_memory as f64) * 100.0;
+        let usage_percentage = (used_memory as f64 / total_memory as f64) * PERCENT_100;
         
         Self {
             total_memory,
@@ -56,7 +54,7 @@ impl MemoryPressurePredictor {
         Self {
             historical_snapshots: Vec::with_capacity(max_history_size),
             max_history_size,
-            memory_growth_rate: 0.0,
+            memory_growth_rate: ZERO_F64,
             prediction_window,
         }
     }
@@ -66,7 +64,7 @@ impl MemoryPressurePredictor {
         
         // Keep only recent history
         if self.historical_snapshots.len() > self.max_history_size {
-            self.historical_snapshots.remove(0);
+            self.historical_snapshots.remove(INDEX_ZERO);
         }
         
         // Recalculate growth rate
@@ -74,32 +72,32 @@ impl MemoryPressurePredictor {
     }
 
     fn calculate_memory_growth_rate(&mut self) {
-        if self.historical_snapshots.len() < 2 {
-            self.memory_growth_rate = 0.0;
+        if self.historical_snapshots.len() < NUMERIC_TWO {
+            self.memory_growth_rate = ZERO_F64;
             return;
         }
 
-        let recent_count = self.historical_snapshots.len().min(10); // Use last 10 snapshots
+        let recent_count = self.historical_snapshots.len().min(NUMERIC_TEN); // Use last 10 snapshots
         let recent_snapshots = &self.historical_snapshots[self.historical_snapshots.len() - recent_count..];
         
-        if recent_snapshots.len() < 2 {
+        if recent_snapshots.len() < NUMERIC_TWO {
             return;
         }
 
-        let first = &recent_snapshots[0];
+        let first = &recent_snapshots[INDEX_ZERO];
         let last = &recent_snapshots[recent_snapshots.len() - 1];
         
         let time_diff = last.timestamp.duration_since(first.timestamp).as_secs_f64();
-        if time_diff > 0.0 {
+        if time_diff > ZERO_F64 {
             let memory_diff = last.used_memory as f64 - first.used_memory as f64;
-            self.memory_growth_rate = (memory_diff / (1024.0 * 1024.0)) / time_diff; // MB per second
+            self.memory_growth_rate = (memory_diff / MB_AS_F64) / time_diff; // MB per second
         }
     }
 
     pub fn predict_memory_pressure(&self, current_usage: f64) -> MemoryPressurePrediction {
         let prediction_secs = self.prediction_window.as_secs_f64();
         let predicted_growth_mb = self.memory_growth_rate * prediction_secs;
-        let predicted_growth_bytes = predicted_growth_mb * 1024.0 * 1024.0;
+        let predicted_growth_bytes = predicted_growth_mb * MB_AS_F64;
         
         let current_snapshot = self.historical_snapshots.last();
         let predicted_usage_bytes = if let Some(snapshot) = current_snapshot {
@@ -108,11 +106,11 @@ impl MemoryPressurePredictor {
             predicted_growth_bytes
         };
 
-        let total_memory = current_snapshot.map(|s| s.total_memory).unwrap_or(0) as f64;
-        let predicted_usage_percentage = if total_memory > 0.0 {
-            (predicted_usage_bytes / total_memory) * 100.0
+        let total_memory = current_snapshot.map(|s| s.total_memory).unwrap_or(ZERO_USIZE) as f64;
+        let predicted_usage_percentage = if total_memory > ZERO_F64 {
+            (predicted_usage_bytes / total_memory) * PERCENT_100
         } else {
-            0.0
+            ZERO_F64
         };
 
         MemoryPressurePrediction {
@@ -125,23 +123,23 @@ impl MemoryPressurePredictor {
     }
 
     fn calculate_time_to_pressure(&self) -> Option<Duration> {
-        if self.memory_growth_rate <= 0.0 {
+        if self.memory_growth_rate <= ZERO_F64 {
             return None; // No growth or shrinking
         }
 
         let current_snapshot = self.historical_snapshots.last()?;
-        let available_mb = current_snapshot.free_memory as f64 / (1024.0 * 1024.0);
-        let pressure_threshold_mb = (current_snapshot.total_memory as f64 * (MEMORY_PRESSURE_THRESHOLD_PERCENT as f64 / 100.0)) / (1024.0 * 1024.0);
-        let current_usage_mb = current_snapshot.used_memory as f64 / (1024.0 * 1024.0);
+        let _available_mb = current_snapshot.free_memory as f64 / MB_AS_F64;
+        let pressure_threshold_mb = (current_snapshot.total_memory as f64 * (MEMORY_PRESSURE_THRESHOLD_PERCENT as f64 / PERCENT_100)) / MB_AS_F64;
+        let current_usage_mb = current_snapshot.used_memory as f64 / MB_AS_F64;
         
         if current_usage_mb >= pressure_threshold_mb {
-            return Some(Duration::from_secs(0)); // Already at pressure
+            return Some(Duration::from_secs(ZERO_DURATION_SECS)); // Already at pressure
         }
 
         let mb_until_pressure = pressure_threshold_mb - current_usage_mb;
         let seconds_until_pressure = mb_until_pressure / self.memory_growth_rate;
         
-        if seconds_until_pressure > 0.0 {
+        if seconds_until_pressure > ZERO_F64 {
             Some(Duration::from_secs_f64(seconds_until_pressure))
         } else {
             None
@@ -150,9 +148,9 @@ impl MemoryPressurePredictor {
 
     fn get_recommendation(&self, predicted_usage: f64) -> MemoryManagementRecommendation {
         match predicted_usage {
-            p if p < 70.0 => MemoryManagementRecommendation::Increase,
-            p if p < 85.0 => MemoryManagementRecommendation::Maintain,
-            p if p < 95.0 => MemoryManagementRecommendation::Reduce,
+            p if p < MEMORY_USAGE_INCREASE_THRESHOLD => MemoryManagementRecommendation::Increase,
+            p if p < MEMORY_USAGE_MAINTAIN_THRESHOLD => MemoryManagementRecommendation::Maintain,
+            p if p < MEMORY_USAGE_REDUCE_THRESHOLD => MemoryManagementRecommendation::Reduce,
             _ => MemoryManagementRecommendation::Emergency,
         }
     }
@@ -180,7 +178,6 @@ pub enum MemoryManagementRecommendation {
 #[cfg(feature = "cuda")]
 #[derive(Debug)]
 pub struct AdaptiveMemoryManager {
-    context: Arc<CudaContext>,
     predictor: Arc<Mutex<MemoryPressurePredictor>>,
     current_pool_size: Arc<Mutex<usize>>,
     min_pool_size: usize,
@@ -194,34 +191,33 @@ pub struct AdaptiveMemoryManager {
 #[cfg(feature = "cuda")]
 impl AdaptiveMemoryManager {
     pub fn new(
-        context: Arc<CudaContext>, 
+        _context: Arc<CudaContext>, 
         base_pool_size: usize,
         min_pool_size: usize,
         max_pool_size: usize
     ) -> Result<Self> {
-        let predictor = MemoryPressurePredictor::new(50, Duration::from_secs(30));
+        let predictor = MemoryPressurePredictor::new(MEMORY_HISTORY_MAX_SIZE, Duration::from_secs(MEMORY_PREDICTION_WINDOW_SECS));
         
         println!("Adaptive memory manager initialized: base={} MB, range={}-{} MB", 
-                 base_pool_size / (1024 * 1024), 
-                 min_pool_size / (1024 * 1024), 
-                 max_pool_size / (1024 * 1024));
+                 base_pool_size / BYTES_PER_MB, 
+                 min_pool_size / BYTES_PER_MB, 
+                 max_pool_size / BYTES_PER_MB);
         
         Ok(Self {
-            context,
             predictor: Arc::new(Mutex::new(predictor)),
             current_pool_size: Arc::new(Mutex::new(base_pool_size)),
             min_pool_size,
             max_pool_size,
             base_pool_size,
             last_adjustment: Arc::new(Mutex::new(Instant::now())),
-            adjustment_cooldown: Duration::from_secs(10), // Don't adjust more than once per 10 seconds
+            adjustment_cooldown: Duration::from_secs(MEMORY_ADJUSTMENT_COOLDOWN_SECS), // Don't adjust more than once per 10 seconds
             monitoring_enabled: true,
         })
     }
 
     pub fn update_memory_usage(&self) -> Result<MemoryUsageSnapshot> {
         if !self.monitoring_enabled {
-            return Ok(MemoryUsageSnapshot::new(0, 0));
+            return Ok(MemoryUsageSnapshot::new(ZERO_USIZE, ZERO_USIZE));
         }
 
         // Get current GPU memory info
@@ -296,10 +292,10 @@ impl AdaptiveMemoryManager {
 
     fn calculate_new_pool_size(&self, current_size: usize, prediction: &MemoryPressurePrediction) -> Result<usize> {
         let adjustment_factor = match prediction.recommendation {
-            MemoryManagementRecommendation::Increase => 1.2, // Increase by 20%
-            MemoryManagementRecommendation::Maintain => 1.0, // No change
-            MemoryManagementRecommendation::Reduce => 0.8,   // Reduce by 20%
-            MemoryManagementRecommendation::Emergency => 0.6, // Reduce by 40%
+            MemoryManagementRecommendation::Increase => MEMORY_INCREASE_FACTOR, // Increase by 20%
+            MemoryManagementRecommendation::Maintain => DECIMAL_ONE, // No change
+            MemoryManagementRecommendation::Reduce => MEMORY_REDUCE_FACTOR,   // Reduce by 20%
+            MemoryManagementRecommendation::Emergency => MEMORY_EMERGENCY_FACTOR, // Reduce by 40%
         };
 
         let new_size = (current_size as f64 * adjustment_factor) as usize;
@@ -381,11 +377,11 @@ impl AdaptiveMemoryStats {
              🔮 Predicted Usage: {:.1}%\n\
              📡 Monitoring: {}",
             self.current_snapshot.usage_percentage,
-            self.current_snapshot.used_memory as f64 / (1024.0 * 1024.0 * 1024.0),
-            self.current_snapshot.total_memory as f64 / (1024.0 * 1024.0 * 1024.0),
-            self.current_pool_size as f64 / (1024.0 * 1024.0),
-            self.min_pool_size as f64 / (1024.0 * 1024.0),
-            self.max_pool_size as f64 / (1024.0 * 1024.0),
+            self.current_snapshot.used_memory as f64 / GB_AS_F64,
+            self.current_snapshot.total_memory as f64 / GB_AS_F64,
+            self.current_pool_size as f64 / MB_AS_F64,
+            self.min_pool_size as f64 / MB_AS_F64,
+            self.max_pool_size as f64 / MB_AS_F64,
             self.prediction.growth_rate_mb_per_sec,
             time_to_pressure,
             self.prediction.recommendation,
@@ -413,12 +409,12 @@ mod tests {
     #[test]
     #[cfg(feature = "cuda")]
     fn test_memory_usage_snapshot() {
-        let snapshot = MemoryUsageSnapshot::new(8000000000, 2000000000); // 8GB total, 2GB free
+        let snapshot = MemoryUsageSnapshot::new(TEST_MEMORY_8GB, TEST_MEMORY_2GB); // 8GB total, 2GB free
         
-        assert_eq!(snapshot.total_memory, 8000000000);
-        assert_eq!(snapshot.free_memory, 2000000000);
-        assert_eq!(snapshot.used_memory, 6000000000);
-        assert_eq!(snapshot.usage_percentage, 75.0);
+        assert_eq!(snapshot.total_memory, TEST_MEMORY_8GB);
+        assert_eq!(snapshot.free_memory, TEST_MEMORY_2GB);
+        assert_eq!(snapshot.used_memory, TEST_MEMORY_6GB);
+        assert_eq!(snapshot.usage_percentage, PERCENT_75);
     }
 
     #[test]
@@ -429,21 +425,21 @@ mod tests {
         // Add some snapshots with increasing memory usage
         let base_time = Instant::now();
         for i in 0..5 {
-            let used_memory = 4000000000 + (i * 500000000); // Increasing usage
+            let used_memory = TEST_MEMORY_4GB + (i * TEST_MEMORY_500MB); // Increasing usage
             let snapshot = MemoryUsageSnapshot {
-                total_memory: 8000000000,
-                free_memory: 8000000000 - used_memory,
+                total_memory: TEST_MEMORY_8GB,
+                free_memory: TEST_MEMORY_8GB - used_memory,
                 used_memory,
-                usage_percentage: (used_memory as f64 / 8000000000.0) * 100.0,
+                usage_percentage: (used_memory as f64 / TEST_MEMORY_8GB as f64) * PERCENT_100,
                 timestamp: base_time + Duration::from_secs(i as u64 * 10),
                 other_processes_memory: 0,
             };
             predictor.add_snapshot(snapshot);
         }
         
-        let prediction = predictor.predict_memory_pressure(75.0);
+        let prediction = predictor.predict_memory_pressure(PERCENT_75);
         assert!(prediction.growth_rate_mb_per_sec > 0.0);
-        assert!(prediction.predicted_usage_percentage > 75.0);
+        assert!(prediction.predicted_usage_percentage > PERCENT_75);
     }
 
     #[test]
@@ -451,10 +447,10 @@ mod tests {
     fn test_memory_management_recommendations() {
         let predictor = MemoryPressurePredictor::new(10, Duration::from_secs(30));
         
-        assert_eq!(predictor.get_recommendation(60.0), MemoryManagementRecommendation::Increase);
-        assert_eq!(predictor.get_recommendation(80.0), MemoryManagementRecommendation::Maintain);
-        assert_eq!(predictor.get_recommendation(90.0), MemoryManagementRecommendation::Reduce);
-        assert_eq!(predictor.get_recommendation(98.0), MemoryManagementRecommendation::Emergency);
+        assert_eq!(predictor.get_recommendation(PERCENT_60), MemoryManagementRecommendation::Increase);
+        assert_eq!(predictor.get_recommendation(PERCENT_80), MemoryManagementRecommendation::Maintain);
+        assert_eq!(predictor.get_recommendation(PERCENT_90), MemoryManagementRecommendation::Reduce);
+        assert_eq!(predictor.get_recommendation(PERCENT_98), MemoryManagementRecommendation::Emergency);
     }
 
     #[test]
@@ -467,9 +463,9 @@ mod tests {
 
         match cudarc::driver::safe::CudaContext::new(0) {
             Ok(context) => {
-                let base_size = 64 * 1024 * 1024; // 64MB
-                let min_size = 16 * 1024 * 1024;  // 16MB
-                let max_size = 256 * 1024 * 1024; // 256MB
+                let base_size = MEMORY_64MB * BYTES_PER_MB; // 64MB
+                let min_size = MEMORY_16MB * BYTES_PER_MB;  // 16MB
+                let max_size = MEMORY_256MB * BYTES_PER_MB; // 256MB
                 
                 match AdaptiveMemoryManager::new(context, base_size, min_size, max_size) {
                     Ok(manager) => {

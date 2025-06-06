@@ -5,7 +5,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use tuonella_sift::config::Config;
-use tuonella_sift::core::checkpoint::{CheckpointManager, ProcessingState};
+use tuonella_sift::core::checkpoint::{CheckpointManager, ProcessingState, ProcessingPhase};
+use tuonella_sift::core::checkpoint_handler::CheckpointHandler;
 use tuonella_sift::core::deduplication::ProcessingStats;
 // Note: Using fully qualified paths for shutdown-aware functions
 use tuonella_sift::utils::system::format_duration;
@@ -80,8 +81,17 @@ async fn resume_processing_from_checkpoint(
         tuonella_sift::core::checkpoint::ProcessingPhase::Deduplication => {
             println!("🔗 Resuming from deduplication phase with {} existing temp files", state.temp_files_created.len());
             
-            // Skip file processing and go straight to deduplication
-            let stats = tuonella_sift::core::deduplication::deduplicate_records_with_shutdown(
+            // Create checkpoint handler for resume
+            let resume_checkpoint_handler = Arc::new(CheckpointHandler::new(
+                Path::new(&config.io.temp_directory),
+                config.io.checkpoint_auto_save_interval_seconds,
+                state.clone(),
+                Some(shutdown_flag.clone()),
+                verbose,
+            ));
+            
+            // Skip file processing and go straight to deduplication with resumption support
+            let stats = tuonella_sift::core::deduplication::deduplicate_records_with_resumption(
                 &state.temp_files_created,
                 output_path,
                 config,
@@ -89,6 +99,7 @@ async fn resume_processing_from_checkpoint(
                 cuda_processor,
                 verbose,
                 Some(shutdown_flag.clone()),
+                Some(resume_checkpoint_handler),
             )?;
             
             print_completion_stats(stats, start_time, &state, output_path);
@@ -107,8 +118,17 @@ async fn resume_processing_from_checkpoint(
         updated_state.update_phase(tuonella_sift::core::checkpoint::ProcessingPhase::Deduplication);
         let _ = checkpoint_manager.save_checkpoint(&updated_state);
         
-        // Proceed to deduplication
-        let stats = tuonella_sift::core::deduplication::deduplicate_records_with_shutdown(
+        // Create checkpoint handler for deduplication
+        let dedup_checkpoint_handler = Arc::new(CheckpointHandler::new(
+            Path::new(&config.io.temp_directory),
+            config.io.checkpoint_auto_save_interval_seconds,
+            updated_state.clone(),
+            Some(shutdown_flag.clone()),
+            verbose,
+        ));
+        
+        // Proceed to deduplication with resumption support
+        let stats = tuonella_sift::core::deduplication::deduplicate_records_with_resumption(
             &state.temp_files_created,
             output_path,
             config,
@@ -116,6 +136,7 @@ async fn resume_processing_from_checkpoint(
             cuda_processor,
             verbose,
             Some(shutdown_flag.clone()),
+            Some(dedup_checkpoint_handler),
         )?;
         
         print_completion_stats(stats, start_time, &state, output_path);
@@ -328,6 +349,9 @@ async fn main() -> Result<()> {
         }
         None
     };
+    
+    #[cfg(not(feature = "cuda"))]
+    let _cuda_processor: Option<()> = None;
 
     if args.resume {
         if checkpoint_manager.checkpoint_exists() {
@@ -385,11 +409,37 @@ async fn main() -> Result<()> {
         println!("\n🔎 Examining data...");
     }
 
-    let temp_files = tuonella_sift::core::deduplication::process_csv_files_with_validation_and_shutdown(
+    // Create initial processing state
+    let _csv_files = tuonella_sift::core::validation::discover_csv_files(&args.input)?;
+    #[cfg(feature = "cuda")]
+    let cuda_enabled = cuda_processor.is_some();
+    #[cfg(not(feature = "cuda"))]
+    let cuda_enabled = false;
+    
+    let processing_state = ProcessingState::new(
+        args.input.clone(),
+        output_path.clone(),
+        args.config.clone(),
+        cuda_enabled,
+        args.verbose,
+        config.memory.memory_usage_percent,
+    );
+
+    // Create checkpoint handler
+    let checkpoint_handler = Arc::new(CheckpointHandler::new(
+        Path::new(&config.io.temp_directory),
+        config.io.checkpoint_auto_save_interval_seconds,
+        processing_state,
+        Some(shutdown_flag.clone()),
+        args.verbose,
+    ));
+
+    let temp_files = tuonella_sift::core::deduplication::process_csv_files_with_checkpoint(
         &args.input,
         &config,
         args.verbose,
         Some(shutdown_flag.clone()),
+        Some(checkpoint_handler.clone()),
     )?;
 
     if temp_files.is_empty() {
@@ -399,8 +449,16 @@ async fn main() -> Result<()> {
 
     println!("📊 Found and processed {} CSV files. Let the judgment begin!", temp_files.len());
 
+    // Update checkpoint phase to Deduplication before starting phase 2
+    checkpoint_handler.set_phase(ProcessingPhase::Deduplication)?;
+    checkpoint_handler.force_save_checkpoint()?;
+    
+    if args.verbose {
+        println!("💾 Checkpoint updated - entering deduplication phase");
+    }
+
     println!("\n⚔️ Commencing the great deduplication cull...");
-    let stats = tuonella_sift::core::deduplication::deduplicate_records_with_shutdown(
+    let stats = tuonella_sift::core::deduplication::deduplicate_records_with_resumption(
         &temp_files,
         &output_path,
         &config,
@@ -408,47 +466,20 @@ async fn main() -> Result<()> {
         cuda_processor.as_ref(),
         args.verbose,
         Some(shutdown_flag.clone()),
+        Some(checkpoint_handler.clone()),
     )?;
 
     // Check if we were interrupted
     if shutdown_flag.load(Ordering::Relaxed) {
-        println!("💾 Saving checkpoint before shutdown...");
-
-        // Create processing state for checkpoint
-        let mut processing_state = ProcessingState::new(
-            args.input.clone(),
-            output_path.clone(),
-            args.config.clone(),
-            #[cfg(feature = "cuda")]
-            cuda_processor.is_some(),
-            #[cfg(not(feature = "cuda"))]
-            false,
-            args.verbose,
-            config.memory.memory_usage_percent,
-        );
-
-        // Update state with current progress
-        let csv_files = tuonella_sift::core::validation::discover_csv_files(&args.input)?;
-        processing_state.discovered_files = csv_files;
-        processing_state.temp_files_created = temp_files.clone();
-        processing_state.update_stats(stats.total_records, stats.unique_records, stats.duplicates_removed, stats.invalid_records);
-
-        // Save checkpoint
-        let mut checkpoint_manager_for_save = CheckpointManager::new(
-            Path::new(&config.io.temp_directory),
-            config.io.checkpoint_auto_save_interval_seconds,
-        );
-
-        if let Err(e) = checkpoint_manager_for_save.save_checkpoint(&processing_state) {
-            eprintln!("⚠️ Failed to save checkpoint: {}", e);
-        } else {
-            println!("✅ Checkpoint saved to: {}", checkpoint_manager_for_save.get_checkpoint_path().display());
-        }
-
+        // The checkpoint has already been saved by the checkpoint handler during processing
         println!("🔄 You can resume with: ./tuonella-sift --input {} --output {} --config {} --resume",
                  args.input.display(), output_path.display(), args.config.display());
         return Ok(());
     }
+
+    // Update checkpoint handler with deduplication stats
+    checkpoint_handler.update_stats(stats.total_records, stats.unique_records, stats.duplicates_removed, stats.invalid_records)?;
+    checkpoint_handler.set_phase(ProcessingPhase::Completed)?;
 
     if args.verbose {
         println!("🧹 Sweeping away temporary files...");

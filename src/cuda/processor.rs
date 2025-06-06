@@ -233,8 +233,8 @@ impl CudaProcessor {
 
         let props = Self::get_device_properties_internal(&context)?;
 
-        if config.gpu_memory_usage_percent > 100 {
-            return Err(anyhow::anyhow!("Invalid GPU memory usage percent: {}. Must be <= 100.", config.gpu_memory_usage_percent));
+        if config.gpu_memory_usage_percent as f64 > PERCENT_100 {
+            return Err(anyhow::anyhow!("Invalid GPU memory usage percent: {}. Must be <= {}.", config.gpu_memory_usage_percent, PERCENT_100));
         }
 
         println!("CUDA device properties detected:");
@@ -543,7 +543,7 @@ impl CudaProcessor {
             .map_err(|e| anyhow::anyhow!("Failed to get GPU memory info: {}", e))?;
 
         let used_memory = total_memory - free_memory;
-        let usage_percent = (used_memory as f64 / total_memory as f64) * 100.0;
+        let usage_percent = (used_memory as f64 / total_memory as f64) * PERCENT_100;
 
         Ok(usage_percent > crate::constants::MEMORY_PRESSURE_THRESHOLD_PERCENT)
     }
@@ -569,7 +569,7 @@ impl CudaProcessor {
                     let used_mb = parts[1].trim().parse::<f64>().unwrap_or(0.0);
                     let total_mb = parts[2].trim().parse::<f64>().unwrap_or(1.0);
 
-                    let memory_usage_percent = (used_mb / total_mb) * 100.0;
+                    let memory_usage_percent = (used_mb / total_mb) * PERCENT_100;
 
                     // If nvidia-smi reports 0% GPU utilization but significant memory is being used,
                     // it likely means the GPU kernels are very fast and finish between polls.
@@ -593,7 +593,7 @@ impl CudaProcessor {
             .map_err(|e| anyhow::anyhow!("Failed to get GPU memory info: {}", e))?;
 
         let used_memory = total_memory - free_memory;
-        let memory_usage_percent = (used_memory as f64 / total_memory as f64) * 100.0;
+        let memory_usage_percent = (used_memory as f64 / total_memory as f64) * PERCENT_100;
 
         // Estimate GPU utilization based on memory usage
         // This is a rough approximation - actual utilization may be different

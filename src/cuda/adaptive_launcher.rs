@@ -1,15 +1,17 @@
 #[cfg(feature = "cuda")]
 use anyhow::Result;
 #[cfg(feature = "cuda")]
-use cudarc::driver::safe::{CudaContext, CudaDevice, CudaFunction};
+use cudarc::driver::safe::{CudaContext, CudaFunction};
 #[cfg(feature = "cuda")]
-use cudarc::driver::{LaunchConfig, DeviceAttribute};
+use cudarc::driver::sys::CUdevice_attribute_enum;
+#[cfg(feature = "cuda")]
+use cudarc::driver::LaunchConfig;
 #[cfg(feature = "cuda")]
 use std::sync::Arc;
 #[cfg(feature = "cuda")]
 use std::collections::HashMap;
 #[cfg(feature = "cuda")]
-use crate::constants::{CUDA_WARP_SIZE, CUDA_MAX_THREADS_PER_BLOCK};
+use crate::constants::*;
 
 #[cfg(feature = "cuda")]
 #[derive(Debug, Clone)]
@@ -68,8 +70,8 @@ pub struct OptimalLaunchConfig {
 #[cfg(feature = "cuda")]
 pub struct AdaptiveKernelLauncher {
     device_properties: DeviceProperties,
+    #[allow(dead_code)]
     context: Arc<CudaContext>,
-    device: Arc<CudaDevice>,
     kernel_cache: HashMap<String, KernelMetrics>,
     performance_history: Vec<PerformanceRecord>,
 }
@@ -78,49 +80,41 @@ pub struct AdaptiveKernelLauncher {
 #[derive(Debug, Clone)]
 struct KernelMetrics {
     register_usage: u32,
-    shared_memory_usage: u32,
-    local_memory_usage: u32,
-    theoretical_occupancy: f32,
     measured_performance: Option<f32>,
 }
 
 #[cfg(feature = "cuda")]
 #[derive(Debug, Clone)]
 struct PerformanceRecord {
-    kernel_name: String,
     launch_config: LaunchConfig,
-    workload_size: u32,
-    execution_time_ms: f32,
     throughput_elements_per_sec: f32,
-    timestamp: std::time::Instant,
 }
 
 #[cfg(feature = "cuda")]
 impl AdaptiveKernelLauncher {
-    pub fn new(context: Arc<CudaContext>, device: Arc<CudaDevice>) -> Result<Self> {
-        let device_properties = Self::query_device_properties(&device)?;
+    pub fn new(context: Arc<CudaContext>) -> Result<Self> {
+        let device_properties = Self::query_device_properties(&context)?;
         
         Ok(Self {
             device_properties,
             context,
-            device,
             kernel_cache: HashMap::new(),
             performance_history: Vec::new(),
         })
     }
     
-    fn query_device_properties(device: &CudaDevice) -> Result<DeviceProperties> {
+    fn query_device_properties(context: &Arc<CudaContext>) -> Result<DeviceProperties> {
         Ok(DeviceProperties {
-            max_threads_per_block: device.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32,
-            max_shared_memory_per_block: device.get_attribute(DeviceAttribute::MaxSharedMemoryPerBlock)? as u32,
-            max_shared_memory_per_sm: device.get_attribute(DeviceAttribute::MaxSharedMemoryPerMultiprocessor)? as u32,
-            max_blocks_per_sm: device.get_attribute(DeviceAttribute::MaxBlocksPerMultiprocessor)? as u32,
-            max_threads_per_sm: device.get_attribute(DeviceAttribute::MaxThreadsPerMultiprocessor)? as u32,
-            warp_size: device.get_attribute(DeviceAttribute::WarpSize)? as u32,
-            compute_capability_major: device.get_attribute(DeviceAttribute::ComputeCapabilityMajor)? as u32,
-            compute_capability_minor: device.get_attribute(DeviceAttribute::ComputeCapabilityMinor)? as u32,
-            multiprocessor_count: device.get_attribute(DeviceAttribute::MultiprocessorCount)? as u32,
-            max_registers_per_block: device.get_attribute(DeviceAttribute::MaxRegistersPerBlock)? as u32,
+            max_threads_per_block: context.attribute(CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK)? as u32,
+            max_shared_memory_per_block: context.attribute(CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK)? as u32,
+            max_shared_memory_per_sm: context.attribute(CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_MULTIPROCESSOR)? as u32,
+            max_blocks_per_sm: context.attribute(CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_MAX_BLOCKS_PER_MULTIPROCESSOR)? as u32,
+            max_threads_per_sm: context.attribute(CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_MULTIPROCESSOR)? as u32,
+            warp_size: context.attribute(CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_WARP_SIZE)? as u32,
+            compute_capability_major: context.attribute(CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)? as u32,
+            compute_capability_minor: context.attribute(CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)? as u32,
+            multiprocessor_count: context.attribute(CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)? as u32,
+            max_registers_per_block: context.attribute(CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_MAX_REGISTERS_PER_BLOCK)? as u32,
         })
     }
     
@@ -265,7 +259,7 @@ impl AdaptiveKernelLauncher {
         let max_threads_per_sm = self.device_properties.max_threads_per_sm;
         let max_blocks_per_sm = self.device_properties.max_blocks_per_sm;
         let max_shared_mem_per_sm = self.device_properties.max_shared_memory_per_sm;
-        let max_registers_per_sm = 65536u32; // Typical for modern GPUs
+        let max_registers_per_sm = MAX_REGISTERS_PER_SM_TYPICAL; // Typical for modern GPUs
         
         // Calculate limiting factors
         let blocks_limited_by_threads = max_threads_per_sm / block_size;
@@ -295,7 +289,7 @@ impl AdaptiveKernelLauncher {
     
     fn estimate_performance(
         &self,
-        kernel_metrics: &KernelMetrics,
+        _kernel_metrics: &KernelMetrics,
         block_size: u32,
         grid_size: u32,
         occupancy: f32,
@@ -363,30 +357,18 @@ impl AdaptiveKernelLauncher {
         let metrics = match kernel_name {
             name if name.contains("normalize") => KernelMetrics {
                 register_usage: 24,
-                shared_memory_usage: 16384, // 16KB for vectorized processing
-                local_memory_usage: 0,
-                theoretical_occupancy: 0.75,
                 measured_performance: None,
             },
             name if name.contains("validate") => KernelMetrics {
                 register_usage: 20,
-                shared_memory_usage: 8192, // 8KB for validation buffers
-                local_memory_usage: 0,
-                theoretical_occupancy: 0.80,
                 measured_performance: None,
             },
             name if name.contains("hash") => KernelMetrics {
                 register_usage: 16,
-                shared_memory_usage: 0, // No shared memory needed
-                local_memory_usage: 0,
-                theoretical_occupancy: 0.85,
                 measured_performance: None,
             },
             _ => KernelMetrics {
                 register_usage: 32, // Conservative estimate
-                shared_memory_usage: 4096,
-                local_memory_usage: 0,
-                theoretical_occupancy: 0.60,
                 measured_performance: None,
             },
         };
@@ -405,12 +387,8 @@ impl AdaptiveKernelLauncher {
         let throughput = workload_size as f32 / (execution_time_ms / 1000.0);
         
         let record = PerformanceRecord {
-            kernel_name: kernel_name.clone(),
             launch_config: config,
-            workload_size,
-            execution_time_ms,
             throughput_elements_per_sec: throughput,
-            timestamp: std::time::Instant::now(),
         };
         
         self.performance_history.push(record);
@@ -476,21 +454,21 @@ mod tests {
     #[test]
     fn test_device_properties() {
         let props = DeviceProperties {
-            max_threads_per_block: 1024,
-            max_shared_memory_per_block: 49152,
-            max_shared_memory_per_sm: 98304,
-            max_blocks_per_sm: 16,
-            max_threads_per_sm: 2048,
-            warp_size: 32,
-            compute_capability_major: 7,
-            compute_capability_minor: 5,
-            multiprocessor_count: 20,
-            max_registers_per_block: 65536,
+            max_threads_per_block: TEST_MAX_THREADS_PER_BLOCK,
+            max_shared_memory_per_block: TEST_MAX_SHARED_MEMORY_PER_BLOCK,
+            max_shared_memory_per_sm: TEST_MAX_SHARED_MEMORY_PER_SM,
+            max_blocks_per_sm: TEST_MAX_BLOCKS_PER_SM,
+            max_threads_per_sm: TEST_MAX_THREADS_PER_SM,
+            warp_size: TEST_WARP_SIZE,
+            compute_capability_major: TEST_COMPUTE_CAPABILITY_MAJOR,
+            compute_capability_minor: TEST_COMPUTE_CAPABILITY_MINOR,
+            multiprocessor_count: TEST_MULTIPROCESSOR_COUNT,
+            max_registers_per_block: TEST_MAX_REGISTERS_PER_BLOCK,
         };
         
-        assert_eq!(props.max_threads_per_block, 1024);
-        assert_eq!(props.warp_size, 32);
-        assert_eq!(props.compute_capability_major, 7);
+        assert_eq!(props.max_threads_per_block, TEST_MAX_THREADS_PER_BLOCK);
+        assert_eq!(props.warp_size, TEST_WARP_SIZE);
+        assert_eq!(props.compute_capability_major, TEST_COMPUTE_CAPABILITY_MAJOR);
     }
     
     #[cfg(feature = "cuda")]

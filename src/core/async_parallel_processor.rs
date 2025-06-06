@@ -388,7 +388,7 @@ mod tests {
         file.write_all(b"user,password,url\ntest@example.com,pass123,https://example.com\n").await?;
         file.sync_all().await?;
         
-        let mut processor = AsyncParallelProcessor::with_max_concurrent_tasks(2);
+        let processor = AsyncParallelProcessor::with_max_concurrent_tasks(2);
         let work_items = processor.create_work_items_for_files(&[file_path]).await?;
         
         assert!(!work_items.is_empty());

@@ -27,8 +27,8 @@ impl BufferSize {
     pub fn from_size(size: usize) -> Self {
         match size {
             0..=PINNED_BUFFER_SMALL_BYTES => BufferSize::Small,
-            PINNED_BUFFER_SMALL_BYTES..=PINNED_BUFFER_MEDIUM_BYTES => BufferSize::Medium,
-            PINNED_BUFFER_MEDIUM_BYTES..=PINNED_BUFFER_LARGE_BYTES => BufferSize::Large,
+            s if s <= PINNED_BUFFER_MEDIUM_BYTES => BufferSize::Medium,
+            s if s <= PINNED_BUFFER_LARGE_BYTES => BufferSize::Large,
             _ => BufferSize::XLarge,
         }
     }
@@ -93,9 +93,9 @@ impl PinnedMemoryPool {
             available_buffers: Vec::with_capacity(max_pool_size),
             max_pool_size,
             buffer_size,
-            total_allocated: 0,
-            allocation_count: 0,
-            deallocation_count: 0,
+            total_allocated: ZERO_USIZE,
+            allocation_count: ZERO_USIZE,
+            deallocation_count: ZERO_USIZE,
         }
     }
 
@@ -103,7 +103,7 @@ impl PinnedMemoryPool {
         // Try to reuse an existing buffer
         if let Some(mut buffer) = self.available_buffers.pop() {
             buffer.last_used = Instant::now();
-            buffer.use_count += 1;
+            buffer.use_count += NUMERIC_ONE;
             return Ok(buffer);
         }
 
@@ -114,10 +114,10 @@ impl PinnedMemoryPool {
     pub fn return_buffer(&mut self, buffer: PinnedBuffer) {
         // Only return buffers that match our size category and aren't too old
         if buffer.buffer_size_category == self.buffer_size 
-           && buffer.allocated_at.elapsed().as_secs() < 3600 // Don't keep buffers older than 1 hour
+           && buffer.allocated_at.elapsed().as_secs() < ONE_HOUR_SECONDS // Don't keep buffers older than 1 hour
            && self.available_buffers.len() < self.max_pool_size {
             self.available_buffers.push(buffer);
-            self.deallocation_count += 1;
+            self.deallocation_count += NUMERIC_ONE;
         }
         // Otherwise, buffer will be dropped and memory freed
     }
@@ -140,7 +140,7 @@ impl PinnedMemoryPool {
         }
 
         self.total_allocated += size;
-        self.allocation_count += 1;
+        self.allocation_count += NUMERIC_ONE;
 
         Ok(PinnedBuffer {
             ptr: ptr as *mut u8,
@@ -148,7 +148,7 @@ impl PinnedMemoryPool {
             buffer_size_category: self.buffer_size,
             allocated_at: Instant::now(),
             last_used: Instant::now(),
-            use_count: 1,
+            use_count: NUMERIC_ONE,
         })
     }
 
@@ -189,29 +189,29 @@ pub struct AllocationTracker {
 impl AllocationTracker {
     pub fn new() -> Self {
         Self {
-            total_allocations: 0,
-            total_deallocations: 0,
-            peak_memory_usage: 0,
-            current_memory_usage: 0,
+            total_allocations: ZERO_USIZE,
+            total_deallocations: ZERO_USIZE,
+            peak_memory_usage: ZERO_USIZE,
+            current_memory_usage: ZERO_USIZE,
             allocation_history: Vec::new(),
         }
     }
 
     pub fn track_allocation(&mut self, size: usize, buffer_size: BufferSize) {
-        self.total_allocations += 1;
+        self.total_allocations += NUMERIC_ONE;
         self.current_memory_usage += size;
         self.peak_memory_usage = self.peak_memory_usage.max(self.current_memory_usage);
         
         self.allocation_history.push((Instant::now(), size, buffer_size));
         
         // Keep only recent history (last 1000 allocations)
-        if self.allocation_history.len() > 1000 {
-            self.allocation_history.remove(0);
+        if self.allocation_history.len() > MAX_ALLOCATION_HISTORY {
+            self.allocation_history.remove(INDEX_ZERO);
         }
     }
 
     pub fn track_deallocation(&mut self, size: usize) {
-        self.total_deallocations += 1;
+        self.total_deallocations += NUMERIC_ONE;
         self.current_memory_usage = self.current_memory_usage.saturating_sub(size);
     }
 }
@@ -230,9 +230,9 @@ impl FragmentationMonitor {
     pub fn new() -> Self {
         Self {
             fragmentation_percentage: 0.0,
-            largest_available_block: 0,
-            total_available_memory: 0,
-            fragmentation_events: 0,
+            largest_available_block: ZERO_USIZE,
+            total_available_memory: ZERO_USIZE,
+            fragmentation_events: ZERO_USIZE,
         }
     }
 
@@ -250,21 +250,20 @@ impl FragmentationMonitor {
         self.largest_available_block = largest_block;
 
         // Simple fragmentation calculation
-        if total_available > 0 {
-            self.fragmentation_percentage = (1.0 - (largest_block as f64 / total_available as f64)) * 100.0;
+        if total_available > ZERO_USIZE {
+            self.fragmentation_percentage = (DECIMAL_ONE - (largest_block as f64 / total_available as f64)) * PERCENT_100;
         } else {
-            self.fragmentation_percentage = 0.0;
+            self.fragmentation_percentage = ZERO_F64;
         }
     }
 
     pub fn should_defragment(&self) -> bool {
-        self.fragmentation_percentage > 25.0 // Defragment if more than 25% fragmented
+        self.fragmentation_percentage > FRAGMENTATION_THRESHOLD_PERCENT // Defragment if more than 25% fragmented
     }
 }
 
 #[cfg(feature = "cuda")]
 pub struct PinnedMemoryManager {
-    context: Arc<CudaContext>,
     pinned_pools: Arc<Mutex<HashMap<BufferSize, PinnedMemoryPool>>>,
     allocation_tracker: Arc<Mutex<AllocationTracker>>,
     fragmentation_monitor: Arc<Mutex<FragmentationMonitor>>,
@@ -274,20 +273,19 @@ pub struct PinnedMemoryManager {
 
 #[cfg(feature = "cuda")]
 impl PinnedMemoryManager {
-    pub fn new(context: Arc<CudaContext>, max_total_memory_mb: usize) -> Result<Self> {
-        let max_total_memory = max_total_memory_mb * 1024 * 1024; // Convert MB to bytes
+    pub fn new(_context: Arc<CudaContext>, max_total_memory_mb: usize) -> Result<Self> {
+        let max_total_memory = max_total_memory_mb * BYTES_PER_MB; // Convert MB to bytes
         
         // Initialize pools for different buffer sizes
         let mut pools = HashMap::new();
-        pools.insert(BufferSize::Small, PinnedMemoryPool::new(BufferSize::Small, 64));
-        pools.insert(BufferSize::Medium, PinnedMemoryPool::new(BufferSize::Medium, 32));
-        pools.insert(BufferSize::Large, PinnedMemoryPool::new(BufferSize::Large, 16));
-        pools.insert(BufferSize::XLarge, PinnedMemoryPool::new(BufferSize::XLarge, 8));
+        pools.insert(BufferSize::Small, PinnedMemoryPool::new(BufferSize::Small, PINNED_POOL_SIZE_SMALL));
+        pools.insert(BufferSize::Medium, PinnedMemoryPool::new(BufferSize::Medium, PINNED_POOL_SIZE_MEDIUM));
+        pools.insert(BufferSize::Large, PinnedMemoryPool::new(BufferSize::Large, PINNED_POOL_SIZE_LARGE));
+        pools.insert(BufferSize::XLarge, PinnedMemoryPool::new(BufferSize::XLarge, PINNED_POOL_SIZE_XLARGE));
         
         println!("Pinned memory manager initialized with {} MB limit", max_total_memory_mb);
         
         Ok(Self {
-            context,
             pinned_pools: Arc::new(Mutex::new(pools)),
             allocation_tracker: Arc::new(Mutex::new(AllocationTracker::new())),
             fragmentation_monitor: Arc::new(Mutex::new(FragmentationMonitor::new())),
@@ -384,7 +382,7 @@ impl PinnedMemoryManager {
             
             // Remove buffers older than 1 hour
             pool.available_buffers.retain(|buffer| {
-                buffer.allocated_at.elapsed().as_secs() < 3600
+                buffer.allocated_at.elapsed().as_secs() < ONE_HOUR_SECONDS
             });
             
             cleaned_count += initial_count - pool.available_buffers.len();
@@ -417,10 +415,10 @@ impl PinnedMemoryStats {
              🔄 Allocations: {} | Deallocations: {}\n\
              📊 Fragmentation: {:.1}% ({} events)\n\
              🏊 Pool Stats:\n{}",
-            self.current_memory_usage as f64 / (1024.0 * 1024.0),
-            self.max_total_memory as f64 / (1024.0 * 1024.0),
-            (self.current_memory_usage as f64 / self.max_total_memory as f64) * 100.0,
-            self.peak_memory_usage as f64 / (1024.0 * 1024.0),
+            self.current_memory_usage as f64 / MB_AS_F64,
+            self.max_total_memory as f64 / MB_AS_F64,
+            (self.current_memory_usage as f64 / self.max_total_memory as f64) * PERCENT_100,
+            self.peak_memory_usage as f64 / MB_AS_F64,
             self.total_allocations,
             self.total_deallocations,
             self.fragmentation_percentage,
@@ -435,7 +433,7 @@ impl PinnedMemoryStats {
                     stats.buffer_size_category,
                     stats.available_buffers,
                     stats.max_pool_size,
-                    stats.total_allocated_bytes as f64 / (1024.0 * 1024.0))
+                    stats.total_allocated_bytes as f64 / MB_AS_F64)
         }).collect::<Vec<_>>().join("\n")
     }
 }
@@ -461,7 +459,7 @@ mod tests {
     #[test]
     #[cfg(feature = "cuda")]
     fn test_buffer_size_categorization() {
-        assert_eq!(BufferSize::from_size(1024), BufferSize::Small);
+        assert_eq!(BufferSize::from_size(BYTES_PER_KB), BufferSize::Small);
         assert_eq!(BufferSize::from_size(65536), BufferSize::Small);
         assert_eq!(BufferSize::from_size(65537), BufferSize::Medium);
         assert_eq!(BufferSize::from_size(1048576), BufferSize::Medium);
@@ -475,16 +473,16 @@ mod tests {
     fn test_allocation_tracker() {
         let mut tracker = AllocationTracker::new();
         
-        tracker.track_allocation(1024, BufferSize::Small);
-        assert_eq!(tracker.current_memory_usage, 1024);
-        assert_eq!(tracker.peak_memory_usage, 1024);
+        tracker.track_allocation(BYTES_PER_KB, BufferSize::Small);
+        assert_eq!(tracker.current_memory_usage, BYTES_PER_KB);
+        assert_eq!(tracker.peak_memory_usage, BYTES_PER_KB);
         assert_eq!(tracker.total_allocations, 1);
         
         tracker.track_allocation(2048, BufferSize::Medium);
         assert_eq!(tracker.current_memory_usage, 3072);
         assert_eq!(tracker.peak_memory_usage, 3072);
         
-        tracker.track_deallocation(1024);
+        tracker.track_deallocation(BYTES_PER_KB);
         assert_eq!(tracker.current_memory_usage, 2048);
         assert_eq!(tracker.peak_memory_usage, 3072); // Peak should remain
     }
@@ -512,10 +510,10 @@ mod tests {
 
         match cudarc::driver::safe::CudaContext::new(0) {
             Ok(context) => {
-                match PinnedMemoryManager::new(context, 64) {
+                match PinnedMemoryManager::new(context, MEMORY_64MB) {
                     Ok(manager) => {
                         let stats = manager.get_statistics();
-                        assert_eq!(stats.max_total_memory, 64 * 1024 * 1024);
+                        assert_eq!(stats.max_total_memory, MEMORY_64MB * BYTES_PER_MB);
                         println!("Pinned memory manager test passed");
                     },
                     Err(e) => {

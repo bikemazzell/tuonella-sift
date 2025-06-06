@@ -1,16 +1,18 @@
 use std::collections::HashMap;
-use std::fs::{self, File};
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufRead, BufReader, BufWriter, Write, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use anyhow::Result;
+use sha2::{Sha256, Digest};
 use crate::config::model::{Config, DeduplicationConfig};
 use crate::core::record::Record;
 use crate::core::validation::{parse_csv_line, detect_field_positions, detect_field_positions_with_config, is_valid_line_with_config, EMAIL_REGEX, DELIMITER_REGEX};
 use crate::core::memory_manager::MemoryManager;
 use crate::core::performance_monitor::PerformanceMonitor;
+use crate::core::checkpoint_handler::CheckpointHandler;
 use crate::utils::system::{get_process_memory_usage, get_memory_info};
 use crate::constants::{
     VALIDATION_ERRORS_FILENAME, TEMP_FILE_PREFIX, FINAL_DEDUPLICATED_FILENAME,
@@ -122,6 +124,28 @@ pub fn process_csv_files_with_validation_and_shutdown(
     process_csv_files_with_algorithm_streaming_with_shutdown(input_dir, config, &mut memory_manager, verbose, shutdown_flag)
 }
 
+/// Process CSV files with validation, shutdown flag, and checkpoint handling
+pub fn process_csv_files_with_checkpoint(
+    input_dir: &Path,
+    config: &Config,
+    verbose: bool,
+    shutdown_flag: Option<Arc<AtomicBool>>,
+    checkpoint_handler: Option<Arc<CheckpointHandler>>,
+) -> Result<Vec<PathBuf>> {
+    // Create a config-based memory manager
+    let mut memory_manager = MemoryManager::from_config(config)?;
+
+    // Delegate to the new algorithm-compliant implementation with checkpoint support
+    process_csv_files_with_algorithm_streaming_and_checkpoint(
+        input_dir, 
+        config, 
+        &mut memory_manager, 
+        verbose, 
+        shutdown_flag,
+        checkpoint_handler
+    )
+}
+
 /// Process CSV files with algorithm-compliant streaming and shutdown support
 fn process_csv_files_with_algorithm_streaming_with_shutdown(
     input_dir: &Path,
@@ -194,6 +218,470 @@ fn process_csv_files_with_algorithm_streaming_with_shutdown(
     }
 
     Ok(temp_files)
+}
+
+/// Process CSV files with algorithm-compliant streaming, shutdown support, and checkpoint handling
+fn process_csv_files_with_algorithm_streaming_and_checkpoint(
+    input_dir: &Path,
+    config: &Config,
+    memory_manager: &mut MemoryManager,
+    verbose: bool,
+    shutdown_flag: Option<Arc<AtomicBool>>,
+    checkpoint_handler: Option<Arc<CheckpointHandler>>,
+) -> Result<Vec<PathBuf>> {
+    let mut temp_files = Vec::new();
+    let csv_files = super::validation::discover_csv_files(input_dir)?;
+
+    // Create temporary directory if it doesn't exist
+    fs::create_dir_all(&config.io.temp_directory)?;
+
+    // Create error log file
+    let error_log_path = Path::new(&config.io.temp_directory).join(VALIDATION_ERRORS_FILENAME);
+    let error_file = File::create(&error_log_path)?;
+    let mut error_writer = BufWriter::new(error_file);
+
+    if verbose {
+        println!("🔄 Processing {} CSV files with algorithm-compliant streaming...", csv_files.len());
+        println!("📊 Memory Manager Status:");
+        let stats = memory_manager.get_memory_stats()?;
+        println!("{}", stats.format_summary());
+    }
+
+    for (i, csv_file) in csv_files.iter().enumerate() {
+        // Check for shutdown signal and save checkpoint if needed
+        if let Some(ref handler) = checkpoint_handler {
+            if handler.check_shutdown_and_save()? {
+                if verbose {
+                    println!("🛑 Shutdown signal received. Processing stopped at file {} of {}", i + 1, csv_files.len());
+                }
+                break;
+            }
+        }
+
+        // Traditional shutdown check for backwards compatibility
+        if checkpoint_handler.is_none() {
+            if let Some(ref flag) = shutdown_flag {
+                if flag.load(Ordering::Relaxed) {
+                    if verbose {
+                        println!("🛑 Shutdown signal received. Stopping file processing.");
+                    }
+                    break;
+                }
+            }
+        }
+
+        if verbose {
+            println!("📂 Processing file {}/{}: {}", i + 1, csv_files.len(), csv_file.display());
+        }
+
+        // Update checkpoint handler with current file info
+        if let Some(ref handler) = checkpoint_handler {
+            // Get line count for the file (estimate if exact count not available)
+            let estimated_lines = estimate_file_lines(csv_file)?;
+            handler.update_current_file(i, csv_file, estimated_lines)?;
+        }
+
+        let temp_file = Path::new(&config.io.temp_directory)
+            .join(format!("{}{}.csv", TEMP_FILE_PREFIX, i));
+
+        process_single_csv_with_checkpoint(
+            csv_file,
+            &temp_file,
+            &mut error_writer,
+            memory_manager,
+            config,
+            verbose,
+            shutdown_flag.clone(),
+            checkpoint_handler.clone(),
+        )?;
+
+        temp_files.push(temp_file.clone());
+
+        // Add temp file to checkpoint state
+        if let Some(ref handler) = checkpoint_handler {
+            handler.add_temp_file(temp_file)?;
+        }
+    }
+
+    error_writer.flush()?;
+    if verbose {
+        println!("📝 Error log written to: {}", error_log_path.display());
+        if let Some(ref flag) = shutdown_flag {
+            if flag.load(Ordering::Relaxed) {
+                println!("⚠️ Processing interrupted by shutdown signal");
+            } else {
+                println!("✅ Algorithm-compliant file processing complete!");
+            }
+        } else {
+            println!("✅ Algorithm-compliant file processing complete!");
+        }
+    }
+
+    Ok(temp_files)
+}
+
+/// Estimate the number of lines in a file
+fn estimate_file_lines(file_path: &Path) -> Result<usize> {
+    let file = File::open(file_path)?;
+    let file_size = file.metadata()?.len();
+    
+    // Estimate based on average line length (conservative estimate)
+    // Assuming average line length of ~100 characters
+    Ok((file_size / 100) as usize)
+}
+
+/// Analyze existing output file to determine deduplication state for resumption
+pub fn analyze_existing_output(
+    output_path: &Path,
+    config: &Config,
+    verbose: bool,
+) -> Result<Option<(HashMap<String, Record>, usize, String)>> {
+    if !output_path.exists() {
+        return Ok(None);
+    }
+
+    if verbose {
+        println!("🔍 Analyzing existing output file for resumption: {}", output_path.display());
+    }
+
+    let mut dedup_map: HashMap<String, Record> = HashMap::new();
+    let mut records_count = 0;
+    let mut hasher = Sha256::new();
+
+    let file = File::open(output_path)?;
+    let reader = BufReader::new(file);
+    
+    // Calculate file checksum while reading
+    let mut file_for_hash = File::open(output_path)?;
+    let mut buffer = [0; 8192];
+    loop {
+        let bytes_read = file_for_hash.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..bytes_read]);
+    }
+    let checksum = format!("{:x}", hasher.finalize());
+
+    // Parse existing output to rebuild deduplication state
+    let mut first_line = true;
+    for line_result in reader.lines() {
+        let line = line_result?;
+        
+        // Skip header line
+        if first_line {
+            first_line = false;
+            continue;
+        }
+
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        // Parse the line to extract record information
+        let fields = parse_csv_line(&line);
+        if fields.len() >= MIN_FIELD_COUNT {
+            // Use the standard field detection for CSV parsing
+            let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(
+                &fields, 
+                config.deduplication.email_username_only, 
+                config.deduplication.allow_two_field_lines
+            );
+            
+            if let Some(record) = Record::new_from_fields(
+                fields,
+                user_idx,
+                password_idx,
+                url_idx,
+                config.deduplication.case_sensitive_usernames,
+            ) {
+                // Use the same deduplication key logic as the main processing
+                let dedup_key = if config.deduplication.case_sensitive_usernames {
+                    format!("{}:{}", record.user, record.password)
+                } else {
+                    format!("{}:{}", record.user.to_lowercase(), record.password)
+                };
+
+                dedup_map.insert(dedup_key, record);
+                records_count += 1;
+            }
+        }
+    }
+
+    if verbose {
+        println!("📊 Found {} unique records in existing output file", records_count);
+        println!("🔐 File checksum: {}", &checksum[..16]);
+    }
+
+    Ok(Some((dedup_map, records_count, checksum)))
+}
+
+/// Calculate checksum of a file
+pub fn calculate_file_checksum(file_path: &Path) -> Result<String> {
+    let mut file = File::open(file_path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0; 8192];
+    
+    loop {
+        let bytes_read = file.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..bytes_read]);
+    }
+    
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Write an error line to the error log
+#[allow(dead_code)]
+fn write_error_line(
+    error_writer: &mut BufWriter<File>,
+    file_path: &Path,
+    line_number: usize,
+    line: &str,
+    reason: &str,
+) -> Result<()> {
+    writeln!(error_writer, "{}:{}: {} - {}",
+        file_path.display(), line_number, reason, line)?;
+    Ok(())
+}
+
+/// Process a single CSV file with checkpoint support
+fn process_single_csv_with_checkpoint(
+    csv_file: &Path,
+    temp_file: &Path,
+    error_writer: &mut BufWriter<File>,
+    memory_manager: &mut MemoryManager,
+    config: &Config,
+    verbose: bool,
+    shutdown_flag: Option<Arc<AtomicBool>>,
+    checkpoint_handler: Option<Arc<CheckpointHandler>>,
+) -> Result<()> {
+    // For backwards compatibility, if no checkpoint handler is provided,
+    // use the original function
+    if checkpoint_handler.is_none() {
+        return process_single_csv_with_algorithm_streaming_with_shutdown(
+            csv_file,
+            temp_file,
+            error_writer,
+            memory_manager,
+            config,
+            verbose,
+            shutdown_flag,
+        );
+    }
+
+    let handler = checkpoint_handler.unwrap();
+    
+    // Open the input file
+    let file = File::open(csv_file)?;
+    let reader = BufReader::new(file);
+
+    let mut valid_lines = 0;
+    let mut total_lines = 0;
+    let mut invalid_lines = 0;
+    let mut byte_offset = 0u64;
+    let mut records_in_batch = 0;
+    let mut temp_file_count = 0;
+
+    // Clear RAM buffer before starting
+    memory_manager.clear_ram_buffer();
+
+    // Stream files line by line
+    for line_result in reader.lines() {
+        // Check for shutdown signal periodically
+        if total_lines % 1000 == 0 {
+            if handler.check_shutdown_and_save()? {
+                if verbose {
+                    println!("    🛑 Shutdown signal received during line processing at line {}", total_lines);
+                }
+                break;
+            }
+            
+            // Update checkpoint progress
+            handler.update_file_progress(total_lines, byte_offset, valid_lines)?;
+            
+            // Check if auto-save is needed
+            handler.auto_save_if_needed()?;
+        }
+
+        let line = match line_result {
+            Ok(line) => line,
+            Err(_e) => {
+                // Handle UTF-8 encoding errors gracefully
+                total_lines += 1;
+                invalid_lines += 1;
+                writeln!(error_writer, "{}:{}: UTF-8 encoding error - {}",
+                    csv_file.display(), total_lines, _e)?;
+                continue;
+            }
+        };
+
+        // Update byte offset
+        byte_offset += line.len() as u64 + 1; // +1 for newline
+        total_lines += 1;
+
+        // Line-by-Line Pre-Validation (CPU) as per algorithm
+        let mut skip_reason = None;
+
+        // Skip the Line If: It contains no printable characters
+        if !line.chars().any(|c| c.is_ascii_graphic()) {
+            skip_reason = Some("no printable characters");
+        }
+        // Skip the Line If: It does not contain at least one delimiter
+        else if !DELIMITER_REGEX.is_match(&line) {
+            skip_reason = Some("no delimiter found");
+        }
+        // Skip the Line If: It does not contain a valid username (email or printable based on config)
+        else if config.deduplication.email_username_only && !EMAIL_REGEX.is_match(&line) {
+            skip_reason = Some("no email address found");
+        }
+        else if !config.deduplication.email_username_only && !is_valid_line_with_config(&line, false, config.deduplication.allow_two_field_lines) {
+            skip_reason = Some("no valid username found");
+        }
+        // Perform more advanced validation on the CSV fields
+        else {
+            let fields = parse_csv_line(&line);
+            if config.deduplication.allow_two_field_lines && fields.len() == 2 {
+                let (user_idx, password_idx, _url_idx) = detect_field_positions_with_config(&fields, config.deduplication.email_username_only, true);
+                if user_idx >= fields.len() || password_idx >= fields.len() {
+                    skip_reason = Some("invalid field positions detected");
+                }
+            } else if fields.len() < MIN_FIELD_COUNT {
+                skip_reason = Some("fewer than 3 fields");
+            } else {
+                let (user_idx, password_idx, url_idx) = detect_field_positions_with_config(&fields, config.deduplication.email_username_only, config.deduplication.allow_two_field_lines);
+                if user_idx >= fields.len() || password_idx >= fields.len() || url_idx >= fields.len() {
+                    skip_reason = Some("invalid field positions detected");
+                }
+                else {
+                    for (i, field) in fields.iter().enumerate() {
+                        if i != url_idx &&
+                            (field.starts_with(PROTOCOL_HTTP) ||
+                            field.starts_with(PROTOCOL_HTTPS) ||
+                            field.starts_with(PROTOCOL_ANDROID) ||
+                            field.starts_with(PROTOCOL_FTP) ||
+                            field.starts_with(PROTOCOL_MAILTO)) {
+                            skip_reason = Some("URL protocol found in non-URL field");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(reason) = skip_reason {
+            // Log invalid or skipped lines
+            writeln!(error_writer, "{}:{}: {} - {}",
+                csv_file.display(), total_lines, reason, line)?;
+            invalid_lines += 1;
+            continue;
+        }
+
+        // If the line passes all checks, store it in the RAM buffer (as per algorithm)
+        let line_with_newline = format!("{}\n", line);
+        let line_bytes = line_with_newline.as_bytes();
+
+        // Check if adding this line would exceed RAM buffer capacity
+        if !memory_manager.can_fit_in_ram_buffer(line_bytes.len()) {
+            // Write Filtered Lines to a Temporary File (as per algorithm)
+            if verbose && temp_file_count == 0 {
+                println!("    💾 RAM buffer full, writing to temporary file...");
+            }
+
+            // Get a writer for the temp file
+            let current_temp_file = if temp_file_count > 0 {
+                let path_str = temp_file.to_string_lossy();
+                let base_name = path_str.trim_end_matches(".csv");
+                PathBuf::from(format!("{}_{}.csv", base_name, temp_file_count))
+            } else {
+                temp_file.to_path_buf()
+            };
+
+            // Open file in append mode if it exists, otherwise create
+            let file = if temp_file_count > 0 {
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&current_temp_file)?
+            } else {
+                File::create(&current_temp_file)?
+            };
+            let mut file_writer = BufWriter::new(file);
+
+            let buffer_contents = memory_manager.get_ram_buffer_contents();
+            file_writer.write_all(buffer_contents)?;
+            file_writer.flush()?;
+            
+            memory_manager.clear_ram_buffer();
+            temp_file_count += 1;
+
+            // Update checkpoint after flush
+            handler.update_file_progress(total_lines, byte_offset, valid_lines)?;
+            handler.force_save_checkpoint()?;
+
+            // Check memory pressure after buffer flush
+            if memory_manager.check_memory_pressure()? {
+                if verbose {
+                    println!("    ⚠️ Memory pressure detected during processing");
+                }
+            }
+        }
+
+        // Add the line to RAM buffer
+        memory_manager.add_to_ram_buffer(line_bytes)?;
+        valid_lines += 1;
+        records_in_batch += 1;
+
+        // Track records for auto-save
+        if records_in_batch >= 10000 {
+            handler.track_records_and_save(records_in_batch)?;
+            records_in_batch = 0;
+        }
+    }
+
+    // Flush any remaining data in RAM buffer
+    let buffer_contents = memory_manager.get_ram_buffer_contents();
+    if !buffer_contents.is_empty() {
+        if verbose {
+            println!("  Flushing final data to disk...");
+        }
+
+        // Write the final temp file
+        let final_temp_file = if temp_file_count > 0 {
+            let path_str = temp_file.to_string_lossy();
+            let base_name = path_str.trim_end_matches(".csv");
+            PathBuf::from(format!("{}_{}.csv", base_name, temp_file_count))
+        } else {
+            temp_file.to_path_buf()
+        };
+
+        // Open file in append mode if it exists, otherwise create
+        let file = if temp_file_count > 0 {
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&final_temp_file)?
+        } else {
+            File::create(&final_temp_file)?
+        };
+        let mut file_writer = BufWriter::new(file);
+        file_writer.write_all(buffer_contents)?;
+        file_writer.flush()?;
+        
+        memory_manager.clear_ram_buffer();
+    }
+
+    // Final checkpoint update
+    handler.update_file_progress(total_lines, byte_offset, valid_lines)?;
+    handler.track_records_and_save(records_in_batch)?;
+    
+    if verbose {
+        println!("    ✅ Processed {} valid lines, {} invalid lines", valid_lines, invalid_lines);
+    }
+
+    Ok(())
 }
 
 /// Process a single CSV file with algorithm-compliant streaming and RAM buffering
@@ -552,17 +1040,127 @@ pub fn deduplicate_records_with_shutdown(
     verbose: bool,
     shutdown_flag: Option<Arc<AtomicBool>>,
 ) -> Result<ProcessingStats> {
+    deduplicate_records_with_resumption(
+        temp_files,
+        output_path,
+        config,
+        #[cfg(feature = "cuda")]
+        cuda_processor,
+        verbose,
+        shutdown_flag,
+        None,
+    )
+}
+
+/// Enhanced deduplication with output file resumption support
+pub fn deduplicate_records_with_resumption(
+    temp_files: &[PathBuf],
+    output_path: &Path,
+    config: &Config,
+    #[cfg(feature = "cuda")]
+    cuda_processor: Option<&CudaProcessor>,
+    verbose: bool,
+    shutdown_flag: Option<Arc<AtomicBool>>,
+    checkpoint_handler: Option<Arc<CheckpointHandler>>,
+) -> Result<ProcessingStats> {
     let start_time = Instant::now();
     let mut dedup_map: HashMap<String, Record> = HashMap::new();
     let mut stats = ProcessingStats::default();
     stats.files_processed = temp_files.len();
+
+    // Check for existing output file and try to resume
+    let (existing_records, files_to_process) = if let Some(ref handler) = checkpoint_handler {
+        // Get the current processing state
+        let state = handler.get_state();
+        
+        if output_path.exists() && !state.temp_files_processed.is_empty() {
+            if verbose {
+                println!("🔄 Attempting to resume deduplication with existing output file...");
+            }
+            
+            // Verify output file integrity
+            match state.output_file_checksum {
+                Some(ref expected_checksum) => {
+                    let current_checksum = calculate_file_checksum(output_path)?;
+                    if current_checksum == *expected_checksum {
+                        if verbose {
+                            println!("✅ Output file integrity verified");
+                        }
+                        
+                        // Analyze existing output to rebuild deduplication state
+                        if let Some((existing_dedup_map, record_count, _)) = analyze_existing_output(output_path, config, verbose)? {
+                            dedup_map = existing_dedup_map;
+                            stats.unique_records = record_count;
+                            
+                            // Get unprocessed temp files
+                            let unprocessed_files = handler.get_unprocessed_temp_files();
+                            if verbose {
+                                println!("📂 Resuming with {} unprocessed temp files out of {}", 
+                                    unprocessed_files.len(), temp_files.len());
+                            }
+                            
+                            (record_count, unprocessed_files)
+                        } else {
+                            if verbose {
+                                println!("⚠️ Could not parse existing output file, starting fresh");
+                            }
+                            (0, temp_files.to_vec())
+                        }
+                    } else {
+                        if verbose {
+                            println!("⚠️ Output file checksum mismatch, starting fresh");
+                        }
+                        (0, temp_files.to_vec())
+                    }
+                }
+                None => {
+                    if verbose {
+                        println!("🔍 No checksum available, analyzing existing output file...");
+                    }
+                    
+                    // No previous checksum, but output exists - analyze it
+                    if let Some((existing_dedup_map, record_count, checksum)) = analyze_existing_output(output_path, config, verbose)? {
+                        dedup_map = existing_dedup_map;
+                        stats.unique_records = record_count;
+                        
+                        // Update checkpoint with output file info
+                        handler.update_output_file_info(record_count, checksum)?;
+                        
+                        if verbose {
+                            println!("📋 Assuming all temp files need reprocessing (no processing history)");
+                        }
+                        
+                        (record_count, temp_files.to_vec())
+                    } else {
+                        (0, temp_files.to_vec())
+                    }
+                }
+            }
+        } else {
+            (0, temp_files.to_vec())
+        }
+    } else {
+        (0, temp_files.to_vec())
+    };
+
+    if existing_records > 0 && verbose {
+        println!("🎯 Resuming with {} existing unique records", existing_records);
+    }
 
     // Initialize performance monitor
     let mut performance_monitor = PerformanceMonitor::new();
     let mut last_performance_report = Instant::now();
     let performance_report_interval = Duration::from_secs(config.performance.report_interval_seconds);
 
-    let output_file = File::create(output_path)?;
+    // Open output file for appending if resuming, or create new if starting fresh
+    let output_file = if existing_records > 0 {
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(output_path)?
+    } else {
+        File::create(output_path)?
+    };
     let mut writer = BufWriter::new(output_file);
 
     // Write CSV header - we'll determine the header from the first record
@@ -577,19 +1175,27 @@ pub fn deduplicate_records_with_shutdown(
         }
     }
 
-    for (i, temp_file) in temp_files.iter().enumerate() {
+    // Skip writing header if we're resuming with existing records
+    if existing_records > 0 {
+        header_written = true;
+    }
+
+    for (i, temp_file) in files_to_process.iter().enumerate() {
         // Check for shutdown signal before processing each temp file
         if let Some(ref flag) = shutdown_flag {
             if flag.load(Ordering::Relaxed) {
                 if verbose {
-                    println!("🛑 Shutdown signal received during deduplication. Stopping at file {}/{}", i + 1, temp_files.len());
+                    println!("🛑 Shutdown signal received during deduplication. Stopping at file {}/{}", i + 1, files_to_process.len());
                 }
                 break;
             }
         }
 
         if verbose {
-            println!("Deduplicating file {}/{}: {}", i + 1, temp_files.len(), temp_file.display());
+            let total_files = temp_files.len();
+            let processed_already = total_files - files_to_process.len();
+            println!("Deduplicating file {}/{} ({}+{}/{}): {}", 
+                i + 1, files_to_process.len(), processed_already, i + 1, total_files, temp_file.display());
         }
 
         let _file_start_time = Instant::now();
@@ -687,6 +1293,23 @@ pub fn deduplicate_records_with_shutdown(
                 cuda_processor,
                 &config.deduplication,
             )?;
+        }
+
+        // Mark this temp file as processed and update checkpoint
+        if let Some(ref handler) = checkpoint_handler {
+            handler.mark_temp_file_processed(temp_file.clone())?;
+            
+            // Flush writer and calculate current output checksum
+            writer.flush()?;
+            let current_checksum = calculate_file_checksum(output_path)?;
+            handler.update_output_file_info(stats.unique_records, current_checksum)?;
+            
+            // Save checkpoint after each temp file
+            handler.force_save_checkpoint()?;
+            
+            if verbose {
+                println!("💾 Checkpoint saved after processing {}", temp_file.display());
+            }
         }
     }
 
