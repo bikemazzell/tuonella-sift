@@ -15,6 +15,64 @@ use tokio::signal;
 #[cfg(feature = "cuda")]
 use tuonella_sift::cuda::processor::CudaProcessor;
 
+/// Comprehensively clean up the entire temp directory on successful completion
+/// This ensures all temporary files, including any orphaned files, are removed
+fn cleanup_temp_directory(temp_dir: &str, verbose: bool) {
+    let temp_path = Path::new(temp_dir);
+    
+    if !temp_path.exists() {
+        return; // Nothing to clean up
+    }
+    
+    if verbose {
+        println!("🧽 Performing comprehensive temp directory cleanup...");
+    }
+    
+    // Remove all contents of the temp directory
+    match std::fs::read_dir(temp_path) {
+        Ok(entries) => {
+            let mut removed_count = 0;
+            let mut failed_count = 0;
+            
+            for entry in entries {
+                if let Ok(entry) = entry {
+                    let path = entry.path();
+                    
+                    let result = if path.is_dir() {
+                        std::fs::remove_dir_all(&path)
+                    } else {
+                        std::fs::remove_file(&path)
+                    };
+                    
+                    match result {
+                        Ok(_) => {
+                            removed_count += 1;
+                            if verbose {
+                                println!("   ✅ Removed: {}", path.display());
+                            }
+                        }
+                        Err(e) => {
+                            failed_count += 1;
+                            if verbose {
+                                println!("   ⚠️ Failed to remove {}: {}", path.display(), e);
+                            }
+                        }
+                    }
+                }
+            }
+            
+            if verbose {
+                println!("🧽 Cleanup summary: {} items removed, {} failures", removed_count, failed_count);
+            }
+        }
+        Err(e) => {
+            if verbose {
+                println!("⚠️ Failed to read temp directory {}: {}", temp_dir, e);
+            }
+        }
+    }
+}
+
 fn print_completion_stats(stats: ProcessingStats, start_time: Instant, state: &ProcessingState, output_path: &Path) {
     let elapsed = start_time.elapsed();
     let total_elapsed_secs = state.get_elapsed_time() + elapsed.as_secs();
@@ -103,6 +161,10 @@ async fn resume_processing_from_checkpoint(
             )?;
             
             print_completion_stats(stats, start_time, &state, output_path);
+            
+            // Comprehensive cleanup of entire temp directory on successful completion
+            cleanup_temp_directory(&config.io.temp_directory, verbose);
+            
             return Ok(());
         }
         _ => {
@@ -140,6 +202,10 @@ async fn resume_processing_from_checkpoint(
         )?;
         
         print_completion_stats(stats, start_time, &state, output_path);
+        
+        // Comprehensive cleanup of entire temp directory on successful completion
+        cleanup_temp_directory(&config.io.temp_directory, verbose);
+        
         return Ok(());
     }
 
@@ -236,6 +302,9 @@ async fn resume_processing_from_checkpoint(
             println!("⚠️ Failed to clean up checkpoint: {}", e);
         }
     }
+
+    // Comprehensive cleanup of entire temp directory on successful completion
+    cleanup_temp_directory(&config.io.temp_directory, verbose);
 
     let elapsed = start_time.elapsed();
     let total_elapsed_secs = state.get_elapsed_time() + elapsed.as_secs();
@@ -497,6 +566,9 @@ async fn main() -> Result<()> {
             println!("⚠️ Failed to clean up checkpoint: {}", e);
         }
     }
+
+    // Comprehensive cleanup of entire temp directory on successful completion
+    cleanup_temp_directory(&config.io.temp_directory, args.verbose);
 
     let elapsed = start_time.elapsed();
     let processing_rate = stats.total_records as f64 / elapsed.as_secs_f64().max(f64::EPSILON);
