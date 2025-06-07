@@ -135,9 +135,6 @@ impl CheckpointHandler {
             let state = self.processing_state.lock().unwrap();
             checkpoint_manager.save_checkpoint(&*state)?;
             
-            if self.verbose {
-                println!("💾 Checkpoint auto-saved (record threshold reached)");
-            }
         }
         
         Ok(())

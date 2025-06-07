@@ -17,11 +17,21 @@ use tuonella_sift::cuda::processor::CudaProcessor;
 
 /// Comprehensively clean up the entire temp directory on successful completion
 /// This ensures all temporary files, including any orphaned files, are removed
+/// Only cleans up if processing is truly complete to prevent data loss
 fn cleanup_temp_directory(temp_dir: &str, verbose: bool) {
     let temp_path = Path::new(temp_dir);
     
     if !temp_path.exists() {
         return; // Nothing to clean up
+    }
+    
+    // Additional safety check: look for checkpoint file
+    let checkpoint_path = temp_path.join("checkpoint.json");
+    if checkpoint_path.exists() {
+        if verbose {
+            println!("⚠️ Checkpoint file still exists - skipping cleanup to preserve resume capability");
+        }
+        return;
     }
     
     if verbose {
@@ -137,35 +147,45 @@ async fn resume_processing_from_checkpoint(
             return Ok(());
         }
         tuonella_sift::core::checkpoint::ProcessingPhase::Deduplication => {
-            println!("🔗 Resuming from deduplication phase with {} existing temp files", state.temp_files_created.len());
+            // Verify that file processing is actually complete before proceeding with deduplication
+            let remaining_files = checkpoint_manager.get_remaining_files(&state);
             
-            // Create checkpoint handler for resume
-            let resume_checkpoint_handler = Arc::new(CheckpointHandler::new(
-                Path::new(&config.io.temp_directory),
-                config.io.checkpoint_auto_save_interval_seconds,
-                state.clone(),
-                Some(shutdown_flag.clone()),
-                verbose,
-            ));
-            
-            // Skip file processing and go straight to deduplication with resumption support
-            let stats = tuonella_sift::core::deduplication::deduplicate_records_with_resumption(
-                &state.temp_files_created,
-                output_path,
-                config,
-                #[cfg(feature = "cuda")]
-                cuda_processor,
-                verbose,
-                Some(shutdown_flag.clone()),
-                Some(resume_checkpoint_handler),
-            )?;
-            
-            print_completion_stats(stats, start_time, &state, output_path);
-            
-            // Comprehensive cleanup of entire temp directory on successful completion
-            cleanup_temp_directory(&config.io.temp_directory, verbose);
-            
-            return Ok(());
+            if !remaining_files.is_empty() {
+                println!("⚠️ Deduplication phase detected, but {} files still need processing", remaining_files.len());
+                println!("🔄 Continuing file processing before deduplication...");
+                
+                // Continue with file processing (fall through to the file processing logic below)
+            } else {
+                println!("🔗 Resuming from deduplication phase with {} existing temp files", state.temp_files_created.len());
+                
+                // Create checkpoint handler for resume
+                let resume_checkpoint_handler = Arc::new(CheckpointHandler::new(
+                    Path::new(&config.io.temp_directory),
+                    config.io.checkpoint_auto_save_interval_seconds,
+                    state.clone(),
+                    Some(shutdown_flag.clone()),
+                    verbose,
+                ));
+                
+                // Skip file processing and go straight to deduplication with resumption support
+                let stats = tuonella_sift::core::deduplication::deduplicate_records_with_resumption(
+                    &state.temp_files_created,
+                    output_path,
+                    config,
+                    #[cfg(feature = "cuda")]
+                    cuda_processor,
+                    verbose,
+                    Some(shutdown_flag.clone()),
+                    Some(resume_checkpoint_handler),
+                )?;
+                
+                print_completion_stats(stats, start_time, &state, output_path);
+                
+                // Comprehensive cleanup of entire temp directory on successful completion
+                cleanup_temp_directory(&config.io.temp_directory, verbose);
+                
+                return Ok(());
+            }
         }
         _ => {
             // Continue with file processing
@@ -479,13 +499,13 @@ async fn main() -> Result<()> {
     }
 
     // Create initial processing state
-    let _csv_files = tuonella_sift::core::validation::discover_csv_files(&args.input)?;
+    let csv_files = tuonella_sift::core::validation::discover_csv_files(&args.input)?;
     #[cfg(feature = "cuda")]
     let cuda_enabled = cuda_processor.is_some();
     #[cfg(not(feature = "cuda"))]
     let cuda_enabled = false;
     
-    let processing_state = ProcessingState::new(
+    let mut processing_state = ProcessingState::new(
         args.input.clone(),
         output_path.clone(),
         args.config.clone(),
@@ -493,6 +513,7 @@ async fn main() -> Result<()> {
         args.verbose,
         config.memory.memory_usage_percent,
     );
+    processing_state.discovered_files = csv_files;
 
     // Create checkpoint handler
     let checkpoint_handler = Arc::new(CheckpointHandler::new(
@@ -518,12 +539,15 @@ async fn main() -> Result<()> {
 
     println!("📊 Found and processed {} CSV files. Let the judgment begin!", temp_files.len());
 
-    // Update checkpoint phase to Deduplication before starting phase 2
-    checkpoint_handler.set_phase(ProcessingPhase::Deduplication)?;
-    checkpoint_handler.force_save_checkpoint()?;
-    
-    if args.verbose {
-        println!("💾 Checkpoint updated - entering deduplication phase");
+    // Only update checkpoint phase to Deduplication if we actually have processed files
+    // and aren't resuming from an interrupted state
+    if !temp_files.is_empty() {
+        checkpoint_handler.set_phase(ProcessingPhase::Deduplication)?;
+        checkpoint_handler.force_save_checkpoint()?;
+        
+        if args.verbose {
+            println!("💾 Checkpoint updated - entering deduplication phase");
+        }
     }
 
     println!("\n⚔️ Commencing the great deduplication cull...");

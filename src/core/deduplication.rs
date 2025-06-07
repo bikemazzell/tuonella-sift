@@ -1073,7 +1073,12 @@ pub fn deduplicate_records_with_resumption(
         // Get the current processing state
         let state = handler.get_state();
         
-        if output_path.exists() && !state.temp_files_processed.is_empty() {
+        // Critical safety check: Only consider resuming from output if all temp files are actually processed
+        // and we're truly in the deduplication phase with no remaining work
+        let all_temp_files_processed = state.temp_files_created.len() > 0 && 
+            state.temp_files_processed.len() == state.temp_files_created.len();
+            
+        if output_path.exists() && all_temp_files_processed && !state.temp_files_processed.is_empty() {
             if verbose {
                 println!("🔄 Attempting to resume deduplication with existing output file...");
             }
@@ -1146,6 +1151,22 @@ pub fn deduplicate_records_with_resumption(
     if existing_records > 0 && verbose {
         println!("🎯 Resuming with {} existing unique records", existing_records);
     }
+    
+    // Critical safeguard: If we have no files to process but temp files exist,
+    // this indicates a corrupted checkpoint state - process all temp files to be safe
+    let (existing_records, files_to_process) = if files_to_process.is_empty() && !temp_files.is_empty() {
+        if verbose {
+            println!("⚠️ Warning: Checkpoint indicates no files to process, but {} temp files exist", temp_files.len());
+            println!("🔄 Processing all temp files to ensure data integrity");
+        }
+        
+        // Reset everything since we're reprocessing
+        dedup_map.clear();
+        stats.unique_records = 0;
+        (0, temp_files.to_vec())
+    } else {
+        (existing_records, files_to_process)
+    };
 
     // Initialize performance monitor
     let mut performance_monitor = PerformanceMonitor::new();
