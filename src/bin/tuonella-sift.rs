@@ -3,7 +3,7 @@ use clap::Parser;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tuonella_sift::config::Config;
 use tuonella_sift::core::checkpoint::{CheckpointManager, ProcessingState, ProcessingPhase};
 use tuonella_sift::core::checkpoint_handler::CheckpointHandler;
@@ -254,23 +254,33 @@ async fn resume_processing_from_checkpoint(
             file_index: state.current_file_index + i 
         });
 
-        let _single_file_temp_dir = temp_dir.join(format!("single_file_{}", state.current_file_index + i));
-        std::fs::create_dir_all(&_single_file_temp_dir)?;
+        // During resume, only process files that haven't been completed yet
+        if !state.completed_files.contains(file_path) {
+            let _single_file_temp_dir = temp_dir.join(format!("single_file_{}", state.current_file_index + i));
+            std::fs::create_dir_all(&_single_file_temp_dir)?;
 
-        let single_file_dir = file_path.parent().unwrap_or(Path::new("."));
-        let temp_files_for_this_file = tuonella_sift::core::deduplication::process_csv_files_with_validation_and_shutdown(
-            single_file_dir,
-            config,
-            verbose,
-            Some(shutdown_flag.clone()),
-        )?;
+            let single_file_dir = file_path.parent().unwrap_or(Path::new("."));
+            let temp_files_for_this_file = tuonella_sift::core::deduplication::process_csv_files_with_validation_and_shutdown(
+                single_file_dir,
+                config,
+                verbose,
+                Some(shutdown_flag.clone()),
+            )?;
 
-        new_temp_files.extend(temp_files_for_this_file);
-        updated_state.mark_file_completed(file_path.clone());
+            new_temp_files.extend(temp_files_for_this_file);
+            updated_state.mark_file_completed(file_path.clone());
+        } else if verbose {
+            println!("   ⏭️ Skipping already processed file: {}", file_path.display());
+        }
 
         // Incremental checkpoint save
         if checkpoint_manager.track_records_processed(10000) { // Estimate records per file
-            updated_state.temp_files_created.extend(new_temp_files.iter().cloned());
+            // Only add new temp files that aren't already in the list
+            for temp_file in &new_temp_files {
+                if !updated_state.temp_files_created.contains(temp_file) {
+                    updated_state.temp_files_created.push(temp_file.clone());
+                }
+            }
             if let Ok(saved) = checkpoint_manager.auto_save_if_needed(&updated_state) {
                 if saved && verbose {
                     println!("💾 Incremental checkpoint saved");
@@ -290,8 +300,13 @@ async fn resume_processing_from_checkpoint(
         return Ok(());
     }
 
+    // Merge temp files without duplicates
     let mut all_temp_files = state.temp_files_created.clone();
-    all_temp_files.extend(new_temp_files);
+    for temp_file in new_temp_files {
+        if !all_temp_files.contains(&temp_file) {
+            all_temp_files.push(temp_file);
+        }
+    }
 
     println!("🔗 Merging {} temp files (including {} from previous session)...",
              all_temp_files.len(), state.temp_files_created.len());
@@ -551,6 +566,14 @@ async fn main() -> Result<()> {
     }
 
     println!("\n⚔️ Commencing the great deduplication cull...");
+    
+    // Give the system a moment to stabilize after file processing
+    // This helps when memory pressure is high
+    if args.verbose {
+        println!("⏳ Preparing for deduplication phase...");
+    }
+    std::thread::sleep(Duration::from_secs(2));
+    
     let stats = tuonella_sift::core::deduplication::deduplicate_records_with_resumption(
         &temp_files,
         &output_path,

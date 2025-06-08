@@ -1,4 +1,5 @@
 use anyhow::Result;
+use std::time::{Duration, Instant};
 use crate::constants::{
     DYNAMIC_MEMORY_CHECK_INTERVAL_RECORDS, BYTES_PER_MB,
     MEMORY_PRESSURE_THRESHOLD_PERCENT, MEMORY_CRITICAL_THRESHOLD_PERCENT,
@@ -41,6 +42,9 @@ pub struct MemoryManager {
     current_chunk_size_bytes: usize,
 
     last_chunk_adjustment_record: usize,
+    
+    /// Last time we printed memory pressure warning
+    last_memory_pressure_warning: Option<Instant>,
 }
 
 impl MemoryManager {
@@ -105,6 +109,7 @@ impl MemoryManager {
             original_chunk_size_bytes: initial_chunk_size,
             current_chunk_size_bytes: initial_chunk_size,
             last_chunk_adjustment_record: ZERO_USIZE,
+            last_memory_pressure_warning: None,
         })
     }
 
@@ -156,12 +161,21 @@ impl MemoryManager {
         self.gpu_context.is_some() && self.gpu_buffer_capacity > ZERO_USIZE
     }
 
-    pub fn check_memory_pressure(&self) -> Result<bool> {
+    pub fn check_memory_pressure(&mut self) -> Result<bool> {
         let is_pressure = self.resources.is_memory_pressure()?;
         if is_pressure {
-            let (current_usage, usage_percent) = self.resources.get_current_memory_usage()?;
-            println!("⚠️  Memory pressure detected: {:.2}% usage ({} bytes)",
-                    usage_percent, current_usage);
+            // Only print warning if we haven't printed one recently (30 second cooldown)
+            let should_warn = match self.last_memory_pressure_warning {
+                None => true,
+                Some(last_warning) => last_warning.elapsed() > Duration::from_secs(30),
+            };
+            
+            if should_warn {
+                let (current_usage, usage_percent) = self.resources.get_current_memory_usage()?;
+                println!("⚠️  Memory pressure detected: {:.2}% usage ({} bytes)",
+                        usage_percent, current_usage);
+                self.last_memory_pressure_warning = Some(Instant::now());
+            }
         }
         Ok(is_pressure)
     }

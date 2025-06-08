@@ -64,7 +64,15 @@ impl CheckpointHandler {
     /// Add a temp file that was created
     pub fn add_temp_file(&self, temp_file: PathBuf) -> Result<()> {
         let mut state = self.processing_state.lock().unwrap();
-        state.temp_files_created.push(temp_file);
+        // Only add if not already in the list to prevent duplicates
+        if !state.temp_files_created.contains(&temp_file) {
+            state.temp_files_created.push(temp_file.clone());
+            if self.verbose {
+                println!("📄 Added temp file to checkpoint: {}", temp_file.display());
+            }
+        } else if self.verbose {
+            println!("⚠️ Temp file already in checkpoint, skipping: {}", temp_file.display());
+        }
         Ok(())
     }
 
@@ -177,5 +185,14 @@ impl CheckpointHandler {
             .filter(|file| !state.temp_files_processed.contains(file))
             .cloned()
             .collect()
+    }
+    
+    /// Mark a CSV file as completed
+    pub fn mark_file_completed(&self, file_path: PathBuf) -> Result<()> {
+        let mut state = self.processing_state.lock().unwrap();
+        if !state.completed_files.contains(&file_path) {
+            state.completed_files.push(file_path);
+        }
+        Ok(())
     }
 }

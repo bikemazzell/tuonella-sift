@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+use std::thread;
 use anyhow::Result;
 use sha2::{Sha256, Digest};
 use crate::config::model::{Config, DeduplicationConfig};
@@ -256,6 +257,21 @@ fn process_csv_files_with_algorithm_streaming_and_checkpoint(
                 }
                 break;
             }
+            
+            // Skip files that have already been completed
+            let state = handler.get_state();
+            if state.completed_files.contains(csv_file) {
+                if verbose {
+                    println!("⏭️ Skipping already completed file {}/{}: {}", i + 1, csv_files.len(), csv_file.display());
+                }
+                // Still need to add the corresponding temp file to our list
+                let temp_file = Path::new(&config.io.temp_directory)
+                    .join(format!("{}{}.csv", TEMP_FILE_PREFIX, i));
+                if temp_file.exists() {
+                    temp_files.push(temp_file);
+                }
+                continue;
+            }
         }
 
         // Traditional shutdown check for backwards compatibility
@@ -283,10 +299,33 @@ fn process_csv_files_with_algorithm_streaming_and_checkpoint(
 
         let temp_file = Path::new(&config.io.temp_directory)
             .join(format!("{}{}.csv", TEMP_FILE_PREFIX, i));
+            
+        // Check if we need to handle a partially processed file
+        let needs_append = if let Some(ref handler) = checkpoint_handler {
+            let state = handler.get_state();
+            // If this is the current file being processed and it has some progress
+            state.current_file_index == i && state.current_file_lines_processed > 0
+        } else {
+            false
+        };
+        
+        // If the temp file exists and we're resuming partial processing, use a different name
+        let actual_temp_file = if needs_append && temp_file.exists() {
+            // Create a new temp file name to avoid conflicts
+            let resume_temp_file = Path::new(&config.io.temp_directory)
+                .join(format!("{}{}_{}.csv", TEMP_FILE_PREFIX, i, "resume"));
+            if verbose {
+                println!("    ⚠️ Temp file {} already exists, creating resume file: {}", 
+                    temp_file.display(), resume_temp_file.display());
+            }
+            resume_temp_file
+        } else {
+            temp_file.clone()
+        };
 
         process_single_csv_with_checkpoint(
             csv_file,
-            &temp_file,
+            &actual_temp_file,
             &mut error_writer,
             memory_manager,
             config,
@@ -295,11 +334,24 @@ fn process_csv_files_with_algorithm_streaming_and_checkpoint(
             checkpoint_handler.clone(),
         )?;
 
-        temp_files.push(temp_file.clone());
+        // If we created a resume file, we need to merge it with the original
+        if needs_append && actual_temp_file != temp_file {
+            // Both the original temp file and resume file should be added
+            temp_files.push(temp_file.clone());
+            temp_files.push(actual_temp_file.clone());
+            
+            if verbose {
+                println!("    📄 Added both original and resume temp files for merging");
+            }
+        } else {
+            temp_files.push(actual_temp_file.clone());
+        }
 
-        // Add temp file to checkpoint state
+        // Add temp file to checkpoint state and mark file as completed
         if let Some(ref handler) = checkpoint_handler {
-            handler.add_temp_file(temp_file)?;
+            handler.add_temp_file(actual_temp_file)?;
+            // Mark the source file as completed
+            handler.mark_file_completed(csv_file.clone())?;
         }
     }
 
@@ -484,6 +536,8 @@ fn process_single_csv_with_checkpoint(
     let mut byte_offset = 0u64;
     let mut records_in_batch = 0;
     let mut temp_file_count = 0;
+    let mut last_progress_report = Instant::now();
+    let progress_interval = Duration::from_secs(30); // Report progress every 30 seconds
 
     // Clear RAM buffer before starting
     memory_manager.clear_ram_buffer();
@@ -504,6 +558,22 @@ fn process_single_csv_with_checkpoint(
             
             // Check if auto-save is needed
             handler.auto_save_if_needed()?;
+            
+            // Report progress periodically to show the system is not hung
+            if verbose && last_progress_report.elapsed() >= progress_interval {
+                let rate = valid_lines as f64 / last_progress_report.elapsed().as_secs_f64();
+                println!("    📊 Progress: {} lines processed ({} valid, {} invalid) - {:.0} lines/sec",
+                    total_lines, valid_lines, invalid_lines, rate);
+                
+                // Also report memory status
+                if let Ok(stats) = memory_manager.get_memory_stats() {
+                    println!("    💾 Memory: {:.1}% used, Buffer: {:.0}% full",
+                        stats.usage_percent,
+                        (stats.ram_buffer_used_bytes as f64 / stats.ram_buffer_capacity_bytes as f64) * 100.0);
+                }
+                
+                last_progress_report = Instant::now();
+            }
         }
 
         let line = match line_result {
@@ -626,6 +696,15 @@ fn process_single_csv_with_checkpoint(
                 if verbose {
                     println!("    ⚠️ Memory pressure detected during processing");
                 }
+                
+                // Try to reduce memory usage more aggressively
+                memory_manager.adjust_chunk_size_if_needed()?;
+                
+                // Force garbage collection hint
+                std::hint::black_box(());
+                
+                // Small delay to allow system to recover
+                thread::sleep(Duration::from_millis(100));
             }
         }
 
@@ -730,13 +809,15 @@ fn process_single_csv_with_algorithm_streaming_with_shutdown(
     let mut total_lines = 0;
     let mut invalid_lines = 0;
     let mut temp_file_count = 0;
+    let mut last_progress_report = Instant::now();
+    let progress_interval = Duration::from_secs(30); // Report progress every 30 seconds
 
     // Clear RAM buffer before starting
     memory_manager.clear_ram_buffer();
 
     // Stream files line by line as per algorithm with UTF-8 error handling
     for line_result in reader.lines() {
-        // Check for shutdown signal periodically (every 1000 lines for performance)
+        // Check for shutdown signal and report progress periodically (every 1000 lines for performance)
         if total_lines % 1000 == 0 {
             if let Some(ref flag) = shutdown_flag {
                 if flag.load(Ordering::Relaxed) {
@@ -745,6 +826,22 @@ fn process_single_csv_with_algorithm_streaming_with_shutdown(
                     }
                     break;
                 }
+            }
+            
+            // Report progress periodically to show the system is not hung
+            if verbose && last_progress_report.elapsed() >= progress_interval {
+                let rate = valid_lines as f64 / last_progress_report.elapsed().as_secs_f64();
+                println!("    📊 Progress: {} lines processed ({} valid, {} invalid) - {:.0} lines/sec",
+                    total_lines, valid_lines, invalid_lines, rate);
+                
+                // Also report memory status
+                if let Ok(stats) = memory_manager.get_memory_stats() {
+                    println!("    💾 Memory: {:.1}% used, Buffer: {:.0}% full",
+                        stats.usage_percent,
+                        (stats.ram_buffer_used_bytes as f64 / stats.ram_buffer_capacity_bytes as f64) * 100.0);
+                }
+                
+                last_progress_report = Instant::now();
             }
         }
         let line = match line_result {
@@ -844,6 +941,15 @@ fn process_single_csv_with_algorithm_streaming_with_shutdown(
                 if verbose {
                     println!("    ⚠️ Memory pressure detected during processing");
                 }
+                
+                // Try to reduce memory usage more aggressively
+                memory_manager.adjust_chunk_size_if_needed()?;
+                
+                // Force garbage collection hint
+                std::hint::black_box(());
+                
+                // Small delay to allow system to recover
+                thread::sleep(Duration::from_millis(100));
             }
         }
 
