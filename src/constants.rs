@@ -81,6 +81,12 @@ pub const MEMORY_PRESSURE_THRESHOLD_PERCENT: f64 = PERCENT_80;
 pub const MEMORY_CRITICAL_THRESHOLD_PERCENT: f64 = PERCENT_90;
 pub const LOW_MEMORY_THRESHOLD_FACTOR: f64 = MULTIPLIER_60;
 
+// Performance optimization constants
+pub const OPTIMIZED_AUTO_SAVE_BATCH_SIZE: usize = 50000;
+pub const OPTIMIZED_MEMORY_CHECK_FREQUENCY: usize = 5;
+pub const OPTIMIZED_CUDA_BATCH_MULTIPLIER: usize = 4;
+pub const OPTIMIZED_LARGE_CUDA_BATCH_MULTIPLIER: usize = 2;
+
 // Chunk size adjustment factors
 pub const CHUNK_SIZE_REDUCTION_FACTOR: f64 = 0.75;
 pub const CHUNK_SIZE_INCREASE_FACTOR: f64 = 1.25;
@@ -98,10 +104,10 @@ pub const BINARY_HEADER_SIZE_BYTES: usize = 16;
 pub const DEFAULT_PROGRESS_INTERVAL_SECONDS: u64 = 30;
 pub const VERBOSE_PROGRESS_INTERVAL_SECONDS: u64 = 5;
 
-// Batch processing constants
-pub const WRITE_BATCH_SIZE_RECORDS: usize = 5000;
-pub const WRITE_BUFFER_SIZE_MB: usize = 64;
-pub const MAX_WRITE_BATCH_SIZE_RECORDS: usize = 50000;
+// Batch processing constants (optimized for better performance)
+pub const WRITE_BATCH_SIZE_RECORDS: usize = 25000;  // Increased from 5000 for better throughput
+pub const WRITE_BUFFER_SIZE_MB: usize = 256;  // Increased from 64MB for better I/O performance
+pub const MAX_WRITE_BATCH_SIZE_RECORDS: usize = 100000;  // Increased from 50000 for large datasets
 pub const MIN_BATCH_SIZE: usize = 100;
 pub const MIN_OPERATIONS_FOR_OPTIMIZATION: usize = 3;
 pub const LOW_THROUGHPUT_THRESHOLD: f64 = 1000.0;
@@ -113,10 +119,10 @@ pub const THROUGHPUT_EFFICIENCY_THRESHOLD: f64 = 10000.0;
 pub const BYTES_PER_MB_FLOAT: f64 = MB_AS_F64;
 pub const EFFICIENCY_COMPONENTS_COUNT: f64 = 3.0;
 
-// Parallel processing constants
-pub const PARALLEL_FILE_PROCESSING_THREADS: usize = 4;
-pub const STREAMING_CHUNK_SIZE_MB: usize = 128;
-pub const PARALLEL_IO_QUEUE_SIZE: usize = 16;
+// Parallel processing constants (optimized for modern hardware)
+pub const PARALLEL_FILE_PROCESSING_THREADS: usize = 8;  // Increased from 4 for better CPU utilization
+pub const STREAMING_CHUNK_SIZE_MB: usize = 512;  // Increased from 128MB for better I/O throughput
+pub const PARALLEL_IO_QUEUE_SIZE: usize = 32;  // Increased from 16 for better async I/O overlap
 
 // Error handling and recovery constants
 pub const MAX_RETRY_ATTEMPTS: usize = 3;

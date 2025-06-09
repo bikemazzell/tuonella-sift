@@ -102,8 +102,11 @@ impl CheckpointHandler {
 
     /// Force save checkpoint (called during shutdown or periodically)
     pub fn force_save_checkpoint(&self) -> Result<()> {
-        let state = self.processing_state.lock().unwrap();
+        let mut state = self.processing_state.lock().unwrap();
         let mut checkpoint_manager = self.checkpoint_manager.lock().unwrap();
+        
+        // Clean up duplicate temp files before saving
+        self.deduplicate_temp_files(&mut state);
         
         checkpoint_manager.save_checkpoint(&*state)?;
         
@@ -112,15 +115,42 @@ impl CheckpointHandler {
                 checkpoint_manager.get_checkpoint_path().display());
             println!("📊 Progress: {:.1}% complete", state.calculate_progress());
             println!("📈 Records processed: {}", state.total_records_processed);
+            println!("📁 Temp files: {} unique files", state.temp_files_created.len());
         }
         
         Ok(())
     }
+    
+    /// Clean up duplicate temp files in the state
+    fn deduplicate_temp_files(&self, state: &mut crate::core::checkpoint::ProcessingState) {
+        let mut unique_temp_files = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        
+        for temp_file in &state.temp_files_created {
+            if seen.insert(temp_file.clone()) {
+                unique_temp_files.push(temp_file.clone());
+            } else if self.verbose {
+                println!("🧹 Removing duplicate temp file from checkpoint: {}", temp_file.display());
+            }
+        }
+        
+        let original_count = state.temp_files_created.len();
+        state.temp_files_created = unique_temp_files;
+        
+        if self.verbose && original_count != state.temp_files_created.len() {
+            println!("🧹 Cleaned temp files: {} -> {} (removed {} duplicates)", 
+                original_count, state.temp_files_created.len(), 
+                original_count - state.temp_files_created.len());
+        }
+    }
 
     /// Check if auto-save is needed and save if so
     pub fn auto_save_if_needed(&self) -> Result<()> {
-        let state = self.processing_state.lock().unwrap();
+        let mut state = self.processing_state.lock().unwrap();
         let mut checkpoint_manager = self.checkpoint_manager.lock().unwrap();
+        
+        // Clean up duplicate temp files before checking if save is needed
+        self.deduplicate_temp_files(&mut state);
         
         if checkpoint_manager.auto_save_if_needed(&*state)? {
             if self.verbose {
@@ -140,9 +170,10 @@ impl CheckpointHandler {
 
         let mut checkpoint_manager = self.checkpoint_manager.lock().unwrap();
         if checkpoint_manager.track_records_processed(record_count) {
-            let state = self.processing_state.lock().unwrap();
+            let mut state = self.processing_state.lock().unwrap();
+            // Clean up duplicate temp files before saving
+            self.deduplicate_temp_files(&mut state);
             checkpoint_manager.save_checkpoint(&*state)?;
-            
         }
         
         Ok(())
@@ -187,11 +218,21 @@ impl CheckpointHandler {
             .collect()
     }
     
-    /// Mark a CSV file as completed
+    /// Mark a CSV file as completed and update current file index
     pub fn mark_file_completed(&self, file_path: PathBuf) -> Result<()> {
         let mut state = self.processing_state.lock().unwrap();
         if !state.completed_files.contains(&file_path) {
-            state.completed_files.push(file_path);
+            state.completed_files.push(file_path.clone());
+            
+            // Update current_file_index to reflect the completed file
+            if let Some(index) = state.discovered_files.iter().position(|p| p == &file_path) {
+                state.current_file_index = index;
+                
+                if self.verbose {
+                    println!("📍 Updated current_file_index to {} after completing file: {}", 
+                        index, file_path.display());
+                }
+            }
         }
         Ok(())
     }

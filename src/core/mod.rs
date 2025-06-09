@@ -16,3 +16,5 @@ pub mod resource_manager;
 pub mod validation;
 pub mod simd_string_ops;
 pub mod external_sort_dedup;
+pub mod optimized_io;
+pub mod performance_analysis;

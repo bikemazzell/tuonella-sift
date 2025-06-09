@@ -126,11 +126,22 @@ impl MemoryManager {
             return Ok(false);
         }
 
-        self.ram_buffer.extend_from_slice(data);
-        self.ram_buffer_position += data.len();
+        // Optimize: Use direct memory copy instead of extend_from_slice to avoid reallocation
+        let start_pos = self.ram_buffer_position;
+        let end_pos = start_pos + data.len();
+
+        // Ensure buffer has enough capacity without reallocation
+        if self.ram_buffer.len() < end_pos {
+            self.ram_buffer.resize(end_pos, 0);
+        }
+
+        // Direct memory copy - much faster than extend_from_slice
+        self.ram_buffer[start_pos..end_pos].copy_from_slice(data);
+        self.ram_buffer_position = end_pos;
 
         self.record_counter += 1;
-        if self.record_counter % DYNAMIC_MEMORY_CHECK_INTERVAL_RECORDS == 0 {
+        // Optimize: Reduce memory pressure check frequency for better performance
+        if self.record_counter % (DYNAMIC_MEMORY_CHECK_INTERVAL_RECORDS * 5) == 0 {
             self.check_memory_pressure()?;
         }
 
@@ -142,8 +153,10 @@ impl MemoryManager {
     }
 
     pub fn clear_ram_buffer(&mut self) {
-        self.ram_buffer.clear();
+        // Optimize: Don't deallocate memory, just reset position for reuse
+        // This avoids expensive reallocation cycles
         self.ram_buffer_position = ZERO_USIZE;
+        // Keep the allocated capacity for reuse
     }
 
     #[cfg(feature = "cuda")]

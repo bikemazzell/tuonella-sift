@@ -311,11 +311,12 @@ fn process_csv_files_with_algorithm_streaming_and_checkpoint(
         
         // If the temp file exists and we're resuming partial processing, use a different name
         let actual_temp_file = if needs_append && temp_file.exists() {
-            // Create a new temp file name to avoid conflicts
+            // Create a new temp file name to avoid conflicts using consistent numbering
+            let next_index = temp_files.len();
             let resume_temp_file = Path::new(&config.io.temp_directory)
-                .join(format!("{}{}_{}.csv", TEMP_FILE_PREFIX, i, "resume"));
+                .join(format!("{}{}.csv", TEMP_FILE_PREFIX, next_index));
             if verbose {
-                println!("    ⚠️ Temp file {} already exists, creating resume file: {}", 
+                println!("    ⚠️ Temp file {} already exists, creating additional file: {}",
                     temp_file.display(), resume_temp_file.display());
             }
             resume_temp_file
@@ -500,7 +501,7 @@ fn write_error_line(
 }
 
 /// Process a single CSV file with checkpoint support
-fn process_single_csv_with_checkpoint(
+pub fn process_single_csv_with_checkpoint(
     csv_file: &Path,
     temp_file: &Path,
     error_writer: &mut BufWriter<File>,
@@ -562,16 +563,29 @@ fn process_single_csv_with_checkpoint(
             // Report progress periodically to show the system is not hung
             if verbose && last_progress_report.elapsed() >= progress_interval {
                 let rate = valid_lines as f64 / last_progress_report.elapsed().as_secs_f64();
-                println!("    📊 Progress: {} lines processed ({} valid, {} invalid) - {:.0} lines/sec",
-                    total_lines, valid_lines, invalid_lines, rate);
-                
+
+                // Get file name for better context
+                let file_name = csv_file.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown");
+
+                // Get file index from checkpoint handler
+                let state = handler.get_state();
+                let file_info = format!("File {}/{} [{}]",
+                    state.current_file_index + 1,
+                    state.discovered_files.len(),
+                    file_name);
+
+                println!("    📊 Progress {}: {} lines processed ({} valid, {} invalid) - {:.0} lines/sec",
+                    file_info, total_lines, valid_lines, invalid_lines, rate);
+
                 // Also report memory status
                 if let Ok(stats) = memory_manager.get_memory_stats() {
                     println!("    💾 Memory: {:.1}% used, Buffer: {:.0}% full",
                         stats.usage_percent,
                         (stats.ram_buffer_used_bytes as f64 / stats.ram_buffer_capacity_bytes as f64) * 100.0);
                 }
-                
+
                 last_progress_report = Instant::now();
             }
         }
@@ -691,20 +705,17 @@ fn process_single_csv_with_checkpoint(
             handler.update_file_progress(total_lines, byte_offset, valid_lines)?;
             handler.force_save_checkpoint()?;
 
-            // Check memory pressure after buffer flush
-            if memory_manager.check_memory_pressure()? {
+            // Optimize: Check memory pressure less frequently and handle more efficiently
+            if temp_file_count % 5 == 0 && memory_manager.check_memory_pressure()? {
                 if verbose {
                     println!("    ⚠️ Memory pressure detected during processing");
                 }
-                
+
                 // Try to reduce memory usage more aggressively
                 memory_manager.adjust_chunk_size_if_needed()?;
-                
-                // Force garbage collection hint
-                std::hint::black_box(());
-                
-                // Small delay to allow system to recover
-                thread::sleep(Duration::from_millis(100));
+
+                // Optimize: Remove unnecessary sleep and black_box calls
+                // These add overhead without significant benefit
             }
         }
 
@@ -713,8 +724,8 @@ fn process_single_csv_with_checkpoint(
         valid_lines += 1;
         records_in_batch += 1;
 
-        // Track records for auto-save
-        if records_in_batch >= 10000 {
+        // Optimize: Increase auto-save batch size for better performance
+        if records_in_batch >= 50000 {
             handler.track_records_and_save(records_in_batch)?;
             records_in_batch = 0;
         }
@@ -831,16 +842,22 @@ fn process_single_csv_with_algorithm_streaming_with_shutdown(
             // Report progress periodically to show the system is not hung
             if verbose && last_progress_report.elapsed() >= progress_interval {
                 let rate = valid_lines as f64 / last_progress_report.elapsed().as_secs_f64();
-                println!("    📊 Progress: {} lines processed ({} valid, {} invalid) - {:.0} lines/sec",
-                    total_lines, valid_lines, invalid_lines, rate);
-                
+
+                // Get file name for better context
+                let file_name = input_path.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown");
+
+                println!("    📊 Progress [{}]: {} lines processed ({} valid, {} invalid) - {:.0} lines/sec",
+                    file_name, total_lines, valid_lines, invalid_lines, rate);
+
                 // Also report memory status
                 if let Ok(stats) = memory_manager.get_memory_stats() {
                     println!("    💾 Memory: {:.1}% used, Buffer: {:.0}% full",
                         stats.usage_percent,
                         (stats.ram_buffer_used_bytes as f64 / stats.ram_buffer_capacity_bytes as f64) * 100.0);
                 }
-                
+
                 last_progress_report = Instant::now();
             }
         }
@@ -2151,30 +2168,29 @@ fn process_record_batch(
     #[cfg(feature = "cuda")]
     if let Some(processor) = cuda_processor {
         // Convert to the format expected by CUDA processor
-        let mut cuda_records: Vec<crate::cuda::processor::CudaRecord> = records_batch
-            .iter()
-            .map(|r| {
-                crate::cuda::processor::CudaRecord {
-                    user: r.user.clone(),
-                    password: r.password.clone(),
-                    url: r.url.clone(),
-                    normalized_user: String::new(),
-                    normalized_url: String::new(),
-                    field_count: r.field_count,  // Include field count
-                    all_fields: r.all_fields.clone(),  // Include all fields
-                }
-            })
-            .collect();
+        // Optimize: Pre-allocate with exact capacity to avoid reallocations
+        let mut cuda_records: Vec<crate::cuda::processor::CudaRecord> = Vec::with_capacity(records_batch.len());
+
+        // Use extend for better performance than collect()
+        cuda_records.extend(records_batch.iter().map(|r| {
+            crate::cuda::processor::CudaRecord {
+                user: r.user.clone(),
+                password: r.password.clone(),
+                url: r.url.clone(),
+                normalized_user: String::new(),
+                normalized_url: String::new(),
+                field_count: r.field_count,  // Include field count
+                all_fields: r.all_fields.clone(),  // Include all fields
+            }
+        }));
 
         if !cuda_records.is_empty() {
             processor.process_batch(&mut cuda_records, config.case_sensitive_usernames)?;
 
-            // Update our records with CUDA-processed data
-            for (i, cuda_record) in cuda_records.iter().enumerate() {
-                if i < records_batch.len() {
-                    records_batch[i].normalized_user = cuda_record.normalized_user.clone();
-                    records_batch[i].normalized_url = cuda_record.normalized_url.clone();
-                }
+            // Optimize: Update records more efficiently using zip iterator
+            for (record, cuda_record) in records_batch.iter_mut().zip(cuda_records.iter()) {
+                record.normalized_user = cuda_record.normalized_user.clone();
+                record.normalized_url = cuda_record.normalized_url.clone();
             }
         }
     } else {

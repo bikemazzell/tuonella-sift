@@ -3,11 +3,12 @@ use clap::Parser;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tuonella_sift::config::Config;
 use tuonella_sift::core::checkpoint::{CheckpointManager, ProcessingState, ProcessingPhase};
 use tuonella_sift::core::checkpoint_handler::CheckpointHandler;
-use tuonella_sift::core::deduplication::ProcessingStats;
+use tuonella_sift::core::deduplication::{ProcessingStats, process_single_csv_with_checkpoint};
+use tuonella_sift::core::memory_manager::MemoryManager;
 // Note: Using fully qualified paths for shutdown-aware functions
 use tuonella_sift::utils::system::format_duration;
 use tokio::signal;
@@ -237,66 +238,80 @@ async fn resume_processing_from_checkpoint(
     std::fs::create_dir_all(temp_dir)?;
 
     let mut new_temp_files = Vec::new();
-    let mut updated_state = state.clone();
+    let updated_state = state.clone(); // We start with the loaded state
     
+    // The CheckpointHandler will manage state updates during the resume.
+    let resume_checkpoint_handler = Arc::new(CheckpointHandler::new(
+        temp_dir,
+        config.io.checkpoint_auto_save_interval_seconds,
+        updated_state.clone(),
+        Some(shutdown_flag.clone()),
+        verbose,
+    ));
+
+    // Create a MemoryManager and a shared error writer for single file processing.
+    let mut memory_manager = MemoryManager::from_config(config)?;
+    let error_log_path = temp_dir.join("validation_errors_resume.log");
+    let error_file = std::fs::File::create(&error_log_path)?;
+    let mut error_writer = std::io::BufWriter::new(error_file);
+
     for (i, file_path) in remaining_files.iter().enumerate() {
         if shutdown_flag.load(Ordering::Relaxed) {
             println!("🛑 Processing interrupted during resume.");
-            
-            // Save updated checkpoint with current progress
-            updated_state.temp_files_created.extend(new_temp_files.clone());
-            let _ = checkpoint_manager.save_checkpoint(&updated_state);
+            // The CheckpointHandler will save the latest state on interrupt.
             return Ok(());
         }
 
-        // Update processing phase
-        updated_state.update_phase(tuonella_sift::core::checkpoint::ProcessingPhase::FileProcessing { 
-            file_index: state.current_file_index + i 
-        });
-
-        // During resume, only process files that haven't been completed yet
-        if !state.completed_files.contains(file_path) {
-            let _single_file_temp_dir = temp_dir.join(format!("single_file_{}", state.current_file_index + i));
-            std::fs::create_dir_all(&_single_file_temp_dir)?;
-
-            let single_file_dir = file_path.parent().unwrap_or(Path::new("."));
-            let temp_files_for_this_file = tuonella_sift::core::deduplication::process_csv_files_with_validation_and_shutdown(
-                single_file_dir,
-                config,
-                verbose,
-                Some(shutdown_flag.clone()),
-            )?;
-
-            new_temp_files.extend(temp_files_for_this_file);
-            updated_state.mark_file_completed(file_path.clone());
-        } else if verbose {
-            println!("   ⏭️ Skipping already processed file: {}", file_path.display());
-        }
-
-        // Incremental checkpoint save
-        if checkpoint_manager.track_records_processed(10000) { // Estimate records per file
-            // Only add new temp files that aren't already in the list
-            for temp_file in &new_temp_files {
-                if !updated_state.temp_files_created.contains(temp_file) {
-                    updated_state.temp_files_created.push(temp_file.clone());
-                }
-            }
-            if let Ok(saved) = checkpoint_manager.auto_save_if_needed(&updated_state) {
-                if saved && verbose {
-                    println!("💾 Incremental checkpoint saved");
-                }
-            }
-        }
-
         if verbose {
-            println!("📁 Processed remaining file {}/{}: {}",
-                     i + 1, remaining_files.len(), file_path.display());
+            println!("📁 Resuming processing for file {}/{}: {}", i + 1, remaining_files.len(), file_path.display());
+        }
+
+        // Update the phase in the handler's state to the current file being processed.
+        if let Some(original_index) = state.discovered_files.iter().position(|p| p == file_path) {
+             resume_checkpoint_handler.set_phase(
+                ProcessingPhase::FileProcessing {
+                    file_index: original_index
+                }
+            )?;
+        }
+
+        // Define a unique temp file for this pass using consistent naming.
+        let temp_file_for_this_pass = temp_dir.join(format!("temp_{}.csv", state.temp_files_created.len() + i));
+
+        // Call the public, single-file processing function.
+        if let Err(e) = process_single_csv_with_checkpoint(
+            file_path,
+            &temp_file_for_this_pass,
+            &mut error_writer,
+            &mut memory_manager,
+            config,
+            verbose,
+            Some(shutdown_flag.clone()),
+            Some(resume_checkpoint_handler.clone()),
+        ) {
+             eprintln!("❌ Error processing file {} during resume: {}", file_path.display(), e);
+             // Decide if we should stop or continue
+             continue;
+        }
+
+        // If a temp file was created, add it to our list for the final merge.
+        if temp_file_for_this_pass.exists() && temp_file_for_this_pass.metadata()?.len() > 0 {
+            new_temp_files.push(temp_file_for_this_pass);
+        }
+
+        // The handler internally marks the file as complete and saves the checkpoint.
+        resume_checkpoint_handler.mark_file_completed(file_path.clone())?;
+        
+        if verbose {
+            println!("✅ Completed processing for remaining file: {}", file_path.display());
         }
     }
 
+    // After the loop, the handler has the updated state.
+
     // Check if we were interrupted again
     if shutdown_flag.load(Ordering::Relaxed) {
-        println!("💾 Processing interrupted again. Checkpoint updated.");
+        println!("💾 Processing interrupted after file loop. Checkpoint updated.");
         return Ok(());
     }
 
@@ -500,7 +515,7 @@ async fn main() -> Result<()> {
 
     #[cfg(feature = "cuda")]
     if cuda_processor.is_some() {
-        println!("� GPU powers activated!");
+        println!("🚀 GPU powers activated!");
     } else if args.force_cpu {
         println!("🧠 CPU mode forced by user. GPUs are taking the day off.");
     } else if !config.processing.enable_cuda {
@@ -566,13 +581,6 @@ async fn main() -> Result<()> {
     }
 
     println!("\n⚔️ Commencing the great deduplication cull...");
-    
-    // Give the system a moment to stabilize after file processing
-    // This helps when memory pressure is high
-    if args.verbose {
-        println!("⏳ Preparing for deduplication phase...");
-    }
-    std::thread::sleep(Duration::from_secs(2));
     
     let stats = tuonella_sift::core::deduplication::deduplicate_records_with_resumption(
         &temp_files,

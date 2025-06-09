@@ -1,145 +1,232 @@
-Complete Algorithm
-1. Initialization ✅ COMPLETED
+# Tuonella Sift - Actual Implementation Algorithm
 
-    ✅ Query System Resources:
-        ✅ Determine:
-            ✅ Total and available GPU memory.
-            ✅ Total and available system RAM.
-        ✅ Parse user-specified memory limits:
-            ✅ GPU_limit = min(available_gpu_memory, user_gpu_limit)
-            ✅ RAM_limit = min(available_ram, user_ram_limit)
+## Overview
+Tuonella Sift uses a **HashMap-based deduplication** approach rather than external sorting. This provides better performance for deduplication while avoiding the complexity and I/O overhead of merge sort.
 
-    ✅ Set Chunk Sizes:
-        ✅ Calculate chunk sizes for processing:
-            ✅ RAM Buffer Size: Allocate ~90% of the RAM_limit for buffering file chunks.
-            ✅ GPU Chunk Size: Allocate ~90% of the GPU_limit for processing.
+## 1. Initialization ✅ COMPLETED
 
-    ✅ Preallocate Buffers:
-        ✅ Allocate a RAM buffer to hold file chunks.
-        ✅ Allocate a GPU buffer to process chunks.
+    ✅ Load Configuration:
+        ✅ Parse JSON configuration file (cpu.config.json or cuda.config.json)
+        ✅ Set up memory limits, batch sizes, and processing parameters
+        ✅ Configure username validation mode (email-only vs printable)
+    
+    ✅ Initialize Memory Manager:
+        ✅ Query available system RAM
+        ✅ Calculate working memory based on configured percentage
+        ✅ Set up memory monitoring and pressure detection
+        ✅ Initialize checkpoint handler for resume capability
+    
+    ✅ CUDA Setup (if enabled):
+        ✅ Check CUDA availability and GPU memory
+        ✅ Initialize CUDA context and memory pools
+        ✅ Configure GPU batch sizes based on available memory
 
-2. Processing Input CSV Files
-2.1 Stream Files and Pre-Validate Lines ✅ COMPLETED
+## 2. File Discovery and Pre-Processing ✅ COMPLETED
 
-    ✅ For Each CSV in the Input Folder:
-        ✅ Open the CSV file in streaming mode (read one line at a time).
+### 2.1 File Discovery
+    ✅ Scan input directory recursively for CSV files
+    ✅ Sort files for deterministic processing order
+    ✅ Group small files into batches for efficient processing
+    ✅ Track total size for progress estimation
 
-    ✅ Line-by-Line Pre-Validation (CPU):
-        ✅ For each line in the CSV:
-            ✅ Skip the Line If:
-                ✅ It contains no printable characters (e.g., binary, whitespace only).
-                ✅ It does not contain at least one delimiter (e.g., comma, semicolon, tab, or pipe).
-                ✅ It does not contain a valid username (email or printable characters based on config).
-            ✅ If the line passes all checks, store it in the RAM buffer.
+### 2.2 Streaming Pre-Validation ✅ COMPLETED
+    ✅ For Each CSV File:
+        ✅ Open file with buffered reader (8KB buffer)
+        ✅ Auto-detect delimiter (comma, semicolon, tab, or pipe)
+        ✅ Detect field positions using intelligent sampling
+    
+    ✅ Line-by-Line Validation:
+        ✅ Parse each line with detected delimiter
+        ✅ Validate username field:
+            ✅ Email mode: Must be valid email address
+            ✅ Printable mode: Must contain printable ASCII chars
+            ✅ Reject URL-like strings in username field
+        ✅ Validate password field (must exist)
+        ✅ Validate URL field (optional normalization)
+        ✅ Skip lines with fewer than 3 fields
+    
+    ✅ Batch Writing:
+        ✅ Accumulate valid records in memory buffer
+        ✅ Write to temporary file when buffer reaches threshold
+        ✅ Track validation errors in separate log file
 
-    ✅ Write Filtered Lines to a Temporary File:
-        ✅ Once the RAM buffer is full or the file has been fully read:
-            ✅ Write the valid lines to a temporary file.
-        ✅ Repeat until all lines from the CSV are processed.
+## 3. HashMap-Based Deduplication ✅ COMPLETED
 
-2.2 Transfer Validated Data to GPU ✅ COMPLETED
+### 3.1 In-Memory Deduplication
+    ✅ Initialize HashMap<String, Record> for storing unique records
+    ✅ Process validated records in batches:
+        ✅ For each record:
+            ✅ Normalize username (lowercase)
+            ✅ Normalize URL:
+                ✅ Strip protocols (http://, https://, android://, etc.)
+                ✅ Remove www. prefix
+                ✅ Keep only domain and path
+                ✅ Remove trailing slashes
+            ✅ Create composite key: "username|password|normalized_url"
+            ✅ Check if key exists in HashMap:
+                ✅ If new: Add to HashMap
+                ✅ If exists: Compare completeness scores
+                ✅ Keep record with higher score (more fields/data)
+    
+### 3.2 Memory Management
+    ✅ Monitor HashMap size against max_memory_records limit
+    ✅ When approaching limit:
+        ✅ Flush HashMap contents to output file
+        ✅ Clear HashMap and continue processing
+        ✅ Update checkpoint for resume capability
+    
+### 3.3 GPU Acceleration (Optional)
+    ✅ If CUDA enabled and beneficial:
+        ✅ Batch records for GPU processing
+        ✅ Use CUDA kernels for parallel normalization
+        ✅ Transfer normalized records back to CPU
+        ✅ Continue with HashMap deduplication on CPU
 
-    ✅ For Each Temporary File Generated:
-        ✅ Read the file in chunks of size RAM Buffer Size.
-        ✅ Transfer chunks to the GPU buffer for parallel processing.
+## 4. Completeness Scoring ✅ COMPLETED
 
-    ✅ GPU Processing (Parallelized):
-        ✅ Use CUDA kernels to process the lines in parallel:
-            ✅ Normalize Email Field:
-                ✅ Locate the email field using regex and convert it to lowercase.
-            ✅ Normalize URL Field:
-                ✅ Locate the URL field using regex and:
-                    ✅ If it starts with android://, strip everything except tdl.domain.name.
-                    ✅ If it starts with http:// or https://, strip everything except tdl.domain.name.
-                    ✅ If no protocol is specified, strip everything except tdl.domain.name.
-                ✅ Remove trailing slashes or fragments after /.
-            ✅ Parse the line into a Record struct with fields: username, password, normalized_url.
-        ✅ Pass processed records back to the CPU for deduplication.
+### 4.1 Duplicate Resolution Logic
+    ✅ When duplicate key found, calculate completeness scores:
+        ✅ Base score = number of fields
+        ✅ Bonus score = 0.1 * total character count
+        ✅ Total score = base + bonus
+    
+    ✅ Keep record with highest score:
+        ✅ More fields = higher priority
+        ✅ Longer field values = tiebreaker
+        ✅ Preserves most complete information
 
-2.3 Deduplication and Hash Map Storage ✅ COMPLETED
+### 4.2 Deduplication Rules
+    ✅ Same user + password + URL = Duplicate (keep best)
+    ✅ Same user, different password = Different records (keep both)
+    ✅ Same user, different URL = Different records (keep both)
+    ✅ Different users = Different records (keep both)
 
-    ✅ Insert Records into a Hash Map (CPU):
-        ✅ For each record returned from the GPU:
-            ✅ Use a composite key combining core fields: normalized_email|password|normalized_url.
-            ✅ Records are considered duplicates if core fields (email, password, URL) are identical.
-            ✅ Keep ALL records with the same email if they have ANY differences in core fields:
-                ✅ Different passwords: user@email.com,123,site.com vs user@email.com,456,site.com (KEEP BOTH)
-                ✅ Different URLs: user@email.com,123,first.com vs user@email.com,123,second.com (KEEP BOTH)
-            ✅ If core fields are identical but field counts differ:
-                ✅ Keep the record with MORE fields (more complete data)
-                ✅ Example: user@email.com,pass,site.com vs user@email.com,pass,site.com,extra → Keep the longer one
-            ✅ If the composite key already exists (exact duplicate):
-                ✅ Compare the completeness of the existing record and the new record.
-                ✅ Retain the record with the higher completeness score:
-                    ✅ Completeness Scoring: More fields populated, greater character count, etc.
+## 5. Output Generation ✅ COMPLETED
 
-    ✅ Repeat for All Temporary Files:
-        ✅ Process all temporary files generated in step 2.1, one at a time.
+### 5.1 Final Output Writing
+    ✅ Create output file with standardized format:
+        ✅ Header: username,password,url[,additional_fields...]
+        ✅ Preserve all original fields beyond core three
+        ✅ Write in batches for I/O efficiency
+    
+    ✅ Output Organization:
+        ✅ Single output file (no sorting applied)
+        ✅ Records in HashMap iteration order
+        ✅ Configurable output size limits (future feature)
 
-3. Final Output ✅ COMPLETED
+### 5.2 Cleanup
+    ✅ Remove all temporary files
+    ✅ Delete checkpoint files after successful completion
+    ✅ Log final statistics
 
-    ✅ Write Final Records to a Temporary File:
-        ✅ Once all temporary files have been processed and deduplicated, write the hash map contents to a final temporary file.
-        ✅ Use the output format: username,password,normalized_url.
+## 6. Memory and Resource Management ✅ COMPLETED
 
-    ✅ Output the Final File:
-        ✅ Write the final temporary file to the user-specified output location.
-        ✅ Cleanup temporary files after successful processing.
+### 6.1 Memory Monitoring
+    ✅ Track system memory usage in real-time
+    ✅ Detect memory pressure conditions
+    ✅ Adjust batch sizes dynamically:
+        ✅ Reduce when memory pressure detected
+        ✅ Increase when memory available
+    
+### 6.2 Resource Limits
+    ✅ Respect configured memory percentage
+    ✅ Flush HashMap before reaching limits
+    ✅ GPU memory management (if CUDA enabled)
+    ✅ Temporary file size management
 
-4. Memory Management ✅ COMPLETED
+## 7. Error Handling and Recovery ✅ COMPLETED
 
-    ✅ Dynamic Resource Allocation:
-        ✅ Continuously monitor GPU and RAM usage.
-        ✅ Dynamically adjust chunk sizes if memory usage approaches the user-specified limits:
-            ✅ Increase chunk size if memory usage is low.
-            ✅ Decrease chunk size if memory usage is high.
+### 7.1 Validation Error Handling
+    ✅ Log invalid records with reasons:
+        ✅ No printable characters
+        ✅ Missing delimiter
+        ✅ Invalid username format
+        ✅ Insufficient fields
+    ✅ Write errors to validation_errors.log
+    ✅ Continue processing without data loss
 
-    ✅ Release Resources:
-        ✅ Free GPU and RAM buffers after processing each chunk to avoid memory leaks.
+### 7.2 Checkpoint and Resume
+    ✅ Save progress at regular intervals:
+        ✅ Current file being processed
+        ✅ Records processed count
+        ✅ Current phase (pre-processing/deduplication)
+    ✅ Resume from checkpoint after interruption:
+        ✅ Skip already processed files
+        ✅ Continue from last position
+        ✅ Restore statistics and counters
+    
+### 7.3 Signal Handling
+    ✅ Graceful shutdown on Ctrl+C
+    ✅ Save current state before exit
+    ✅ Allow resume from interruption point
 
-5. Error Handling ✅ COMPLETED
+## 8. Performance Optimizations ✅ COMPLETED
 
-    ✅ Handle Corrupted or Invalid Lines:
-        ✅ Log invalid or skipped lines to a separate file for later review.
+### 8.1 I/O Optimizations
+    ✅ Buffered reading with 8KB buffers
+    ✅ Batch writing to reduce syscalls
+    ✅ Async I/O for parallel file processing
+    ✅ Memory-mapped files for large datasets
 
-    ✅ Graceful Recovery:
-        ✅ If memory limits are exceeded or an error occurs:
-            ✅ Split the current chunk into smaller sub-chunks and retry.
-            ✅ Ensure no data is lost by resuming from the last processed file or chunk.
+### 8.2 Processing Optimizations
+    ✅ Pre-compiled regex patterns
+    ✅ SIMD string operations where available
+    ✅ Parallel processing with thread pools
+    ✅ Lock-free data structures where possible
 
-6. Optimization
+### 8.3 Memory Optimizations
+    ✅ Reusable buffer pools
+    ✅ Efficient string handling
+    ✅ Minimal allocations in hot paths
+    ✅ Strategic HashMap sizing
 
-    ✅ Overlap File I/O and GPU Processing:
-        ✅ While the GPU processes one chunk, the CPU loads and filters the next chunk into RAM.
-        ✅ Use double buffering to overlap these operations.
+### 8.4 CUDA Optimizations (Optional)
+    ✅ Pinned memory for faster transfers
+    ✅ Multiple CUDA streams for overlap
+    ✅ Optimized kernel configurations
+    ✅ Batch processing for GPU efficiency
 
-    ✅ Adaptive Chunk Sizing:
-        ✅ Dynamically adjust chunk sizes based on:
-            ✅ Observed processing speed.
-            ✅ Resource availability (GPU and RAM usage).
+## 9. Configuration and Features ✅ COMPLETED
 
-    ✅ Batch Processed Data:
-        ✅ Batch multiple processed records into a single write operation to reduce I/O overhead.
+### 9.1 Username Validation Modes
+    ✅ Email-only mode (default):
+        ✅ Strict email validation
+        ✅ RFC-compliant email parsing
+    ✅ Printable character mode:
+        ✅ Accept any printable ASCII string
+        ✅ Exclude URL-like patterns
+        ✅ Heuristic password detection
 
-    ✅ Streaming and Parallel Processing:
-        ✅ Implement parallel file processing with thread pools.
-        ✅ Add streaming optimizations for large file handling.
-        ✅ Create parallel I/O operations for multiple files.
+### 9.2 Performance Monitoring
+    ✅ Real-time progress tracking
+    ✅ ETA calculations
+    ✅ Throughput measurements
+    ✅ Memory usage statistics
 
-7. Username Validation Enhancement ✅ COMPLETED
+### 9.3 Configuration Options
+    ✅ Memory limits (percentage-based)
+    ✅ Batch sizes and chunk sizes
+    ✅ Thread counts and parallelism
+    ✅ CUDA enablement
+    ✅ Verbosity levels
+    ✅ Progress intervals
 
-    ✅ Configurable Username Validation:
-        ✅ Added `email_username_only` boolean flag to [deduplication] config section
-        ✅ When `email_username_only = true`: Only email addresses are accepted as usernames (original behavior)
-        ✅ When `email_username_only = false`: Any printable character string is accepted as username
+## 10. Key Differences from External Sort Algorithm
 
-    ✅ Printable Username Validation:
-        ✅ Validates usernames using printable ASCII characters (0x21-0x7E)
-        ✅ Excludes URL-like strings (starting with http://, https://, android://, etc.)
-        ✅ Excludes empty or whitespace-only fields
-        ✅ Excludes very long strings that appear to be passwords (heuristic)
+### Why HashMap Instead of External Sort?
+    ✅ **Better for Deduplication**: Direct lookup is O(1) vs O(log n) for sorted data
+    ✅ **Less I/O**: No intermediate sorted chunks to write/read
+    ✅ **Simpler Implementation**: No complex k-way merge needed
+    ✅ **Memory Efficient**: Only stores unique records in memory
+    ✅ **Preserves Input Order**: No unnecessary reordering
 
-    ✅ Field Detection Enhancement:
-        ✅ Updated field detection logic to work with both email and printable username modes
-        ✅ Maintains backward compatibility with existing email-only configurations
-        ✅ Comprehensive test coverage for both validation modes
+### Trade-offs
+    ❌ Output is not sorted (rarely needed for deduplicated data)
+    ❌ Cannot handle datasets larger than available memory partitions
+    ✅ Perfect for deduplication use case where uniqueness matters more than order
+
+### The External Sort Module
+    The `external_sort_dedup.rs` module exists but is not used in the main flow. It could be activated for:
+    - Scenarios requiring sorted output
+    - Datasets too large for HashMap approach
+    - Future enhancement for ordered deduplication
