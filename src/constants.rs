@@ -163,6 +163,9 @@ pub const DEFAULT_PASSWORD_HEADER: &str = "password";
 pub const DEFAULT_URL_HEADER: &str = "url";
 pub const FIELD_NAME_TEMPLATE: &str = "field_{}";  // Template for additional field names
 
+// CSV line size estimation constants
+pub const CSV_LINE_SIZE_ESTIMATE_BYTES: usize = 200;  // Fallback estimate for CSV line size when line counting fails
+
 // Buffer and memory constants
 pub const NEWLINE_BYTE: u8 = b'\n';  // Newline character as byte
 

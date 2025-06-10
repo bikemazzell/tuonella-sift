@@ -8,6 +8,8 @@ use tuonella_sift::config::Config;
 use tuonella_sift::core::checkpoint::{CheckpointManager, ProcessingState, ProcessingPhase};
 use tuonella_sift::core::checkpoint_handler::CheckpointHandler;
 use tuonella_sift::core::deduplication::{ProcessingStats, process_single_csv_with_checkpoint};
+use tuonella_sift::utils::io::count_lines;
+use tuonella_sift::constants::CSV_LINE_SIZE_ESTIMATE_BYTES;
 use tuonella_sift::core::memory_manager::MemoryManager;
 // Note: Using fully qualified paths for shutdown-aware functions
 use tuonella_sift::utils::system::format_duration;
@@ -273,10 +275,31 @@ async fn resume_processing_from_checkpoint(
                     file_index: original_index
                 }
             )?;
+            
+            // If this is a different file than what was being processed, reset file-specific state
+            if original_index != state.current_file_index {
+                // Estimate line count for progress tracking
+                let estimated_lines = match count_lines(file_path) {
+                    Ok(lines) => lines,
+                    Err(_) => {
+                        // Fallback: improved estimation based on file size and CSV characteristics
+                        let file_size = std::fs::metadata(file_path).map(|m| m.len()).unwrap_or(0);
+                        // CSV credential files typically have 60-120 bytes per line
+                        // Use conservative estimate from constants
+                        (file_size / CSV_LINE_SIZE_ESTIMATE_BYTES as u64) as usize
+                    }
+                };
+                resume_checkpoint_handler.update_current_file(original_index, file_path, estimated_lines)?;
+                if verbose {
+                    println!("    🔄 Starting new file, reset checkpoint state");
+                }
+            }
         }
 
         // Define a unique temp file for this pass using consistent naming.
-        let temp_file_for_this_pass = temp_dir.join(format!("temp_{}.csv", state.temp_files_created.len() + i));
+        // Continue numbering from where we left off, avoiding conflicts
+        let checkpoint_state = resume_checkpoint_handler.get_state();
+        let temp_file_for_this_pass = temp_dir.join(format!("temp_{}.csv", checkpoint_state.temp_files_created.len()));
 
         // Call the public, single-file processing function.
         if let Err(e) = process_single_csv_with_checkpoint(
@@ -296,7 +319,9 @@ async fn resume_processing_from_checkpoint(
 
         // If a temp file was created, add it to our list for the final merge.
         if temp_file_for_this_pass.exists() && temp_file_for_this_pass.metadata()?.len() > 0 {
-            new_temp_files.push(temp_file_for_this_pass);
+            new_temp_files.push(temp_file_for_this_pass.clone());
+            // Register the temp file with the checkpoint handler
+            resume_checkpoint_handler.add_temp_file(temp_file_for_this_pass)?;
         }
 
         // The handler internally marks the file as complete and saves the checkpoint.

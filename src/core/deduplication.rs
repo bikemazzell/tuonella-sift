@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Write, Read};
+use std::io::{BufRead, BufReader, BufWriter, Write, Read, Seek};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -65,15 +65,13 @@ pub fn process_csv_files_with_algorithm_streaming(
     let mut error_writer = BufWriter::new(error_file);
 
     if verbose {
-        println!("🔄 Processing {} CSV files with algorithm-compliant streaming...", csv_files.len());
-        println!("📊 Memory Manager Status:");
-        let stats = memory_manager.get_memory_stats()?;
-        println!("{}", stats.format_summary());
+        println!("🔄 Processing {} CSV files...", csv_files.len());
     }
 
     for (i, csv_file) in csv_files.iter().enumerate() {
         if verbose {
-            println!("📂 Processing file {}/{}: {}", i + 1, csv_files.len(), csv_file.display());
+            let file_name = csv_file.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
+            println!("📂 File {}/{}: {}", i + 1, csv_files.len(), file_name);
         }
 
         let temp_file = Path::new(&config.io.temp_directory)
@@ -167,10 +165,7 @@ fn process_csv_files_with_algorithm_streaming_with_shutdown(
     let mut error_writer = BufWriter::new(error_file);
 
     if verbose {
-        println!("🔄 Processing {} CSV files with algorithm-compliant streaming...", csv_files.len());
-        println!("📊 Memory Manager Status:");
-        let stats = memory_manager.get_memory_stats()?;
-        println!("{}", stats.format_summary());
+        println!("🔄 Processing {} CSV files...", csv_files.len());
     }
 
     for (i, csv_file) in csv_files.iter().enumerate() {
@@ -185,7 +180,8 @@ fn process_csv_files_with_algorithm_streaming_with_shutdown(
         }
 
         if verbose {
-            println!("📂 Processing file {}/{}: {}", i + 1, csv_files.len(), csv_file.display());
+            let file_name = csv_file.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
+            println!("📂 File {}/{}: {}", i + 1, csv_files.len(), file_name);
         }
 
         let temp_file = Path::new(&config.io.temp_directory)
@@ -242,10 +238,7 @@ fn process_csv_files_with_algorithm_streaming_and_checkpoint(
     let mut error_writer = BufWriter::new(error_file);
 
     if verbose {
-        println!("🔄 Processing {} CSV files with algorithm-compliant streaming...", csv_files.len());
-        println!("📊 Memory Manager Status:");
-        let stats = memory_manager.get_memory_stats()?;
-        println!("{}", stats.format_summary());
+        println!("🔄 Processing {} CSV files...", csv_files.len());
     }
 
     for (i, csv_file) in csv_files.iter().enumerate() {
@@ -287,7 +280,8 @@ fn process_csv_files_with_algorithm_streaming_and_checkpoint(
         }
 
         if verbose {
-            println!("📂 Processing file {}/{}: {}", i + 1, csv_files.len(), csv_file.display());
+            let file_name = csv_file.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
+            println!("📂 File {}/{}: {}", i + 1, csv_files.len(), file_name);
         }
 
         // Update checkpoint handler with current file info
@@ -375,12 +369,8 @@ fn process_csv_files_with_algorithm_streaming_and_checkpoint(
 
 /// Estimate the number of lines in a file
 fn estimate_file_lines(file_path: &Path) -> Result<usize> {
-    let file = File::open(file_path)?;
-    let file_size = file.metadata()?.len();
-    
-    // Estimate based on average line length (conservative estimate)
-    // Assuming average line length of ~100 characters
-    Ok((file_size / 100) as usize)
+    // Use the optimized line counting from utils::io
+    crate::utils::io::count_lines(file_path)
 }
 
 /// Analyze existing output file to determine deduplication state for resumption
@@ -527,26 +517,45 @@ pub fn process_single_csv_with_checkpoint(
 
     let handler = checkpoint_handler.unwrap();
     
-    // Open the input file
-    let file = File::open(csv_file)?;
+    // Get current checkpoint state to determine if we need to resume mid-file
+    let checkpoint_state = handler.get_state();
+    let should_resume_mid_file = checkpoint_state.current_file_byte_offset > 0 && 
+                                 checkpoint_state.current_file_lines_processed > 0;
+    
+    // Open the input file and seek to checkpoint position if resuming
+    let mut file = File::open(csv_file)?;
+    if should_resume_mid_file {
+        if verbose {
+            println!("    🔄 Resuming from byte offset {} (line {})", 
+                checkpoint_state.current_file_byte_offset, 
+                checkpoint_state.current_file_lines_processed);
+        }
+        file.seek(std::io::SeekFrom::Start(checkpoint_state.current_file_byte_offset))?;
+    }
     let reader = BufReader::new(file);
 
-    let mut valid_lines = 0;
-    let mut total_lines = 0;
+    // Initialize counters from checkpoint state if resuming
+    let mut valid_lines = if should_resume_mid_file { 
+        checkpoint_state.current_file_lines_processed 
+    } else { 
+        0 
+    };
+    let mut total_lines = valid_lines; // Assume valid lines = total lines for simplicity
     let mut invalid_lines = 0;
-    let mut byte_offset = 0u64;
+    let mut byte_offset = checkpoint_state.current_file_byte_offset;
     let mut records_in_batch = 0;
     let mut temp_file_count = 0;
     let mut last_progress_report = Instant::now();
-    let progress_interval = Duration::from_secs(30); // Report progress every 30 seconds
+    let mut last_progress_lines = valid_lines; // Track lines processed since last report
+    let progress_interval = Duration::from_secs(config.performance.report_interval_seconds);
 
     // Clear RAM buffer before starting
     memory_manager.clear_ram_buffer();
 
     // Stream files line by line
     for line_result in reader.lines() {
-        // Check for shutdown signal periodically
-        if total_lines % 1000 == 0 {
+        // Check for shutdown signal periodically (every 50K lines for better performance)
+        if total_lines % 50000 == 0 {
             if handler.check_shutdown_and_save()? {
                 if verbose {
                     println!("    🛑 Shutdown signal received during line processing at line {}", total_lines);
@@ -562,31 +571,41 @@ pub fn process_single_csv_with_checkpoint(
             
             // Report progress periodically to show the system is not hung
             if verbose && last_progress_report.elapsed() >= progress_interval {
-                let rate = valid_lines as f64 / last_progress_report.elapsed().as_secs_f64();
+                let elapsed_secs = last_progress_report.elapsed().as_secs_f64();
+                let lines_since_last_report = valid_lines - last_progress_lines;
+                
+                // Avoid division by very small numbers and ensure meaningful rate calculation
+                let rate = if elapsed_secs > 0.1 && lines_since_last_report > 0 {
+                    lines_since_last_report as f64 / elapsed_secs
+                } else {
+                    0.0
+                };
 
                 // Get file name for better context
                 let file_name = csv_file.file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("unknown");
 
-                // Get file index from checkpoint handler
+                // Get file index and progress from checkpoint handler
                 let state = handler.get_state();
-                let file_info = format!("File {}/{} [{}]",
+                
+                // Calculate file progress percentage
+                let file_progress_pct = if state.current_file_total_lines > 0 {
+                    (total_lines as f64 / state.current_file_total_lines as f64 * 100.0).min(100.0)
+                } else {
+                    0.0
+                };
+
+                // Simplified progress message with file progress
+                println!("    📊 File {}/{}: {} ({}%) - {:.1}M lines/sec",
                     state.current_file_index + 1,
                     state.discovered_files.len(),
-                    file_name);
-
-                println!("    📊 Progress {}: {} lines processed ({} valid, {} invalid) - {:.0} lines/sec",
-                    file_info, total_lines, valid_lines, invalid_lines, rate);
-
-                // Also report memory status
-                if let Ok(stats) = memory_manager.get_memory_stats() {
-                    println!("    💾 Memory: {:.1}% used, Buffer: {:.0}% full",
-                        stats.usage_percent,
-                        (stats.ram_buffer_used_bytes as f64 / stats.ram_buffer_capacity_bytes as f64) * 100.0);
-                }
+                    file_name,
+                    file_progress_pct as u32,
+                    rate / 1_000_000.0);
 
                 last_progress_report = Instant::now();
+                last_progress_lines = valid_lines;
             }
         }
 
@@ -676,12 +695,20 @@ pub fn process_single_csv_with_checkpoint(
 
             // Get a writer for the temp file
             let current_temp_file = if temp_file_count > 0 {
-                let path_str = temp_file.to_string_lossy();
-                let base_name = path_str.trim_end_matches(".csv");
-                PathBuf::from(format!("{}_{}.csv", base_name, temp_file_count))
+                // Instead of numbered temp files, use the next sequential main temp file
+                let current_state = handler.get_state();
+                let next_temp_index = current_state.temp_files_created.len();
+                let temp_dir = temp_file.parent().unwrap_or(Path::new("./temp"));
+                temp_dir.join(format!("temp_{}.csv", next_temp_index))
             } else {
                 temp_file.to_path_buf()
             };
+
+            // Register the temp file with checkpoint handler 
+            // This ensures all temp files (main and numbered) are tracked
+            if let Err(e) = handler.add_temp_file(current_temp_file.clone()) {
+                eprintln!("Warning: Failed to register temp file {}: {}", current_temp_file.display(), e);
+            }
 
             // Open file in append mode if it exists, otherwise create
             let file = if temp_file_count > 0 {
@@ -707,15 +734,8 @@ pub fn process_single_csv_with_checkpoint(
 
             // Optimize: Check memory pressure less frequently and handle more efficiently
             if temp_file_count % 5 == 0 && memory_manager.check_memory_pressure()? {
-                if verbose {
-                    println!("    ⚠️ Memory pressure detected during processing");
-                }
-
                 // Try to reduce memory usage more aggressively
                 memory_manager.adjust_chunk_size_if_needed()?;
-
-                // Optimize: Remove unnecessary sleep and black_box calls
-                // These add overhead without significant benefit
             }
         }
 
@@ -740,12 +760,22 @@ pub fn process_single_csv_with_checkpoint(
 
         // Write the final temp file
         let final_temp_file = if temp_file_count > 0 {
-            let path_str = temp_file.to_string_lossy();
-            let base_name = path_str.trim_end_matches(".csv");
-            PathBuf::from(format!("{}_{}.csv", base_name, temp_file_count))
+            // Instead of numbered temp files, use the next sequential main temp file
+            let current_state = handler.get_state();
+            let next_temp_index = current_state.temp_files_created.len();
+            let temp_dir = temp_file.parent().unwrap_or(Path::new("./temp"));
+            temp_dir.join(format!("temp_{}.csv", next_temp_index))
         } else {
             temp_file.to_path_buf()
         };
+
+        // Register the final temp file with checkpoint handler
+        // Only register if it's a numbered temp file (main temp file was already registered)
+        if temp_file_count > 0 {
+            if let Err(e) = handler.add_temp_file(final_temp_file.clone()) {
+                eprintln!("Warning: Failed to register final temp file {}: {}", final_temp_file.display(), e);
+            }
+        }
 
         // Open file in append mode if it exists, otherwise create
         let file = if temp_file_count > 0 {
@@ -805,9 +835,7 @@ fn process_single_csv_with_algorithm_streaming_with_shutdown(
     verbose: bool,
     shutdown_flag: Option<Arc<AtomicBool>>,
 ) -> Result<()> {
-    if verbose {
-        println!("  📖 Streaming file: {}", input_path.display());
-    }
+    // File processing will show progress via periodic updates
 
     // Open the CSV file in streaming mode (read one line at a time)
     let file = File::open(input_path)?;
@@ -821,7 +849,7 @@ fn process_single_csv_with_algorithm_streaming_with_shutdown(
     let mut invalid_lines = 0;
     let mut temp_file_count = 0;
     let mut last_progress_report = Instant::now();
-    let progress_interval = Duration::from_secs(30); // Report progress every 30 seconds
+    let progress_interval = Duration::from_secs(config.performance.report_interval_seconds);
 
     // Clear RAM buffer before starting
     memory_manager.clear_ram_buffer();
@@ -848,15 +876,10 @@ fn process_single_csv_with_algorithm_streaming_with_shutdown(
                     .and_then(|n| n.to_str())
                     .unwrap_or("unknown");
 
-                println!("    📊 Progress [{}]: {} lines processed ({} valid, {} invalid) - {:.0} lines/sec",
-                    file_name, total_lines, valid_lines, invalid_lines, rate);
-
-                // Also report memory status
-                if let Ok(stats) = memory_manager.get_memory_stats() {
-                    println!("    💾 Memory: {:.1}% used, Buffer: {:.0}% full",
-                        stats.usage_percent,
-                        (stats.ram_buffer_used_bytes as f64 / stats.ram_buffer_capacity_bytes as f64) * 100.0);
-                }
+                // Simplified progress message
+                println!("    📊 Processing {}: {:.1}M lines/sec",
+                    file_name,
+                    rate / 1_000_000.0);
 
                 last_progress_report = Instant::now();
             }
@@ -955,10 +978,6 @@ fn process_single_csv_with_algorithm_streaming_with_shutdown(
 
             // Check memory pressure after buffer flush
             if memory_manager.check_memory_pressure()? {
-                if verbose {
-                    println!("    ⚠️ Memory pressure detected during processing");
-                }
-                
                 // Try to reduce memory usage more aggressively
                 memory_manager.adjust_chunk_size_if_needed()?;
                 
@@ -1545,13 +1564,13 @@ pub fn process_temp_files_with_gpu(
 
     if verbose {
         println!("🚀 Processing {} temporary files with GPU acceleration...", temp_files.len());
-        println!("📊 GPU batch size: {}", cuda_processor.get_optimal_batch_size());
     }
 
     // Process each temporary file generated in step 2.1
     for (i, temp_file) in temp_files.iter().enumerate() {
         if verbose {
-            println!("🔄 Processing temp file {}/{}: {}", i + 1, temp_files.len(), temp_file.display());
+            let file_name = temp_file.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
+            println!("🔄 Temp file {}/{}: {}", i + 1, temp_files.len(), file_name);
         }
 
         process_single_temp_file_with_gpu(

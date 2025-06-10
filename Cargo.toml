@@ -12,7 +12,7 @@ categories = ["command-line-utilities", "data-structures"]
 [dependencies]
 # Core async runtime and utilities
 tokio = { version = "1.35", features = ["full"] }
-rayon = "1.8"
+rayon = "1.8.1"
 futures = "0.3"
 
 # CSV processing and data handling
@@ -36,7 +36,7 @@ bytes = "1.5"
 # System ut0.35.2s
 sysinfo = "0.35.2"
 walkdir = "2.4"
-clap = { version = "4.5.39", features = ["derive"] }
+clap = { version = "4.5.40", features = ["derive"] }
 num_cpus = "1.17.0"
 glob = "0.3"
 rand = "0.9.1"

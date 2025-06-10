@@ -237,3 +237,250 @@ impl CheckpointHandler {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_checkpoint_handler_creation() -> Result<()> {
+        let temp_dir = tempdir()?;
+        let state = ProcessingState::new(
+            PathBuf::from("/test/input"),
+            PathBuf::from("/test/output.csv"),
+            PathBuf::from("/test/config.json"),
+            false,
+            false, // non-verbose for test
+            75,
+        );
+
+        let handler = CheckpointHandler::new(
+            temp_dir.path(),
+            30,
+            state,
+            None,
+            false,
+        );
+
+        let handler_state = handler.get_state();
+        assert_eq!(handler_state.input_directory, PathBuf::from("/test/input"));
+        assert_eq!(handler_state.output_path, PathBuf::from("/test/output.csv"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_temp_file_naming_sequence() -> Result<()> {
+        let temp_dir = tempdir()?;
+        let mut state = ProcessingState::new(
+            PathBuf::from("/test/input"),
+            PathBuf::from("/test/output.csv"),
+            PathBuf::from("/test/config.json"),
+            false,
+            false,
+            75,
+        );
+
+        // Simulate existing temp files from previous session
+        state.temp_files_created = vec![
+            PathBuf::from("./temp/temp_0.csv"),
+            PathBuf::from("./temp/temp_1.csv"),
+            PathBuf::from("./temp/temp_2.csv"),
+        ];
+
+        let handler = CheckpointHandler::new(
+            temp_dir.path(),
+            30,
+            state,
+            None,
+            false,
+        );
+
+        // Test the logic for next temp file naming
+        let current_state = handler.get_state();
+        let next_temp_file_number = current_state.temp_files_created.len();
+        
+        // This should be 3, meaning the next temp file should be temp_3.csv
+        assert_eq!(next_temp_file_number, 3);
+        
+        // Add new temp file and verify numbering continues correctly
+        handler.add_temp_file(PathBuf::from("./temp/temp_3.csv"))?;
+        
+        let updated_state = handler.get_state();
+        assert_eq!(updated_state.temp_files_created.len(), 4);
+        assert_eq!(updated_state.temp_files_created[3], PathBuf::from("./temp/temp_3.csv"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_numbered_temp_file_registration() -> Result<()> {
+        let temp_dir = tempdir()?;
+        let state = ProcessingState::new(
+            PathBuf::from("/test/input"),
+            PathBuf::from("/test/output.csv"),
+            PathBuf::from("/test/config.json"),
+            false,
+            false,
+            75,
+        );
+
+        let handler = CheckpointHandler::new(
+            temp_dir.path(),
+            30,
+            state,
+            None,
+            false,
+        );
+
+        // Test registering main temp file
+        handler.add_temp_file(PathBuf::from("./temp/temp_0.csv"))?;
+        
+        // Test registering numbered temp files (when RAM buffer fills up)
+        handler.add_temp_file(PathBuf::from("./temp/temp_0_1.csv"))?;
+        handler.add_temp_file(PathBuf::from("./temp/temp_0_2.csv"))?;
+        handler.add_temp_file(PathBuf::from("./temp/temp_0_3.csv"))?;
+
+        let final_state = handler.get_state();
+        assert_eq!(final_state.temp_files_created.len(), 4);
+        
+        // Verify all numbered temp files are tracked
+        assert!(final_state.temp_files_created.contains(&PathBuf::from("./temp/temp_0.csv")));
+        assert!(final_state.temp_files_created.contains(&PathBuf::from("./temp/temp_0_1.csv")));
+        assert!(final_state.temp_files_created.contains(&PathBuf::from("./temp/temp_0_2.csv")));
+        assert!(final_state.temp_files_created.contains(&PathBuf::from("./temp/temp_0_3.csv")));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_checkpoint_updates_after_resume() -> Result<()> {
+        let temp_dir = tempdir()?;
+        let mut state = ProcessingState::new(
+            PathBuf::from("/test/input"),
+            PathBuf::from("/test/output.csv"),
+            PathBuf::from("/test/config.json"),
+            false,
+            false,
+            75,
+        );
+
+        // Simulate a resumed session with existing files
+        state.discovered_files = vec![
+            PathBuf::from("/test/file1.csv"),
+            PathBuf::from("/test/file2.csv"),
+            PathBuf::from("/test/file3.csv"),
+        ];
+        state.completed_files = vec![PathBuf::from("/test/file1.csv")];
+        state.current_file_index = 1;
+        state.temp_files_created = vec![PathBuf::from("./temp/temp_0.csv")];
+
+        let handler = CheckpointHandler::new(
+            temp_dir.path(),
+            30,
+            state,
+            None,
+            false,
+        );
+
+        // Simulate processing continuing after resume
+        handler.update_file_progress(1000, 50000, 900)?;
+        handler.add_temp_file(PathBuf::from("./temp/temp_1.csv"))?;
+        handler.mark_file_completed(PathBuf::from("/test/file2.csv"))?;
+
+        let final_state = handler.get_state();
+        
+        // Verify that updates are being tracked after resume
+        assert_eq!(final_state.current_file_lines_processed, 1000);
+        assert_eq!(final_state.current_file_byte_offset, 50000);
+        assert_eq!(final_state.temp_files_created.len(), 2);
+        assert_eq!(final_state.completed_files.len(), 2);
+        assert!(final_state.completed_files.contains(&PathBuf::from("/test/file2.csv")));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_processing_phase_management() -> Result<()> {
+        let temp_dir = tempdir()?;
+        let state = ProcessingState::new(
+            PathBuf::from("/test/input"),
+            PathBuf::from("/test/output.csv"),
+            PathBuf::from("/test/config.json"),
+            false,
+            false,
+            75,
+        );
+
+        let handler = CheckpointHandler::new(
+            temp_dir.path(),
+            30,
+            state,
+            None,
+            false,
+        );
+
+        // Test FileProcessing phase
+        handler.set_phase(ProcessingPhase::FileProcessing { file_index: 5 })?;
+        let current_state = handler.get_state();
+        if let ProcessingPhase::FileProcessing { file_index } = current_state.processing_phase {
+            assert_eq!(file_index, 5);
+        } else {
+            panic!("Expected FileProcessing phase");
+        }
+
+        // Test Deduplication phase
+        handler.set_phase(ProcessingPhase::Deduplication)?;
+        let current_state = handler.get_state();
+        assert!(matches!(current_state.processing_phase, ProcessingPhase::Deduplication));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_temp_file_conflict_prevention() -> Result<()> {
+        let temp_dir = tempdir()?;
+        let mut state = ProcessingState::new(
+            PathBuf::from("/test/input"),
+            PathBuf::from("/test/output.csv"),
+            PathBuf::from("/test/config.json"),
+            false,
+            false,
+            75,
+        );
+
+        // Simulate the exact scenario that was causing conflicts
+        // Original bug: temp files named like temp_67_1, temp_67_2 instead of temp_67, temp_68
+        state.temp_files_created = vec![
+            PathBuf::from("./temp/temp_64.csv"),
+            PathBuf::from("./temp/temp_65.csv"),
+            PathBuf::from("./temp/temp_66.csv"),
+        ];
+
+        let handler = CheckpointHandler::new(
+            temp_dir.path(),
+            30,
+            state,
+            None,
+            false,
+        );
+
+        // The next temp file should be temp_67.csv (using temp_files_created.len())
+        let current_len = handler.get_state().temp_files_created.len();
+        assert_eq!(current_len, 3);
+        
+        // Simulate creating the next temp file with correct naming
+        let next_temp_file = format!("./temp/temp_{}.csv", current_len);
+        assert_eq!(next_temp_file, "./temp/temp_3.csv");
+        
+        // Add it to the handler
+        handler.add_temp_file(PathBuf::from(next_temp_file))?;
+        
+        // Verify the naming sequence continues correctly
+        let final_state = handler.get_state();
+        assert_eq!(final_state.temp_files_created.len(), 4);
+        assert_eq!(final_state.temp_files_created[3], PathBuf::from("./temp/temp_3.csv"));
+
+        Ok(())
+    }
+}

@@ -421,12 +421,30 @@ impl CheckpointManager {
 
     /// Get files that can be skipped (already completed)
     pub fn get_remaining_files(&self, state: &ProcessingState) -> Vec<PathBuf> {
-        state.discovered_files
-            .iter()
-            .skip(state.current_file_index)
-            .filter(|file| !state.completed_files.contains(file))
-            .cloned()
-            .collect()
+        // If we're in the middle of processing a file (has byte offset), 
+        // include it in remaining files so it can be resumed
+        let include_current_file = state.current_file_byte_offset > 0 && 
+                                   state.current_file_lines_processed > 0 &&
+                                   state.current_file_index < state.discovered_files.len();
+        
+        if include_current_file {
+            // Include the current file being processed plus all subsequent files
+            state.discovered_files
+                .iter()
+                .skip(state.current_file_index)
+                .filter(|file| !state.completed_files.contains(file))
+                .cloned()
+                .collect()
+        } else {
+            // Skip the current file index (which should be completed or not started)
+            // and include all subsequent files
+            state.discovered_files
+                .iter()
+                .skip(state.current_file_index + 1)
+                .filter(|file| !state.completed_files.contains(file))
+                .cloned()
+                .collect()
+        }
     }
 
     /// Resume from a specific byte offset in a file
@@ -495,6 +513,215 @@ mod tests {
 
         manager.cleanup_checkpoint()?;
         assert!(!manager.checkpoint_exists());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_checkpoint_resume_temp_file_naming() -> Result<()> {
+        let temp_dir = tempdir()?;
+        let mut manager = CheckpointManager::new(temp_dir.path(), 30);
+
+        // Create initial state with existing temp files
+        let mut state = ProcessingState::new(
+            PathBuf::from("/test/input"),
+            PathBuf::from("/test/output.csv"),
+            PathBuf::from("/test/config.json"),
+            false,
+            true,
+            75,
+        );
+
+        // Simulate having processed some files and created temp files
+        state.temp_files_created = vec![
+            PathBuf::from("./temp/temp_0.csv"),
+            PathBuf::from("./temp/temp_1.csv"),
+            PathBuf::from("./temp/temp_2.csv"),
+        ];
+        state.current_file_index = 3;
+        state.processing_phase = ProcessingPhase::FileProcessing { file_index: 3 };
+
+        // Save checkpoint
+        manager.save_checkpoint(&state)?;
+
+        // Load checkpoint to simulate resume
+        let loaded_state = manager.load_checkpoint()?;
+        
+        // Verify temp file count and naming logic
+        assert_eq!(loaded_state.temp_files_created.len(), 3);
+        assert_eq!(loaded_state.current_file_index, 3);
+        
+        // The next temp file should be temp_3.csv (using temp_files_created.len())
+        let next_temp_file_index = loaded_state.temp_files_created.len();
+        assert_eq!(next_temp_file_index, 3);
+
+        manager.cleanup_checkpoint()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_checkpoint_processing_phase_transitions() -> Result<()> {
+        let temp_dir = tempdir()?;
+        let mut manager = CheckpointManager::new(temp_dir.path(), 30);
+
+        let mut state = ProcessingState::new(
+            PathBuf::from("/test/input"),
+            PathBuf::from("/test/output.csv"),
+            PathBuf::from("/test/config.json"),
+            false,
+            true,
+            75,
+        );
+
+        // Test FileProcessing phase
+        state.processing_phase = ProcessingPhase::FileProcessing { file_index: 5 };
+        manager.save_checkpoint(&state)?;
+        let loaded_state = manager.load_checkpoint()?;
+        if let ProcessingPhase::FileProcessing { file_index } = loaded_state.processing_phase {
+            assert_eq!(file_index, 5);
+        } else {
+            panic!("Expected FileProcessing phase");
+        }
+
+        // Test Deduplication phase
+        state.processing_phase = ProcessingPhase::Deduplication;
+        manager.save_checkpoint(&state)?;
+        let loaded_state = manager.load_checkpoint()?;
+        assert!(matches!(loaded_state.processing_phase, ProcessingPhase::Deduplication));
+
+        manager.cleanup_checkpoint()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_checkpoint_temp_file_tracking() -> Result<()> {
+        let temp_dir = tempdir()?;
+        let mut manager = CheckpointManager::new(temp_dir.path(), 30);
+
+        let mut state = ProcessingState::new(
+            PathBuf::from("/test/input"),
+            PathBuf::from("/test/output.csv"),
+            PathBuf::from("/test/config.json"),
+            false,
+            true,
+            75,
+        );
+
+        // Add temp files progressively and test persistence
+        state.temp_files_created.push(PathBuf::from("./temp/temp_0.csv"));
+        manager.save_checkpoint(&state)?;
+        
+        let loaded_state = manager.load_checkpoint()?;
+        assert_eq!(loaded_state.temp_files_created.len(), 1);
+        assert_eq!(loaded_state.temp_files_created[0], PathBuf::from("./temp/temp_0.csv"));
+
+        // Add more temp files
+        state.temp_files_created.push(PathBuf::from("./temp/temp_1.csv"));
+        state.temp_files_created.push(PathBuf::from("./temp/temp_1_1.csv")); // numbered temp file
+        state.temp_files_created.push(PathBuf::from("./temp/temp_1_2.csv")); // numbered temp file
+        state.temp_files_created.push(PathBuf::from("./temp/temp_2.csv"));
+        
+        manager.save_checkpoint(&state)?;
+        let loaded_state = manager.load_checkpoint()?;
+        assert_eq!(loaded_state.temp_files_created.len(), 5);
+        
+        // Verify numbered temp files are tracked
+        assert!(loaded_state.temp_files_created.contains(&PathBuf::from("./temp/temp_1_1.csv")));
+        assert!(loaded_state.temp_files_created.contains(&PathBuf::from("./temp/temp_1_2.csv")));
+
+        manager.cleanup_checkpoint()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_checkpoint_file_progress_tracking() -> Result<()> {
+        let temp_dir = tempdir()?;
+        let mut manager = CheckpointManager::new(temp_dir.path(), 30);
+
+        let mut state = ProcessingState::new(
+            PathBuf::from("/test/input"),
+            PathBuf::from("/test/output.csv"),
+            PathBuf::from("/test/config.json"),
+            false,
+            true,
+            75,
+        );
+
+        // Set up file progress tracking
+        state.discovered_files = vec![
+            PathBuf::from("/test/file1.csv"),
+            PathBuf::from("/test/file2.csv"),
+            PathBuf::from("/test/file3.csv"),
+        ];
+        state.completed_files = vec![PathBuf::from("/test/file1.csv")];
+        state.current_file_index = 1;
+        state.current_file_lines_processed = 50000;
+        state.current_file_total_lines = 100000;
+        state.current_file_byte_offset = 2500000;
+
+        manager.save_checkpoint(&state)?;
+        let loaded_state = manager.load_checkpoint()?;
+
+        assert_eq!(loaded_state.discovered_files.len(), 3);
+        assert_eq!(loaded_state.completed_files.len(), 1);
+        assert_eq!(loaded_state.current_file_index, 1);
+        assert_eq!(loaded_state.current_file_lines_processed, 50000);
+        assert_eq!(loaded_state.current_file_total_lines, 100000);
+        assert_eq!(loaded_state.current_file_byte_offset, 2500000);
+
+        manager.cleanup_checkpoint()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_remaining_files_with_partial_processing() -> Result<()> {
+        let temp_dir = tempdir()?;
+        let manager = CheckpointManager::new(temp_dir.path(), 30);
+
+        let mut state = ProcessingState::new(
+            PathBuf::from("/test/input"),
+            PathBuf::from("/test/output.csv"),
+            PathBuf::from("/test/config.json"),
+            false,
+            false,
+            75,
+        );
+
+        // Set up discovered files
+        state.discovered_files = vec![
+            PathBuf::from("/test/file0.csv"),
+            PathBuf::from("/test/file1.csv"),
+            PathBuf::from("/test/file2.csv"),
+            PathBuf::from("/test/file3.csv"),
+        ];
+
+        // Set up scenario: files 0-1 completed, file 2 partially processed, file 3 not started
+        state.completed_files = vec![
+            PathBuf::from("/test/file0.csv"),
+            PathBuf::from("/test/file1.csv"),
+        ];
+        state.current_file_index = 2;
+        state.current_file_byte_offset = 50000; // Partially processed
+        state.current_file_lines_processed = 1000;
+
+        let remaining_files = manager.get_remaining_files(&state);
+        
+        // Should include the partially processed file (index 2) and subsequent file (index 3)
+        assert_eq!(remaining_files.len(), 2);
+        assert_eq!(remaining_files[0], PathBuf::from("/test/file2.csv"));
+        assert_eq!(remaining_files[1], PathBuf::from("/test/file3.csv"));
+
+        // Test scenario where current file is completed (no byte offset)
+        state.current_file_byte_offset = 0;
+        state.current_file_lines_processed = 0;
+        state.current_file_index = 2;
+        state.completed_files.push(PathBuf::from("/test/file2.csv"));
+
+        let remaining_files = manager.get_remaining_files(&state);
+        
+        // Should only include file 3 (file 2 is completed)
+        assert_eq!(remaining_files.len(), 1);
+        assert_eq!(remaining_files[0], PathBuf::from("/test/file3.csv"));
 
         Ok(())
     }

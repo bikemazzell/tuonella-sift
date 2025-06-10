@@ -184,9 +184,6 @@ impl MemoryManager {
             };
             
             if should_warn {
-                let (current_usage, usage_percent) = self.resources.get_current_memory_usage()?;
-                println!("⚠️  Memory pressure detected: {:.2}% usage ({} bytes)",
-                        usage_percent, current_usage);
                 self.last_memory_pressure_warning = Some(Instant::now());
             }
         }

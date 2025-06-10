@@ -38,10 +38,39 @@ pub fn write_csv<W: Write>(writer: &mut BufWriter<W>, records: &[Vec<String>]) -
     Ok(())
 }
 
-/// Count lines in a file efficiently
+/// Count lines in a file efficiently using system tools when available
 ///
-/// Uses a buffer to read chunks of the file and count newlines
+/// Tries multiple approaches in order of speed:
+/// 1. `wc -l` command (fastest for large files)
+/// 2. Manual counting with buffered reading (fallback)
 pub fn count_lines(path: &Path) -> Result<usize> {
+    count_lines_optimized(path)
+}
+
+/// Fast line counting using wc -l command when available
+pub fn count_lines_optimized(path: &Path) -> Result<usize> {
+    // Try using wc -l first (much faster for large files)
+    if let Ok(output) = std::process::Command::new("wc")
+        .arg("-l")
+        .arg(path)
+        .output()
+    {
+        if output.status.success() {
+            let output_str = String::from_utf8_lossy(&output.stdout);
+            if let Some(first_part) = output_str.split_whitespace().next() {
+                if let Ok(count) = first_part.parse::<usize>() {
+                    return Ok(count);
+                }
+            }
+        }
+    }
+
+    // Fallback to manual counting if wc command fails
+    count_lines_manual(path)
+}
+
+/// Manual line counting as fallback when wc is not available
+fn count_lines_manual(path: &Path) -> Result<usize> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
     let count = reader.lines().filter_map(|line| line.ok()).count();
@@ -123,6 +152,29 @@ mod tests {
         assert_eq!(files.len(), 2);
         assert!(files.iter().any(|f| f == &csv1));
         assert!(files.iter().any(|f| f == &csv2));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_count_lines_optimized() -> Result<()> {
+        let temp_dir = tempdir()?;
+        let file_path = temp_dir.path().join("test_lines.txt");
+
+        // Create test file with known line count
+        let content = "line1\nline2\nline3\nline4\nline5\n";
+        std::fs::write(&file_path, content)?;
+
+        // Test optimized counting (should use wc -l)
+        let count = count_lines_optimized(&file_path)?;
+        assert_eq!(count, 5);
+
+        // Test manual counting
+        let manual_count = count_lines_manual(&file_path)?;
+        assert_eq!(manual_count, 5);
+
+        // Both methods should give same result
+        assert_eq!(count, manual_count);
 
         Ok(())
     }
