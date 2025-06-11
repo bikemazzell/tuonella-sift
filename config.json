@@ -4,14 +4,14 @@
   },
   "processing": {
     "enable_cuda": true,
-    "chunk_size_mb": 4096,
-    "record_chunk_size": 200000,
-    "max_memory_records": 15000000
+    "chunk_size_mb": 8192,
+    "record_chunk_size": 500000,
+    "max_memory_records": 40000000
   },
   "io": {
     "temp_directory": "./temp",
     "output_directory": "./output",
-    "checkpoint_auto_save_interval_seconds": 30
+    "checkpoint_auto_save_interval_seconds": 60
   },
   "deduplication": {
     "case_sensitive_usernames": false,
@@ -24,22 +24,22 @@
   },
   "performance": {
     "enable_monitoring": true,
-    "report_interval_seconds": 30,
+    "report_interval_seconds": 60,
     "show_detailed_metrics": true
   },
   "cuda": {
-    "gpu_memory_usage_percent": 95,
-    "estimated_bytes_per_record": 500,
-    "min_batch_size": 200000,
-    "max_batch_size": 8000000,
-    "max_url_buffer_size": 2048,
-    "max_username_buffer_size": 512,
+    "gpu_memory_usage_percent": 90,
+    "estimated_bytes_per_record": 400,
+    "min_batch_size": 500000,
+    "max_batch_size": 20000000,
+    "max_url_buffer_size": 4096,
+    "max_username_buffer_size": 1024,
     "threads_per_block": 1024,
     "batch_sizes": {
-      "small": 200000,
-      "medium": 1000000,
-      "large": 2000000,
-      "xlarge": 4000000
+      "small": 500000,
+      "medium": 2500000,
+      "large": 5000000,
+      "xlarge": 10000000
     }
   }
 }

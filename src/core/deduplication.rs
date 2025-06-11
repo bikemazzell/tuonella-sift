@@ -131,17 +131,19 @@ pub fn process_csv_files_with_checkpoint(
     shutdown_flag: Option<Arc<AtomicBool>>,
     checkpoint_handler: Option<Arc<CheckpointHandler>>,
 ) -> Result<Vec<PathBuf>> {
-    // Create a config-based memory manager
-    let mut memory_manager = MemoryManager::from_config(config)?;
+    use crate::core::parallel_file_processor::ParallelFileProcessor;
 
-    // Delegate to the new algorithm-compliant implementation with checkpoint support
-    process_csv_files_with_algorithm_streaming_and_checkpoint(
-        input_dir, 
-        config, 
-        &mut memory_manager, 
-        verbose, 
+    let csv_files = super::validation::discover_csv_files(input_dir)?;
+    let temp_dir = Path::new(&config.io.temp_directory);
+    std::fs::create_dir_all(temp_dir)?;
+
+    let processor = ParallelFileProcessor::new(config.clone());
+    processor.process_files_parallel(
+        &csv_files,
+        temp_dir,
+        verbose,
         shutdown_flag,
-        checkpoint_handler
+        checkpoint_handler,
     )
 }
 
@@ -217,161 +219,7 @@ fn process_csv_files_with_algorithm_streaming_with_shutdown(
     Ok(temp_files)
 }
 
-/// Process CSV files with algorithm-compliant streaming, shutdown support, and checkpoint handling
-fn process_csv_files_with_algorithm_streaming_and_checkpoint(
-    input_dir: &Path,
-    config: &Config,
-    memory_manager: &mut MemoryManager,
-    verbose: bool,
-    shutdown_flag: Option<Arc<AtomicBool>>,
-    checkpoint_handler: Option<Arc<CheckpointHandler>>,
-) -> Result<Vec<PathBuf>> {
-    let mut temp_files = Vec::new();
-    let csv_files = super::validation::discover_csv_files(input_dir)?;
 
-    // Create temporary directory if it doesn't exist
-    fs::create_dir_all(&config.io.temp_directory)?;
-
-    // Create error log file
-    let error_log_path = Path::new(&config.io.temp_directory).join(VALIDATION_ERRORS_FILENAME);
-    let error_file = File::create(&error_log_path)?;
-    let mut error_writer = BufWriter::new(error_file);
-
-    if verbose {
-        println!("🔄 Processing {} CSV files...", csv_files.len());
-    }
-
-    for (i, csv_file) in csv_files.iter().enumerate() {
-        // Check for shutdown signal and save checkpoint if needed
-        if let Some(ref handler) = checkpoint_handler {
-            if handler.check_shutdown_and_save()? {
-                if verbose {
-                    println!("🛑 Shutdown signal received. Processing stopped at file {} of {}", i + 1, csv_files.len());
-                }
-                break;
-            }
-            
-            // Skip files that have already been completed
-            let state = handler.get_state();
-            if state.completed_files.contains(csv_file) {
-                if verbose {
-                    println!("⏭️ Skipping already completed file {}/{}: {}", i + 1, csv_files.len(), csv_file.display());
-                }
-                // Still need to add the corresponding temp file to our list
-                let temp_file = Path::new(&config.io.temp_directory)
-                    .join(format!("{}{}.csv", TEMP_FILE_PREFIX, i));
-                if temp_file.exists() {
-                    temp_files.push(temp_file);
-                }
-                continue;
-            }
-        }
-
-        // Traditional shutdown check for backwards compatibility
-        if checkpoint_handler.is_none() {
-            if let Some(ref flag) = shutdown_flag {
-                if flag.load(Ordering::Relaxed) {
-                    if verbose {
-                        println!("🛑 Shutdown signal received. Stopping file processing.");
-                    }
-                    break;
-                }
-            }
-        }
-
-        if verbose {
-            let file_name = csv_file.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
-            println!("📂 File {}/{}: {}", i + 1, csv_files.len(), file_name);
-        }
-
-        // Update checkpoint handler with current file info
-        if let Some(ref handler) = checkpoint_handler {
-            // Get line count for the file (estimate if exact count not available)
-            let estimated_lines = estimate_file_lines(csv_file)?;
-            handler.update_current_file(i, csv_file, estimated_lines)?;
-        }
-
-        let temp_file = Path::new(&config.io.temp_directory)
-            .join(format!("{}{}.csv", TEMP_FILE_PREFIX, i));
-            
-        // Check if we need to handle a partially processed file
-        let needs_append = if let Some(ref handler) = checkpoint_handler {
-            let state = handler.get_state();
-            // If this is the current file being processed and it has some progress
-            state.current_file_index == i && state.current_file_lines_processed > 0
-        } else {
-            false
-        };
-        
-        // If the temp file exists and we're resuming partial processing, use a different name
-        let actual_temp_file = if needs_append && temp_file.exists() {
-            // Create a new temp file name to avoid conflicts using consistent numbering
-            let next_index = temp_files.len();
-            let resume_temp_file = Path::new(&config.io.temp_directory)
-                .join(format!("{}{}.csv", TEMP_FILE_PREFIX, next_index));
-            if verbose {
-                println!("    ⚠️ Temp file {} already exists, creating additional file: {}",
-                    temp_file.display(), resume_temp_file.display());
-            }
-            resume_temp_file
-        } else {
-            temp_file.clone()
-        };
-
-        process_single_csv_with_checkpoint(
-            csv_file,
-            &actual_temp_file,
-            &mut error_writer,
-            memory_manager,
-            config,
-            verbose,
-            shutdown_flag.clone(),
-            checkpoint_handler.clone(),
-        )?;
-
-        // If we created a resume file, we need to merge it with the original
-        if needs_append && actual_temp_file != temp_file {
-            // Both the original temp file and resume file should be added
-            temp_files.push(temp_file.clone());
-            temp_files.push(actual_temp_file.clone());
-            
-            if verbose {
-                println!("    📄 Added both original and resume temp files for merging");
-            }
-        } else {
-            temp_files.push(actual_temp_file.clone());
-        }
-
-        // Add temp file to checkpoint state and mark file as completed
-        if let Some(ref handler) = checkpoint_handler {
-            handler.add_temp_file(actual_temp_file)?;
-            // Mark the source file as completed
-            handler.mark_file_completed(csv_file.clone())?;
-        }
-    }
-
-    error_writer.flush()?;
-    if verbose {
-        println!("📝 Error log written to: {}", error_log_path.display());
-        if let Some(ref flag) = shutdown_flag {
-            if flag.load(Ordering::Relaxed) {
-                println!("⚠️ Processing interrupted by shutdown signal");
-            } else {
-                println!("✅ Algorithm-compliant file processing complete!");
-            }
-        } else {
-            println!("✅ Algorithm-compliant file processing complete!");
-        }
-    }
-
-    Ok(temp_files)
-}
-
-/// Estimate the number of lines in a file
-fn estimate_file_lines(file_path: &Path) -> Result<usize> {
-    // Use the optimized line counting from utils::io
-    crate::utils::io::count_lines(file_path)
-}
 
 /// Analyze existing output file to determine deduplication state for resumption
 pub fn analyze_existing_output(
@@ -516,10 +364,17 @@ pub fn process_single_csv_with_checkpoint(
     }
 
     let handler = checkpoint_handler.unwrap();
-    
+
     // Get current checkpoint state to determine if we need to resume mid-file
     let checkpoint_state = handler.get_state();
-    let should_resume_mid_file = checkpoint_state.current_file_byte_offset > 0 && 
+
+    // Only resume if this specific file is the one being resumed AND has a valid offset
+    // Check if the current file path matches the file we're supposed to be processing
+    let current_file_matches = checkpoint_state.current_file_index < checkpoint_state.discovered_files.len() &&
+                               checkpoint_state.discovered_files[checkpoint_state.current_file_index] == csv_file;
+
+    let should_resume_mid_file = current_file_matches &&
+                                 checkpoint_state.current_file_byte_offset > 0 &&
                                  checkpoint_state.current_file_lines_processed > 0;
     
     // Open the input file and seek to checkpoint position if resuming
@@ -534,15 +389,27 @@ pub fn process_single_csv_with_checkpoint(
     }
     let reader = BufReader::new(file);
 
-    // Initialize counters from checkpoint state if resuming
-    let mut valid_lines = if should_resume_mid_file { 
-        checkpoint_state.current_file_lines_processed 
-    } else { 
-        0 
+    // Initialize counters from checkpoint state if resuming, otherwise start fresh
+    let mut valid_lines = if should_resume_mid_file {
+        checkpoint_state.current_file_lines_processed
+    } else {
+        // Reset checkpoint state for new file to prevent false resume messages
+        if !current_file_matches {
+            handler.update_current_file(
+                checkpoint_state.discovered_files.iter().position(|f| f == csv_file).unwrap_or(0),
+                csv_file,
+                0 // Will be updated later when we know the actual line count
+            )?;
+        }
+        0
     };
     let mut total_lines = valid_lines; // Assume valid lines = total lines for simplicity
     let mut invalid_lines = 0;
-    let mut byte_offset = checkpoint_state.current_file_byte_offset;
+    let mut byte_offset = if should_resume_mid_file {
+        checkpoint_state.current_file_byte_offset
+    } else {
+        0
+    };
     let mut records_in_batch = 0;
     let mut temp_file_count = 0;
     let mut last_progress_report = Instant::now();
@@ -571,15 +438,8 @@ pub fn process_single_csv_with_checkpoint(
             
             // Report progress periodically to show the system is not hung
             if verbose && last_progress_report.elapsed() >= progress_interval {
-                let elapsed_secs = last_progress_report.elapsed().as_secs_f64();
-                let lines_since_last_report = valid_lines - last_progress_lines;
-                
-                // Avoid division by very small numbers and ensure meaningful rate calculation
-                let rate = if elapsed_secs > 0.1 && lines_since_last_report > 0 {
-                    lines_since_last_report as f64 / elapsed_secs
-                } else {
-                    0.0
-                };
+                let _elapsed_secs = last_progress_report.elapsed().as_secs_f64();
+                let _lines_since_last_report = valid_lines - last_progress_lines;
 
                 // Get file name for better context
                 let file_name = csv_file.file_name()
@@ -589,20 +449,12 @@ pub fn process_single_csv_with_checkpoint(
                 // Get file index and progress from checkpoint handler
                 let state = handler.get_state();
                 
-                // Calculate file progress percentage
-                let file_progress_pct = if state.current_file_total_lines > 0 {
-                    (total_lines as f64 / state.current_file_total_lines as f64 * 100.0).min(100.0)
-                } else {
-                    0.0
-                };
-
-                // Simplified progress message with file progress
-                println!("    📊 File {}/{}: {} ({}%) - {:.1}M lines/sec",
+                // Simplified progress message without broken percentage/speed
+                println!("    📊 File {}/{}: {} - {} lines processed",
                     state.current_file_index + 1,
                     state.discovered_files.len(),
                     file_name,
-                    file_progress_pct as u32,
-                    rate / 1_000_000.0);
+                    total_lines);
 
                 last_progress_report = Instant::now();
                 last_progress_lines = valid_lines;
@@ -1192,6 +1044,250 @@ pub fn deduplicate_records_with_shutdown(
         shutdown_flag,
         None,
     )
+}
+
+/// Enhanced deduplication with multi-stream CUDA support
+#[cfg(feature = "cuda")]
+pub fn deduplicate_records_with_multi_stream(
+    temp_files: &[PathBuf],
+    output_path: &Path,
+    config: &Config,
+    multi_stream_processor: Option<&crate::cuda::multi_stream_processor::MultiStreamCudaProcessor>,
+    verbose: bool,
+    shutdown_flag: Option<Arc<AtomicBool>>,
+    checkpoint_handler: Option<Arc<CheckpointHandler>>,
+) -> Result<ProcessingStats> {
+
+
+    let start_time = Instant::now();
+    let mut dedup_map: HashMap<String, Record> = HashMap::new();
+    let mut stats = ProcessingStats::default();
+    stats.files_processed = temp_files.len();
+
+    let output_file = File::create(output_path)?;
+    let mut writer = BufWriter::new(output_file);
+    let mut header_written = false;
+
+    if verbose {
+        println!("🚀 Multi-stream GPU deduplication starting...");
+        if let Some(processor) = multi_stream_processor {
+            println!("{}", processor.format_performance_summary());
+        }
+    }
+
+    for (i, temp_file) in temp_files.iter().enumerate() {
+        if let Some(ref flag) = shutdown_flag {
+            if flag.load(Ordering::Relaxed) {
+                if verbose {
+                    println!("🛑 Shutdown signal received during deduplication. Stopping at file {}/{}", i + 1, temp_files.len());
+                }
+                break;
+            }
+        }
+
+        if verbose {
+            println!("Deduplicating file {}/{}: {}", i + 1, temp_files.len(), temp_file.display());
+        }
+
+        let file = File::open(temp_file)?;
+        let reader = BufReader::new(file);
+        let mut records_batch = Vec::with_capacity(config.processing.record_chunk_size);
+
+        for line_result in reader.lines() {
+            if let Some(ref flag) = shutdown_flag {
+                if flag.load(Ordering::Relaxed) {
+                    if verbose {
+                        println!("🛑 Shutdown signal received during deduplication");
+                    }
+                    break;
+                }
+            }
+
+            let line = match line_result {
+                Ok(line) => line,
+                Err(_) => {
+                    stats.invalid_records += 1;
+                    continue;
+                }
+            };
+            stats.total_records += 1;
+
+            if let Some(record) = parse_line_to_record(&line, &config.deduplication) {
+                records_batch.push(record);
+
+                if records_batch.len() >= config.processing.record_chunk_size {
+                    process_record_batch_multi_stream(
+                        &mut records_batch,
+                        &mut dedup_map,
+                        &mut stats,
+                        multi_stream_processor,
+                        &config.deduplication,
+                    )?;
+
+                    // Check memory pressure and flush if needed
+                    if dedup_map.len() > config.processing.max_memory_records {
+                        if verbose {
+                            println!("  💾 Memory limit reached, flushing {} records to disk", dedup_map.len());
+                        }
+
+                        if !header_written {
+                            let sample_record = dedup_map.values().next().unwrap();
+                            let mut header_fields = vec!["username".to_string(), "password".to_string()];
+                            if sample_record.all_fields.len() > CORE_FIELD_COUNT {
+                                for j in EXTRA_FIELDS_START_INDEX..sample_record.all_fields.len() {
+                                    header_fields.push(format!("field_{}", j + 1));
+                                }
+                            } else {
+                                header_fields.push("url".to_string());
+                            }
+                            writeln!(writer, "{}", header_fields.join(","))?;
+                            header_written = true;
+                        }
+
+                        for record in dedup_map.values() {
+                            let mut output_fields = vec![record.user.clone(), record.password.clone()];
+                            if record.all_fields.len() > 2 {
+                                output_fields.push(record.normalized_url.clone());
+                                for j in EXTRA_FIELDS_START_INDEX..record.all_fields.len() {
+                                    output_fields.push(record.all_fields[j].clone());
+                                }
+                            } else {
+                                output_fields.push(record.normalized_url.clone());
+                            }
+                            writeln!(writer, "{}", output_fields.join(","))?;
+                        }
+
+                        writer.flush()?;
+                        stats.unique_records += dedup_map.len();
+                        dedup_map.clear();
+                    }
+                }
+            } else {
+                stats.invalid_records += 1;
+            }
+        }
+
+        if !records_batch.is_empty() {
+            process_record_batch_multi_stream(
+                &mut records_batch,
+                &mut dedup_map,
+                &mut stats,
+                multi_stream_processor,
+                &config.deduplication,
+            )?;
+        }
+
+        if let Some(ref handler) = checkpoint_handler {
+            handler.mark_temp_file_processed(temp_file.clone())?;
+            writer.flush()?;
+            let current_checksum = calculate_file_checksum(output_path)?;
+            handler.update_output_file_info(stats.unique_records, current_checksum)?;
+            handler.force_save_checkpoint()?;
+        }
+    }
+
+    for (i, record) in dedup_map.values().enumerate() {
+        if i == 0 && !header_written {
+            let mut header_fields = vec!["username".to_string(), "password".to_string()];
+            if record.all_fields.len() > CORE_FIELD_COUNT {
+                for j in EXTRA_FIELDS_START_INDEX..record.all_fields.len() {
+                    header_fields.push(format!("field_{}", j + 1));
+                }
+            } else {
+                header_fields.push("url".to_string());
+            }
+            writeln!(writer, "{}", header_fields.join(","))?;
+            header_written = true;
+        }
+
+        let mut output_fields = vec![record.user.clone(), record.password.clone()];
+        if record.all_fields.len() > 2 {
+            output_fields.push(record.normalized_url.clone());
+            for j in EXTRA_FIELDS_START_INDEX..record.all_fields.len() {
+                output_fields.push(record.all_fields[j].clone());
+            }
+        } else {
+            output_fields.push(record.normalized_url.clone());
+        }
+        writeln!(writer, "{}", output_fields.join(","))?;
+    }
+
+    writer.flush()?;
+    stats.unique_records = dedup_map.len();
+    stats.duplicates_removed = stats.total_records - stats.unique_records;
+    stats.processing_time_seconds = start_time.elapsed().as_secs_f64();
+
+    if verbose {
+        if let Some(processor) = multi_stream_processor {
+            println!("\n📊 Multi-stream Performance Summary:");
+            println!("{}", processor.format_performance_summary());
+        }
+    }
+
+    Ok(stats)
+}
+
+/// Process a batch of records with multi-stream CUDA support
+#[cfg(feature = "cuda")]
+fn process_record_batch_multi_stream(
+    records_batch: &mut Vec<Record>,
+    dedup_map: &mut HashMap<String, Record>,
+    _stats: &mut ProcessingStats,
+    multi_stream_processor: Option<&crate::cuda::multi_stream_processor::MultiStreamCudaProcessor>,
+    config: &DeduplicationConfig,
+) -> Result<()> {
+    if let Some(processor) = multi_stream_processor {
+        let mut cuda_records: Vec<crate::cuda::processor::CudaRecord> = Vec::with_capacity(records_batch.len());
+
+        cuda_records.extend(records_batch.iter().map(|r| {
+            crate::cuda::processor::CudaRecord {
+                user: r.user.clone(),
+                password: r.password.clone(),
+                url: r.url.clone(),
+                normalized_user: String::new(),
+                normalized_url: String::new(),
+                field_count: r.field_count,
+                all_fields: r.all_fields.clone(),
+            }
+        }));
+
+        if !cuda_records.is_empty() {
+            processor.process_batch(&mut cuda_records, config.case_sensitive_usernames)?;
+
+            for (record, cuda_record) in records_batch.iter_mut().zip(cuda_records.iter()) {
+                record.normalized_user = cuda_record.normalized_user.clone();
+                record.normalized_url = cuda_record.normalized_url.clone();
+            }
+        }
+    } else {
+        for record in records_batch.iter_mut() {
+            record.normalized_url = super::validation::normalize_url(&record.url);
+            record.normalized_user = if config.case_sensitive_usernames {
+                record.user.clone()
+            } else {
+                record.user.to_lowercase()
+            };
+        }
+    }
+
+    for record in records_batch.iter() {
+        let dedup_key = if config.case_sensitive_usernames {
+            format!("{}:{}", record.user, record.password)
+        } else {
+            format!("{}:{}", record.user.to_lowercase(), record.password)
+        };
+
+        if let Some(existing_record) = dedup_map.get(&dedup_key) {
+            if record.field_count > existing_record.field_count {
+                dedup_map.insert(dedup_key, record.clone());
+            }
+        } else {
+            dedup_map.insert(dedup_key, record.clone());
+        }
+    }
+
+    records_batch.clear();
+    Ok(())
 }
 
 /// Enhanced deduplication with output file resumption support
@@ -2171,10 +2267,6 @@ fn parse_line_to_record(line: &str, config: &DeduplicationConfig) -> Option<Reco
 }
 
 /// Process a batch of records
-///
-/// This function:
-/// 1. Normalizes URLs with CUDA if available
-/// 2. Inserts records into the deduplication map
 fn process_record_batch(
     records_batch: &mut Vec<Record>,
     dedup_map: &mut HashMap<String, Record>,
@@ -2183,14 +2275,10 @@ fn process_record_batch(
     cuda_processor: Option<&CudaProcessor>,
     config: &DeduplicationConfig,
 ) -> Result<()> {
-    // Process records with CUDA if available
     #[cfg(feature = "cuda")]
     if let Some(processor) = cuda_processor {
-        // Convert to the format expected by CUDA processor
-        // Optimize: Pre-allocate with exact capacity to avoid reallocations
         let mut cuda_records: Vec<crate::cuda::processor::CudaRecord> = Vec::with_capacity(records_batch.len());
 
-        // Use extend for better performance than collect()
         cuda_records.extend(records_batch.iter().map(|r| {
             crate::cuda::processor::CudaRecord {
                 user: r.user.clone(),
@@ -2198,22 +2286,20 @@ fn process_record_batch(
                 url: r.url.clone(),
                 normalized_user: String::new(),
                 normalized_url: String::new(),
-                field_count: r.field_count,  // Include field count
-                all_fields: r.all_fields.clone(),  // Include all fields
+                field_count: r.field_count,
+                all_fields: r.all_fields.clone(),
             }
         }));
 
         if !cuda_records.is_empty() {
             processor.process_batch(&mut cuda_records, config.case_sensitive_usernames)?;
 
-            // Optimize: Update records more efficiently using zip iterator
             for (record, cuda_record) in records_batch.iter_mut().zip(cuda_records.iter()) {
                 record.normalized_user = cuda_record.normalized_user.clone();
                 record.normalized_url = cuda_record.normalized_url.clone();
             }
         }
     } else {
-        // CPU fallback: normalize records manually when CUDA processor is not provided
         for record in records_batch.iter_mut() {
             record.normalized_url = super::validation::normalize_url(&record.url);
             record.normalized_user = if config.case_sensitive_usernames {

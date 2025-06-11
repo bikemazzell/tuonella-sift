@@ -16,7 +16,7 @@ use tuonella_sift::utils::system::format_duration;
 use tokio::signal;
 
 #[cfg(feature = "cuda")]
-use tuonella_sift::cuda::processor::CudaProcessor;
+
 
 /// Comprehensively clean up the entire temp directory on successful completion
 /// This ensures all temporary files, including any orphaned files, are removed
@@ -110,7 +110,7 @@ async fn resume_processing_from_checkpoint(
     config: &Config,
     output_path: &Path,
     #[cfg(feature = "cuda")]
-    cuda_processor: Option<&tuonella_sift::cuda::processor::CudaProcessor>,
+    cuda_processor: Option<&tuonella_sift::cuda::multi_stream_processor::MultiStreamCudaProcessor>,
     verbose: bool,
     shutdown_flag: Arc<AtomicBool>,
     mut checkpoint_manager: CheckpointManager,
@@ -171,16 +171,43 @@ async fn resume_processing_from_checkpoint(
                 ));
                 
                 // Skip file processing and go straight to deduplication with resumption support
-                let stats = tuonella_sift::core::deduplication::deduplicate_records_with_resumption(
-                    &state.temp_files_created,
-                    output_path,
-                    config,
+                let stats = {
                     #[cfg(feature = "cuda")]
-                    cuda_processor,
-                    verbose,
-                    Some(shutdown_flag.clone()),
-                    Some(resume_checkpoint_handler),
-                )?;
+                    {
+                        if let Some(processor) = cuda_processor {
+                            tuonella_sift::core::deduplication::deduplicate_records_with_multi_stream(
+                                &state.temp_files_created,
+                                output_path,
+                                config,
+                                Some(processor),
+                                verbose,
+                                Some(shutdown_flag.clone()),
+                                Some(resume_checkpoint_handler),
+                            )?
+                        } else {
+                            tuonella_sift::core::deduplication::deduplicate_records_with_resumption(
+                                &state.temp_files_created,
+                                output_path,
+                                config,
+                                None,
+                                verbose,
+                                Some(shutdown_flag.clone()),
+                                Some(resume_checkpoint_handler),
+                            )?
+                        }
+                    }
+                    #[cfg(not(feature = "cuda"))]
+                    {
+                        tuonella_sift::core::deduplication::deduplicate_records_with_resumption(
+                            &state.temp_files_created,
+                            output_path,
+                            config,
+                            verbose,
+                            Some(shutdown_flag.clone()),
+                            Some(resume_checkpoint_handler),
+                        )?
+                    }
+                };
                 
                 print_completion_stats(stats, start_time, &state, output_path);
                 
@@ -213,16 +240,43 @@ async fn resume_processing_from_checkpoint(
         ));
         
         // Proceed to deduplication with resumption support
-        let stats = tuonella_sift::core::deduplication::deduplicate_records_with_resumption(
-            &state.temp_files_created,
-            output_path,
-            config,
+        let stats = {
             #[cfg(feature = "cuda")]
-            cuda_processor,
-            verbose,
-            Some(shutdown_flag.clone()),
-            Some(dedup_checkpoint_handler),
-        )?;
+            {
+                if let Some(processor) = cuda_processor {
+                    tuonella_sift::core::deduplication::deduplicate_records_with_multi_stream(
+                        &state.temp_files_created,
+                        output_path,
+                        config,
+                        Some(processor),
+                        verbose,
+                        Some(shutdown_flag.clone()),
+                        Some(dedup_checkpoint_handler),
+                    )?
+                } else {
+                    tuonella_sift::core::deduplication::deduplicate_records_with_resumption(
+                        &state.temp_files_created,
+                        output_path,
+                        config,
+                        None,
+                        verbose,
+                        Some(shutdown_flag.clone()),
+                        Some(dedup_checkpoint_handler),
+                    )?
+                }
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                tuonella_sift::core::deduplication::deduplicate_records_with_resumption(
+                    &state.temp_files_created,
+                    output_path,
+                    config,
+                    verbose,
+                    Some(shutdown_flag.clone()),
+                    Some(dedup_checkpoint_handler),
+                )?
+            }
+        };
         
         print_completion_stats(stats, start_time, &state, output_path);
         
@@ -351,15 +405,41 @@ async fn resume_processing_from_checkpoint(
     println!("🔗 Merging {} temp files (including {} from previous session)...",
              all_temp_files.len(), state.temp_files_created.len());
 
-    let stats = tuonella_sift::core::deduplication::deduplicate_records_with_shutdown(
-        &all_temp_files,
-        output_path,
-        config,
+    let stats = {
         #[cfg(feature = "cuda")]
-        cuda_processor,
-        verbose,
-        Some(shutdown_flag.clone()),
-    )?;
+        {
+            if let Some(processor) = cuda_processor {
+                tuonella_sift::core::deduplication::deduplicate_records_with_multi_stream(
+                    &all_temp_files,
+                    output_path,
+                    config,
+                    Some(processor),
+                    verbose,
+                    Some(shutdown_flag.clone()),
+                    None,
+                )?
+            } else {
+                tuonella_sift::core::deduplication::deduplicate_records_with_shutdown(
+                    &all_temp_files,
+                    output_path,
+                    config,
+                    None,
+                    verbose,
+                    Some(shutdown_flag.clone()),
+                )?
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            tuonella_sift::core::deduplication::deduplicate_records_with_shutdown(
+                &all_temp_files,
+                output_path,
+                config,
+                verbose,
+                Some(shutdown_flag.clone()),
+            )?
+        }
+    };
 
     if verbose {
         println!("🧹 Cleaning up temporary files...");
@@ -468,16 +548,20 @@ async fn main() -> Result<()> {
 
     #[cfg(feature = "cuda")]
     let cuda_processor = if !args.force_cpu && config.processing.enable_cuda {
-        match CudaProcessor::new(config.cuda.clone(), 0) {
+        use tuonella_sift::cuda::multi_stream_processor::MultiStreamCudaProcessor;
+        use tuonella_sift::constants::CUDA_MULTI_STREAM_COUNT;
+
+        match MultiStreamCudaProcessor::new(config.cuda.clone(), 0, CUDA_MULTI_STREAM_COUNT) {
             Ok(processor) => {
                 if args.verbose {
-                    println!("🚀 GPU powers activated!");
+                    println!("🚀 Multi-stream GPU powers activated with {} streams!", CUDA_MULTI_STREAM_COUNT);
+                    println!("{}", processor.format_performance_summary());
                 }
                 Some(processor)
             }
             Err(e) => {
                 if args.verbose {
-                    eprintln!("💥 GPU summoning failed: {}", e);
+                    eprintln!("💥 Multi-stream GPU summoning failed: {}", e);
                     println!("🐢 Falling back to CPU processing");
                 }
                 None
@@ -607,16 +691,43 @@ async fn main() -> Result<()> {
 
     println!("\n⚔️ Commencing the great deduplication cull...");
     
-    let stats = tuonella_sift::core::deduplication::deduplicate_records_with_resumption(
-        &temp_files,
-        &output_path,
-        &config,
+    let stats = {
         #[cfg(feature = "cuda")]
-        cuda_processor.as_ref(),
-        args.verbose,
-        Some(shutdown_flag.clone()),
-        Some(checkpoint_handler.clone()),
-    )?;
+        {
+            if let Some(ref processor) = cuda_processor {
+                tuonella_sift::core::deduplication::deduplicate_records_with_multi_stream(
+                    &temp_files,
+                    &output_path,
+                    &config,
+                    Some(processor),
+                    args.verbose,
+                    Some(shutdown_flag.clone()),
+                    Some(checkpoint_handler.clone()),
+                )?
+            } else {
+                tuonella_sift::core::deduplication::deduplicate_records_with_resumption(
+                    &temp_files,
+                    &output_path,
+                    &config,
+                    None,
+                    args.verbose,
+                    Some(shutdown_flag.clone()),
+                    Some(checkpoint_handler.clone()),
+                )?
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            tuonella_sift::core::deduplication::deduplicate_records_with_resumption(
+                &temp_files,
+                &output_path,
+                &config,
+                args.verbose,
+                Some(shutdown_flag.clone()),
+                Some(checkpoint_handler.clone()),
+            )?
+        }
+    };
 
     // Check if we were interrupted
     if shutdown_flag.load(Ordering::Relaxed) {
@@ -666,4 +777,5 @@ async fn main() -> Result<()> {
     println!("📜 Output written to: {}", output_path.display());
 
     Ok(())
-} 
+}
+

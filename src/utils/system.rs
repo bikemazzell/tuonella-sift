@@ -79,8 +79,14 @@ impl SystemResources {
     fn query_gpu_resources(gpu_memory_usage_percent: Option<f64>) -> Result<(CudaDeviceProperties, usize, usize)> {
         use cudarc::driver::result;
 
+        // Initialize CUDA driver first
+        if let Err(e) = result::init() {
+            return Err(anyhow::anyhow!("Failed to initialize CUDA driver: {}", e));
+        }
+
         // Query GPU memory directly without creating full context to avoid memory allocation
-        let (free_memory, total_memory) = result::mem_get_info()?;
+        let (free_memory, total_memory) = result::mem_get_info()
+            .map_err(|e| anyhow::anyhow!("Failed to get GPU memory info: {}. Ensure NVIDIA drivers are installed and GPU is accessible.", e))?;
 
         // Create a minimal context just to query device attributes
         use cudarc::driver::safe::CudaContext;

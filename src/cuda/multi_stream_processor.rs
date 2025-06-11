@@ -114,21 +114,22 @@ impl Clone for MultiStreamCudaProcessor {
 impl MultiStreamCudaProcessor {
     pub fn new(config: CudaConfig, device_ordinal: i32, num_streams: usize) -> Result<Self> {
         println!("Initializing multi-stream CUDA processor with {} virtual streams", num_streams);
-        
-        // For now, create multiple CudaProcessor instances as a stepping stone
-        // This provides the multi-stream scheduling benefits while reusing existing code
+
+        // Create a single CUDA processor and reuse it for all streams
+        // This avoids the massive memory overhead of multiple contexts
+        let single_processor = CudaProcessor::new(config.clone(), device_ordinal)
+            .map_err(|e| anyhow::anyhow!("Failed to create CUDA processor: {}", e))?;
+
+        // Create multiple references to the same processor for stream scheduling
         let mut processors = Vec::with_capacity(num_streams);
-        
-        for i in 0..num_streams {
-            let processor = CudaProcessor::new(config.clone(), device_ordinal)
-                .map_err(|e| anyhow::anyhow!("Failed to create CUDA processor {}: {}", i, e))?;
-            processors.push(processor);
+        for _ in 0..num_streams {
+            processors.push(single_processor.clone());
         }
-        
+
         let stream_scheduler = Arc::new(Mutex::new(StreamScheduler::new(num_streams, LoadBalancingStrategy::RoundRobin)));
-        
-        println!("Multi-stream CUDA processor initialized with {} processors", num_streams);
-        
+
+        println!("Multi-stream CUDA processor initialized with {} virtual streams using single context", num_streams);
+
         Ok(Self {
             processors,
             stream_scheduler,
@@ -193,22 +194,24 @@ impl MultiStreamCudaProcessor {
 
         let chunk_size = self.get_optimal_batch_size().min(records.len()).max(1);
 
-        // Process records in chunks across multiple processors
-        for chunk in records.chunks_mut(chunk_size) {
-            let processor_id = {
-                let mut scheduler = self.stream_scheduler.lock();
-                scheduler.select_stream()
-            };
+        use rayon::prelude::*;
 
+        let chunks: Vec<_> = records.chunks_mut(chunk_size).collect();
+
+        chunks.into_par_iter().enumerate().try_for_each(|(i, chunk)| -> Result<()> {
+            let processor_id = i % self.processors.len();
             let start_time = Instant::now();
+
             self.processors[processor_id].process_batch(chunk, case_sensitive_usernames)?;
-            
+
             let processing_time = start_time.elapsed();
             {
                 let mut scheduler = self.stream_scheduler.lock();
                 scheduler.update_metrics(processor_id, processing_time);
             }
-        }
+
+            Ok(())
+        })?;
 
         Ok(())
     }

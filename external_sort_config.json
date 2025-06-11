@@ -1,0 +1,17 @@
+{
+  "memory_usage_percent": 70.0,
+  "chunk_size_mb": 1024,
+  "io_buffer_size_kb": 128,
+  "processing_threads": 8,
+  "enable_cuda": true,
+  "cuda_batch_size": 200000,
+  "cuda_memory_percent": 80.0,
+  "temp_directory": "./temp/external_sort",
+  "enable_compression": false,
+  "merge_buffer_size_kb": 512,
+  "case_sensitive": false,
+  "normalize_urls": true,
+  "email_only_usernames": false,
+  "verbose": true,
+  "merge_progress_interval_seconds": 15
+}

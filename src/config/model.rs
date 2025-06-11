@@ -20,6 +20,14 @@ pub struct MemoryConfig {
     pub memory_usage_percent: u8,
 }
 
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            memory_usage_percent: 50,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessingConfig {
     pub enable_cuda: bool,
@@ -28,11 +36,32 @@ pub struct ProcessingConfig {
     pub max_memory_records: usize,
 }
 
+impl Default for ProcessingConfig {
+    fn default() -> Self {
+        Self {
+            enable_cuda: true,
+            chunk_size_mb: 8192,
+            record_chunk_size: 500000,
+            max_memory_records: 40000000,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IoConfig {
     pub temp_directory: String,
     pub output_directory: String,
     pub checkpoint_auto_save_interval_seconds: u64,
+}
+
+impl Default for IoConfig {
+    fn default() -> Self {
+        Self {
+            temp_directory: "./temp".to_string(),
+            output_directory: "./output".to_string(),
+            checkpoint_auto_save_interval_seconds: 60,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,9 +72,28 @@ pub struct DeduplicationConfig {
     pub allow_two_field_lines: bool,
 }
 
+impl Default for DeduplicationConfig {
+    fn default() -> Self {
+        Self {
+            case_sensitive_usernames: false,
+            normalize_urls: true,
+            email_username_only: false,
+            allow_two_field_lines: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoggingConfig {
     pub verbosity: String,
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            verbosity: "normal".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,6 +159,21 @@ impl Default for BatchSizes {
             medium: 50000,
             large: 100000,
             xlarge: 500000,
+        }
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            memory: MemoryConfig::default(),
+            processing: ProcessingConfig::default(),
+            io: IoConfig::default(),
+            deduplication: DeduplicationConfig::default(),
+            logging: LoggingConfig::default(),
+            performance: PerformanceConfig::default(),
+            #[cfg(feature = "cuda")]
+            cuda: CudaConfig::default(),
         }
     }
 }

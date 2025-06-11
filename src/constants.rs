@@ -120,9 +120,13 @@ pub const BYTES_PER_MB_FLOAT: f64 = MB_AS_F64;
 pub const EFFICIENCY_COMPONENTS_COUNT: f64 = 3.0;
 
 // Parallel processing constants (optimized for modern hardware)
-pub const PARALLEL_FILE_PROCESSING_THREADS: usize = 8;  // Increased from 4 for better CPU utilization
-pub const STREAMING_CHUNK_SIZE_MB: usize = 512;  // Increased from 128MB for better I/O throughput
-pub const PARALLEL_IO_QUEUE_SIZE: usize = 32;  // Increased from 16 for better async I/O overlap
+pub const PARALLEL_FILE_PROCESSING_THREADS: usize = 8;
+pub const STREAMING_CHUNK_SIZE_MB: usize = 512;
+pub const PARALLEL_IO_QUEUE_SIZE: usize = 32;
+pub const MAX_PARALLEL_FILE_THREADS: usize = 16;
+pub const MAX_PARALLEL_CHUNK_THREADS: usize = 8;
+pub const PIPELINE_CHANNEL_CAPACITY: usize = 1000;
+pub const FILE_CHUNK_SIZE_MB: usize = 256;
 
 // Error handling and recovery constants
 pub const MAX_RETRY_ATTEMPTS: usize = 3;
@@ -292,7 +296,13 @@ pub const CUDA_MAX_THREADS_PER_BLOCK: usize = 1024;  // Maximum threads per bloc
 #[cfg(feature = "cuda")]
 pub const CUDA_MEMORY_COALESCING_SIZE: usize = 128;  // Memory coalescing size in bytes
 #[cfg(feature = "cuda")]
-pub const CUDA_STREAM_COUNT: usize = 4;  // Number of CUDA streams for async operations
+pub const CUDA_STREAM_COUNT: usize = 4;
+#[cfg(feature = "cuda")]
+pub const CUDA_MULTI_STREAM_COUNT: usize = 8;
+#[cfg(feature = "cuda")]
+pub const CUDA_STREAM_PRIORITY_HIGH: i32 = -1;
+#[cfg(feature = "cuda")]
+pub const CUDA_STREAM_PRIORITY_NORMAL: i32 = 0;
 #[cfg(feature = "cuda")]
 pub const CUDA_MEMORY_POOL_SIZE_MB: usize = 512;  // Memory pool size in MB
 #[cfg(feature = "cuda")]

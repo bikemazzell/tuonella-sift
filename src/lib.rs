@@ -2,6 +2,7 @@ pub mod constants;
 pub mod core;
 pub mod config;
 pub mod utils;
+pub mod external_sort;
 
 #[cfg(feature = "cuda")]
 pub mod cuda;

@@ -9,6 +9,8 @@ pub mod error_handler;
 pub mod async_error_handler;
 pub mod memory_manager;
 pub mod parallel_processor;
+pub mod parallel_file_processor;
+pub mod pipeline_processor;
 pub mod async_parallel_processor;
 pub mod performance_monitor;
 pub mod recovery_manager;
