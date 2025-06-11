@@ -1,6 +1,6 @@
 # Makefile for tuonella-sift
 
-.PHONY: all build release debug cuda clean test help install dirs run run-cuda
+.PHONY: all build release debug cuda clean test test-cuda build-auto help install dirs run run-cuda
 
 # Default target
 all: dirs release
@@ -37,6 +37,11 @@ cuda: dirs
 # Build alias
 build: release
 
+# Build with automatic CUDA detection (uses build.sh)
+build-auto: dirs
+	@echo "Building with automatic CUDA detection..."
+	@./build.sh
+
 # Clean build artifacts
 clean:
 	@echo "Cleaning build artifacts..."
@@ -47,12 +52,12 @@ clean:
 # Run tests
 test:
 	@echo "Running tests..."
-	@cargo test
+	@cargo test --lib
 
 # Run tests with CUDA
 test-cuda:
 	@echo "Running tests with CUDA support..."
-	@cargo test --features cuda
+	@cargo test --lib --features cuda
 
 # Run the program with test data
 run: dirs release
@@ -88,8 +93,9 @@ help:
 	@echo "  debug     - Build debug version"
 	@echo "  cuda      - Build release version with CUDA support"
 	@echo "  build     - Alias for release"
-	@echo "  test      - Run tests"
-	@echo "  test-cuda - Run tests with CUDA support"
+	@echo "  build-auto - Build with automatic CUDA detection (uses build.sh)"
+	@echo "  test      - Run all tests"
+	@echo "  test-cuda - Run all tests with CUDA support"
 	@echo "  clean     - Clean build artifacts"
 	@echo "  run       - Run with test data"
 	@echo "  run-cuda  - Run with CUDA and test data"
@@ -99,8 +105,10 @@ help:
 	@echo ""
 	@echo "Examples:"
 	@echo "  make              # Build release version"
+	@echo "  make build-auto   # Build with automatic CUDA detection"
 	@echo "  make cuda         # Build with CUDA support"
-	@echo "  make test         # Run tests"
+	@echo "  make test         # Run all tests"
+	@echo "  make test-cuda    # Run all tests with CUDA"
 	@echo "  make run          # Run with test data"
 	@echo "  make install      # Install system-wide"
 	@echo ""
