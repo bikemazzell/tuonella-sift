@@ -1,16 +1,16 @@
-pub mod constants;
-pub mod core;
-pub mod config;
-pub mod utils;
+// External Sort module - the main implementation
 pub mod external_sort;
 
+// Constants used by external_sort
+pub mod constants;
+
+// CUDA support (optional)
 #[cfg(feature = "cuda")]
 pub mod cuda;
 
-// Re-export main types for easier access
-pub use config::model::Config;
-pub use core::record::Record;
-pub use core::deduplication::{deduplicate_records, ProcessingStats};
-
+// Config module - only needed for CUDA types
 #[cfg(feature = "cuda")]
-pub use cuda::processor::CudaProcessor; 
+pub mod config;
+
+// Re-export main types for convenience
+pub use external_sort::{ExternalSortConfig, ExternalSortProcessor, ExternalSortStats};

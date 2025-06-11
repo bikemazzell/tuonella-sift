@@ -9,13 +9,13 @@ use crate::external_sort::{ExternalSortConfig, ExternalSortStats};
 use crate::external_sort::checkpoint::{SortCheckpoint, ProcessingPhase, FileProgress};
 use crate::external_sort::chunk::ChunkProcessor;
 use crate::external_sort::merger::ChunkMerger;
-use crate::external_sort::constants::*;
+use crate::constants::*;
 
 #[cfg(feature = "cuda")]
 use crate::cuda::multi_stream_processor::MultiStreamCudaProcessor;
 
 pub struct ExternalSortProcessor {
-    config: ExternalSortConfig,
+    pub config: ExternalSortConfig,
     checkpoint: SortCheckpoint,
     chunk_processor: ChunkProcessor,
     merger: ChunkMerger,

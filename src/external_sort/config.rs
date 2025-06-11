@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use anyhow::Result;
-use crate::external_sort::constants::*;
+use crate::constants::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExternalSortConfig {
@@ -39,7 +39,7 @@ impl Default for ExternalSortConfig {
             normalize_urls: true,
             email_only_usernames: false,
             verbose: false,
-            merge_progress_interval_seconds: 10, // Default to 10 seconds
+            merge_progress_interval_seconds: DEFAULT_MERGE_PROCESS_INTERVAL_SECS,
         }
     }
 }

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::Result;
-use crate::external_sort::constants::*;
+use crate::constants::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SortCheckpoint {

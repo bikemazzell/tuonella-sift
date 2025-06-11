@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
-use crate::external_sort::constants::*;
+use crate::constants::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SortRecord {

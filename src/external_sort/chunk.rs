@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use rayon::prelude::*;
 use crate::external_sort::record::SortRecord;
 use crate::external_sort::checkpoint::{ChunkMetadata, SortCheckpoint};
-use crate::external_sort::constants::*;
+use crate::constants::*;
 
 pub struct ChunkProcessor {
     chunk_size_bytes: usize,

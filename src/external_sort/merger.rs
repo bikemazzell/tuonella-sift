@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::external_sort::record::SortRecord;
 use crate::external_sort::checkpoint::{ChunkMetadata, SortCheckpoint};
-use crate::external_sort::constants::*;
+use crate::constants::*;
 
 pub struct ChunkMerger {
     io_buffer_size: usize,
@@ -91,18 +91,22 @@ impl ChunkMerger {
         let mut duplicates_removed = 0;
         let mut progress_counter = 0;
         let total_estimated_records: usize = chunks.iter().map(|c| c.record_count).sum();
+        let total_input_size: u64 = chunks.iter().map(|c| c.file_size_bytes).sum();
+        let mut bytes_processed: u64 = 0;
         let mut last_progress_time = std::time::Instant::now();
         let progress_interval = std::time::Duration::from_secs(self.progress_interval_seconds);
 
         while let Some(Reverse(merge_entry)) = merge_heap.pop() {
             // Check for shutdown signal every 1000 records for responsiveness
             if progress_counter % 1000 == 0 && shutdown_flag.load(Ordering::Relaxed) {
-                println!("🛑 Merge interrupted at {:.1}% progress",
-                    if total_estimated_records > 0 {
-                        (progress_counter as f64 / total_estimated_records as f64 * 100.0).min(100.0)
-                    } else {
-                        0.0
-                    });
+                let shutdown_progress = if total_input_size > 0 {
+                    (bytes_processed as f64 / total_input_size as f64 * 100.0).min(100.0)
+                } else if total_estimated_records > 0 {
+                    (progress_counter as f64 / total_estimated_records as f64 * 100.0).min(100.0)
+                } else {
+                    0.0
+                };
+                println!("🛑 Merge interrupted at {:.1}% progress", shutdown_progress);
                 break;
             }
 
@@ -124,6 +128,9 @@ impl ChunkMerger {
             }
 
             progress_counter += 1;
+            
+            // Estimate bytes processed based on record size
+            bytes_processed += merge_entry.record.to_csv_line().len() as u64;
 
             // Show progress based on time interval instead of record count
             if last_progress_time.elapsed() >= progress_interval {
@@ -131,10 +138,16 @@ impl ChunkMerger {
                 checkpoint.merge_progress.duplicates_removed = duplicates_removed;
                 checkpoint.merge_progress.current_output_size = writer.get_ref().metadata()?.len();
 
-                let progress_pct = if total_estimated_records > 0 {
-                    (progress_counter as f64 / total_estimated_records as f64 * 100.0).min(100.0)
+                // Calculate progress based on bytes processed vs total input size
+                let progress_pct = if total_input_size > 0 {
+                    (bytes_processed as f64 / total_input_size as f64 * 100.0).min(100.0)
                 } else {
-                    0.0
+                    // Fallback to record count if size data unavailable
+                    if total_estimated_records > 0 {
+                        (progress_counter as f64 / total_estimated_records as f64 * 100.0).min(100.0)
+                    } else {
+                        0.0
+                    }
                 };
 
                 println!("🔗 Merge progress: {:.1}% ({} unique, {} duplicates removed)",

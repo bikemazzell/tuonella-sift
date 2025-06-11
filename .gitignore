@@ -106,7 +106,6 @@ perf.data*
 
 # Binaries
 tuonella-sift
-external-sort
 
 # Scaffolding
 CLAUDE.md
