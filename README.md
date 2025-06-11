@@ -30,13 +30,10 @@ Designed to handle massive datasets (hundreds of GB to TB scale) with intelligen
 
 ```bash
 # Clone the repository
-git clone <repository-url>
+git clone https://github.com/bikemazzell/tuonella-sift
 cd tuonella-sift
 
-# Standard CPU build
-./build.sh
-
-# Build with CUDA acceleration (if CUDA toolkit detected)
+# Standard CPU build (will build with GPU support if CUDA toolkit detected)
 ./build.sh
 ```
 
@@ -75,13 +72,13 @@ The tool uses a JSON configuration file (default: `config.json`):
 
 ```json
 {
-  "memory_usage_percent": 70.0,
+  "memory_usage_percent": 50.0,
   "chunk_size_mb": 1024,
   "io_buffer_size_kb": 128,
   "processing_threads": 8,
   "enable_cuda": true,
   "cuda_batch_size": 200000,
-  "cuda_memory_percent": 80.0,
+  "cuda_memory_percent": 50.0,
   "temp_directory": "./temp",
   "enable_compression": false,
   "merge_buffer_size_kb": 512,
@@ -96,14 +93,14 @@ The tool uses a JSON configuration file (default: `config.json`):
 ### Key Configuration Options
 
 **💾 Memory & Performance**
-- `memory_usage_percent`: Percentage of system RAM to use (10-90%, default: 70%)
+- `memory_usage_percent`: Percentage of system RAM to use (10-90%, default: 50%)
 - `chunk_size_mb`: Processing chunk size in MB (64-4096, default: 1024)
 - `processing_threads`: Number of parallel processing threads (1-32, default: 8)
 
 **🎮 CUDA Settings** 
 - `enable_cuda`: Enable GPU acceleration (default: true)
 - `cuda_batch_size`: GPU batch size (1000-1000000, default: 200000)
-- `cuda_memory_percent`: Percentage of GPU memory to use (10-90%, default: 80%)
+- `cuda_memory_percent`: Percentage of GPU memory to use (10-90%, default: 50%)
 
 **🧹 Deduplication Settings**
 - `case_sensitive`: Username case sensitivity (default: false)  
