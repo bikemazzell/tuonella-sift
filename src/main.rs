@@ -108,20 +108,9 @@ async fn main() -> Result<()> {
     }
 
     // Print statistics
-    println!("📊 Total records: {}", stats.total_records);
-    println!("✨ Unique records: {}", stats.unique_records);
-    println!("🗑️ Duplicates removed: {} ({:.2}%)", 
-        stats.duplicates_removed,
-        100.0 * stats.duplicates_removed as f64 / stats.total_records.max(1) as f64
-    );
-    println!("📁 Files processed: {}", stats.files_processed);
-    println!("📦 Chunks created: {}", stats.chunks_created);
-    println!("💾 Peak memory: {:.1} MB", stats.peak_memory_mb);
-    println!("💿 Disk usage: {:.1} MB", stats.disk_usage_mb);
     println!("⏱️ Total time: {:.2}s", total_time.as_secs_f64());
-    
-    let throughput = stats.total_records as f64 / total_time.as_secs_f64();
-    println!("🔄 Throughput: {:.0} records/sec", throughput);
+    println!("✨ Unique records: {}", stats.unique_records);
+    println!("🗑️ Duplicates removed: {}", stats.duplicates_removed);
 
     Ok(())
 }
