@@ -80,6 +80,7 @@ $RECYCLE.BIN/
 /output/
 /dist/
 /build/
+*.info
 
 # Test and coverage outputs
 /test-results/

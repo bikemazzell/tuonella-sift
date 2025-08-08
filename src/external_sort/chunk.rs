@@ -372,7 +372,14 @@ impl ChunkProcessor {
     }
 
     pub fn estimate_chunk_count(&self, file_size: u64) -> usize {
-        let estimated_chunks = (file_size as usize + self.chunk_size_bytes - 1) / self.chunk_size_bytes;
+        // Avoid overflow by checking if file_size can be safely cast
+        if file_size == 0 {
+            return 1;
+        }
+        
+        // Use saturating operations to prevent overflow
+        let file_size_usize = file_size.min(usize::MAX as u64) as usize;
+        let estimated_chunks = file_size_usize.saturating_add(self.chunk_size_bytes - 1) / self.chunk_size_bytes;
         estimated_chunks.max(1)
     }
 

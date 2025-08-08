@@ -1,9 +1,15 @@
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::PathBuf;
     use tempfile::tempdir;
     use crate::external_sort::{ExternalSortConfig, ExternalSortProcessor};
     use crate::external_sort::record::SortRecord;
+    use crate::external_sort::chunk::ChunkProcessor;
+    use crate::external_sort::checkpoint::{ChunkMetadata, SortCheckpoint};
+    use crate::external_sort::merger::ChunkMerger;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
 
     #[test]
     fn test_sort_record_creation() {
@@ -479,5 +485,865 @@ mod tests {
             );
             assert_eq!(record.normalized_url, expected, "Failed for input: {}", input);
         }
+    }
+
+    // Tests for chunk.rs functionality
+    #[test]
+    fn test_estimate_chunk_count() {
+        let temp_dir = tempdir().unwrap();
+        let processor = ChunkProcessor::new(
+            1024 * 1024, // 1MB chunks
+            8192,
+            temp_dir.path().to_path_buf(),
+            true,
+        );
+
+        // Test various file sizes
+        assert_eq!(processor.estimate_chunk_count(0), 1); // Minimum 1 chunk
+        assert_eq!(processor.estimate_chunk_count(1024), 1);
+        assert_eq!(processor.estimate_chunk_count(1024 * 1024), 1);
+        assert_eq!(processor.estimate_chunk_count(1024 * 1024 + 1), 2);
+        assert_eq!(processor.estimate_chunk_count(5 * 1024 * 1024), 5);
+        assert_eq!(processor.estimate_chunk_count(10 * 1024 * 1024 - 1), 10);
+        assert_eq!(processor.estimate_chunk_count(10 * 1024 * 1024), 10);
+    }
+
+    #[test]
+    fn test_cleanup_chunk() {
+        let temp_dir = tempdir().unwrap();
+        let processor = ChunkProcessor::new(
+            1024 * 1024,
+            8192,
+            temp_dir.path().to_path_buf(),
+            true,
+        );
+
+        // Create a test chunk file
+        let chunk_path = temp_dir.path().join("test_chunk.csv");
+        fs::write(&chunk_path, "test,data\n").unwrap();
+        
+        let chunk_metadata = ChunkMetadata {
+            chunk_id: 0,
+            file_path: chunk_path.clone(),
+            record_count: 1,
+            file_size_bytes: 10,
+            is_sorted: true,
+            source_files: vec![],
+        };
+
+        // Verify file exists
+        assert!(chunk_path.exists());
+
+        // Cleanup the chunk
+        processor.cleanup_chunk(&chunk_metadata).unwrap();
+
+        // Verify file is deleted
+        assert!(!chunk_path.exists());
+    }
+
+    #[test]
+    fn test_cleanup_chunk_missing_file() {
+        let temp_dir = tempdir().unwrap();
+        let processor = ChunkProcessor::new(
+            1024 * 1024,
+            8192,
+            temp_dir.path().to_path_buf(),
+            true,
+        );
+
+        let chunk_metadata = ChunkMetadata {
+            chunk_id: 0,
+            file_path: temp_dir.path().join("nonexistent.csv"),
+            record_count: 0,
+            file_size_bytes: 0,
+            is_sorted: true,
+            source_files: vec![],
+        };
+
+        // Should not error on missing file
+        let result = processor.cleanup_chunk(&chunk_metadata);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_cleanup_all_chunks() {
+        let temp_dir = tempdir().unwrap();
+        let processor = ChunkProcessor::new(
+            1024 * 1024,
+            8192,
+            temp_dir.path().to_path_buf(),
+            true,
+        );
+
+        // Create multiple chunk files
+        let mut chunks = vec![];
+        for i in 0..3 {
+            let chunk_path = temp_dir.path().join(format!("chunk_{}.csv", i));
+            fs::write(&chunk_path, format!("test{},data{}\n", i, i)).unwrap();
+            
+            chunks.push(ChunkMetadata {
+                chunk_id: i,
+                file_path: chunk_path.clone(),
+                record_count: 1,
+                file_size_bytes: 10,
+                is_sorted: true,
+                source_files: vec![],
+            });
+            
+            assert!(chunk_path.exists());
+        }
+
+        // Cleanup all chunks
+        processor.cleanup_all_chunks(&chunks).unwrap();
+
+        // Verify all files are deleted
+        for chunk in &chunks {
+            assert!(!chunk.file_path.exists());
+        }
+    }
+
+    #[test]
+    fn test_cleanup_all_chunks_with_errors() {
+        let temp_dir = tempdir().unwrap();
+        let processor = ChunkProcessor::new(
+            1024 * 1024,
+            8192,
+            temp_dir.path().to_path_buf(),
+            true,
+        );
+
+        // Mix of existing and non-existing files
+        let chunks = vec![
+            ChunkMetadata {
+                chunk_id: 0,
+                file_path: temp_dir.path().join("exists.csv"),
+                record_count: 1,
+                file_size_bytes: 10,
+                is_sorted: true,
+                source_files: vec![],
+            },
+            ChunkMetadata {
+                chunk_id: 1,
+                file_path: temp_dir.path().join("missing.csv"),
+                record_count: 0,
+                file_size_bytes: 0,
+                is_sorted: true,
+                source_files: vec![],
+            },
+        ];
+
+        // Create only the first file
+        fs::write(&chunks[0].file_path, "data\n").unwrap();
+
+        // Should handle mixed cases without panicking
+        let result = processor.cleanup_all_chunks(&chunks);
+        assert!(result.is_ok());
+
+        // Existing file should be deleted
+        assert!(!chunks[0].file_path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_sort_and_write_chunk() {
+        let temp_dir = tempdir().unwrap();
+        let processor = ChunkProcessor::new(
+            1024 * 1024,
+            8192,
+            temp_dir.path().to_path_buf(),
+            false, // case insensitive
+        );
+
+        // Create unsorted records
+        let records = vec![
+            SortRecord::new(
+                "zebra@test.com".to_string(),
+                "pass3".to_string(),
+                "https://site3.com".to_string(),
+                vec![],
+            ),
+            SortRecord::new(
+                "alpha@test.com".to_string(),
+                "pass1".to_string(),
+                "https://site1.com".to_string(),
+                vec![],
+            ),
+            SortRecord::new(
+                "beta@test.com".to_string(),
+                "pass2".to_string(),
+                "https://site2.com".to_string(),
+                vec![],
+            ),
+            SortRecord::new(
+                "alpha@test.com".to_string(),
+                "pass1_dup".to_string(),
+                "https://site1.com".to_string(),
+                vec![],
+            ),
+        ];
+
+        let metadata = processor.sort_and_write_chunk(
+            0,
+            records,
+            vec![PathBuf::from("test.csv")],
+        ).await.unwrap();
+
+        // Verify chunk file was created
+        assert!(metadata.file_path.exists());
+        assert_eq!(metadata.chunk_id, 0);
+        // Note: The actual deduplication happens based on normalized_username + normalized_url
+        // All 4 records have different dedup keys, so no duplicates are removed
+        assert_eq!(metadata.record_count, 4); // All 4 records kept (different passwords)
+        assert!(metadata.is_sorted);
+
+        // Read and verify content is sorted
+        let content = fs::read_to_string(&metadata.file_path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 4);
+        
+        // Should be sorted by normalized username + url (all have same url)
+        // So sorted by username: alpha (x2), beta, zebra
+        assert!(lines[0].starts_with("alpha@test.com"));
+        assert!(lines[1].starts_with("alpha@test.com")); // Second alpha record
+        assert!(lines[2].starts_with("beta@test.com"));
+        assert!(lines[3].starts_with("zebra@test.com"));
+
+        // Cleanup
+        fs::remove_file(&metadata.file_path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_sort_and_write_chunk_case_sensitive() {
+        let temp_dir = tempdir().unwrap();
+        let processor = ChunkProcessor::new(
+            1024 * 1024,
+            8192,
+            temp_dir.path().to_path_buf(),
+            true, // case sensitive
+        );
+
+        let records = vec![
+            SortRecord::new(
+                "User@test.com".to_string(),
+                "pass1".to_string(),
+                "https://site.com".to_string(),
+                vec![],
+            ),
+            SortRecord::new(
+                "user@test.com".to_string(),
+                "pass2".to_string(),
+                "https://site.com".to_string(),
+                vec![],
+            ),
+        ];
+
+        let metadata = processor.sort_and_write_chunk(
+            0,
+            records,
+            vec![],
+        ).await.unwrap();
+
+        // Both records should be kept (different case)
+        assert_eq!(metadata.record_count, 2);
+
+        // Cleanup
+        fs::remove_file(&metadata.file_path).unwrap();
+    }
+
+    #[test]
+    fn test_read_chunk_records() {
+        let temp_dir = tempdir().unwrap();
+        let processor = ChunkProcessor::new(
+            1024 * 1024,
+            8192,
+            temp_dir.path().to_path_buf(),
+            true,
+        );
+
+        // Create a chunk file with test data
+        let chunk_path = temp_dir.path().join("chunk_0.csv");
+        let test_data = "user1@test.com,pass1,https://site1.com\nuser2@test.com,pass2,https://site2.com\n";
+        fs::write(&chunk_path, test_data).unwrap();
+
+        let chunk_metadata = ChunkMetadata {
+            chunk_id: 0,
+            file_path: chunk_path,
+            record_count: 2,
+            file_size_bytes: test_data.len() as u64,
+            is_sorted: true,
+            source_files: vec![],
+        };
+
+        // Read records
+        let records = processor.read_chunk_records(&chunk_metadata).unwrap();
+        
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].username, "user1@test.com");
+        assert_eq!(records[1].username, "user2@test.com");
+    }
+
+    #[test]
+    fn test_read_chunk_records_with_invalid_lines() {
+        let temp_dir = tempdir().unwrap();
+        let processor = ChunkProcessor::new(
+            1024 * 1024,
+            8192,
+            temp_dir.path().to_path_buf(),
+            true,
+        );
+
+        // Create chunk with some invalid lines
+        let chunk_path = temp_dir.path().join("chunk_0.csv");
+        let test_data = "user1@test.com,pass1,https://site1.com\ninvalid_line\nuser2@test.com,pass2,https://site2.com\n";
+        fs::write(&chunk_path, test_data).unwrap();
+
+        let chunk_metadata = ChunkMetadata {
+            chunk_id: 0,
+            file_path: chunk_path,
+            record_count: 2,
+            file_size_bytes: test_data.len() as u64,
+            is_sorted: true,
+            source_files: vec![],
+        };
+
+        // Should skip invalid lines
+        let records = processor.read_chunk_records(&chunk_metadata).unwrap();
+        assert_eq!(records.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_process_file_to_chunks() {
+        let temp_dir = tempdir().unwrap();
+        let processor = ChunkProcessor::new(
+            100, // Very small chunk size to force multiple chunks
+            8192,
+            temp_dir.path().to_path_buf(),
+            true,
+        );
+
+        // Create a test CSV file
+        let test_file = temp_dir.path().join("test.csv");
+        let mut content = String::new();
+        for i in 0..10 {
+            content.push_str(&format!("user{}@test.com,pass{},https://site{}.com\n", i, i, i));
+        }
+        fs::write(&test_file, content).unwrap();
+
+        // Create checkpoint
+        let mut checkpoint = SortCheckpoint::new(
+            vec![test_file.clone()],
+            temp_dir.path().join("output.csv"),
+            temp_dir.path().to_path_buf(),
+        );
+
+        // Process file
+        let chunks = processor.process_file_to_chunks(&test_file, &mut checkpoint).await.unwrap();
+
+        // Should create multiple chunks due to small chunk size
+        assert!(chunks.len() > 1);
+
+        // Verify all chunks exist
+        for chunk in &chunks {
+            assert!(chunk.file_path.exists());
+        }
+
+        // Cleanup
+        processor.cleanup_all_chunks(&chunks).unwrap();
+    }
+
+    #[test]
+    fn test_estimate_chunk_count_edge_cases() {
+        let temp_dir = tempdir().unwrap();
+        let processor = ChunkProcessor::new(
+            1024, // 1KB chunks
+            8192,
+            temp_dir.path().to_path_buf(),
+            true,
+        );
+
+        // Edge cases
+        assert_eq!(processor.estimate_chunk_count(0), 1); // Zero size -> 1 chunk
+        assert_eq!(processor.estimate_chunk_count(1), 1);
+        assert_eq!(processor.estimate_chunk_count(1023), 1);
+        assert_eq!(processor.estimate_chunk_count(1024), 1);
+        assert_eq!(processor.estimate_chunk_count(1025), 2);
+        // For u64::MAX, the calculation might overflow on 32-bit systems
+        // Just verify it returns a non-zero value
+        assert!(processor.estimate_chunk_count(u64::MAX) > 0);
+    }
+
+    // Tests for merger.rs functionality
+    #[test]
+    fn test_validate_chunks_success() {
+        let temp_dir = tempdir().unwrap();
+        let merger = ChunkMerger::new(8192, true, 10);
+
+        // Create valid chunk files
+        let mut chunks = vec![];
+        for i in 0..3 {
+            let chunk_path = temp_dir.path().join(format!("chunk_{}.csv", i));
+            fs::write(&chunk_path, "data\n").unwrap();
+            
+            chunks.push(ChunkMetadata {
+                chunk_id: i,
+                file_path: chunk_path,
+                record_count: 1,
+                file_size_bytes: 5,
+                is_sorted: true,
+                source_files: vec![],
+            });
+        }
+
+        // Should validate successfully
+        let result = merger.validate_chunks(&chunks);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_chunks_missing_file() {
+        let temp_dir = tempdir().unwrap();
+        let merger = ChunkMerger::new(8192, true, 10);
+
+        let chunks = vec![
+            ChunkMetadata {
+                chunk_id: 0,
+                file_path: temp_dir.path().join("nonexistent.csv"),
+                record_count: 1,
+                file_size_bytes: 10,
+                is_sorted: true,
+                source_files: vec![],
+            },
+        ];
+
+        // Should fail with missing file error
+        let result = merger.validate_chunks(&chunks);
+        assert!(result.is_err());
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("does not exist"));
+    }
+
+    #[test]
+    fn test_validate_chunks_unsorted() {
+        let temp_dir = tempdir().unwrap();
+        let merger = ChunkMerger::new(8192, true, 10);
+
+        // Create a file but mark it as unsorted
+        let chunk_path = temp_dir.path().join("chunk.csv");
+        fs::write(&chunk_path, "data\n").unwrap();
+
+        let chunks = vec![
+            ChunkMetadata {
+                chunk_id: 0,
+                file_path: chunk_path,
+                record_count: 1,
+                file_size_bytes: 5,
+                is_sorted: false, // Not sorted
+                source_files: vec![],
+            },
+        ];
+
+        // Should fail with not sorted error
+        let result = merger.validate_chunks(&chunks);
+        assert!(result.is_err());
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("not sorted"));
+    }
+
+    #[test]
+    fn test_estimate_merge_time() {
+        let merger = ChunkMerger::new(8192, true, 10);
+
+        // Test with no chunks
+        let chunks: Vec<ChunkMetadata> = vec![];
+        assert_eq!(merger.estimate_merge_time(&chunks), 1000); // Minimum 1 second
+
+        // Test with chunks containing records
+        let temp_dir = tempdir().unwrap();
+        let chunks = vec![
+            ChunkMetadata {
+                chunk_id: 0,
+                file_path: temp_dir.path().join("chunk1.csv"),
+                record_count: 1000,
+                file_size_bytes: 10000,
+                is_sorted: true,
+                source_files: vec![],
+            },
+            ChunkMetadata {
+                chunk_id: 1,
+                file_path: temp_dir.path().join("chunk2.csv"),
+                record_count: 2000,
+                file_size_bytes: 20000,
+                is_sorted: true,
+                source_files: vec![],
+            },
+        ];
+
+        // Should estimate based on total records (3000 * 0.001 = 3ms, but min is 1000ms)
+        assert_eq!(merger.estimate_merge_time(&chunks), 1000);
+
+        // Test with many records
+        let big_chunks = vec![
+            ChunkMetadata {
+                chunk_id: 0,
+                file_path: temp_dir.path().join("big.csv"),
+                record_count: 10_000_000,
+                file_size_bytes: 100_000_000,
+                is_sorted: true,
+                source_files: vec![],
+            },
+        ];
+        
+        // 10M * 0.001 = 10000ms
+        assert_eq!(merger.estimate_merge_time(&big_chunks), 10000);
+    }
+
+    #[tokio::test]
+    async fn test_merge_chunks_empty() {
+        let temp_dir = tempdir().unwrap();
+        let merger = ChunkMerger::new(8192, true, 10);
+        let output_file = temp_dir.path().join("output.csv");
+        
+        let chunks: Vec<ChunkMetadata> = vec![];
+        let mut checkpoint = SortCheckpoint::new(
+            vec![],
+            output_file.clone(),
+            temp_dir.path().to_path_buf(),
+        );
+        
+        let shutdown_flag = Arc::new(AtomicBool::new(false));
+        
+        // Should handle empty chunks gracefully
+        let result = merger.merge_chunks(&chunks, &output_file, &mut checkpoint, shutdown_flag).await;
+        assert!(result.is_ok());
+        
+        // Output file should not be created for empty chunks
+        assert!(!output_file.exists());
+    }
+
+    #[tokio::test]
+    async fn test_merge_chunks_single() {
+        let temp_dir = tempdir().unwrap();
+        let merger = ChunkMerger::new(8192, false, 10);
+        let output_file = temp_dir.path().join("output.csv");
+        
+        // Create a single chunk with sorted data
+        let chunk_path = temp_dir.path().join("chunk_0.csv");
+        let content = "alice@test.com,pass1,https://site1.com\nbob@test.com,pass2,https://site2.com\n";
+        fs::write(&chunk_path, content).unwrap();
+        
+        let chunks = vec![
+            ChunkMetadata {
+                chunk_id: 0,
+                file_path: chunk_path,
+                record_count: 2,
+                file_size_bytes: content.len() as u64,
+                is_sorted: true,
+                source_files: vec![],
+            },
+        ];
+        
+        let mut checkpoint = SortCheckpoint::new(
+            vec![],
+            output_file.clone(),
+            temp_dir.path().to_path_buf(),
+        );
+        
+        let shutdown_flag = Arc::new(AtomicBool::new(false));
+        
+        // Merge single chunk
+        let result = merger.merge_chunks(&chunks, &output_file, &mut checkpoint, shutdown_flag).await;
+        assert!(result.is_ok());
+        
+        // Verify output
+        assert!(output_file.exists());
+        let output_content = fs::read_to_string(&output_file).unwrap();
+        assert_eq!(output_content.lines().count(), 2);
+        assert!(output_content.contains("alice@test.com"));
+        assert!(output_content.contains("bob@test.com"));
+    }
+
+    #[tokio::test]
+    async fn test_merge_chunks_multiple_with_duplicates() {
+        let temp_dir = tempdir().unwrap();
+        let merger = ChunkMerger::new(8192, false, 10); // case insensitive
+        let output_file = temp_dir.path().join("output.csv");
+        
+        // Create multiple chunks - each chunk must be internally sorted for proper merge
+        // Chunk 1: alice, charlie (sorted by dedup key)
+        let chunk1_path = temp_dir.path().join("chunk_0.csv");
+        fs::write(&chunk1_path, "alice@test.com,pass1,https://site.com\ncharlie@test.com,pass3,https://site.com\n").unwrap();
+        
+        // Chunk 2: bob, david (sorted by dedup key)  
+        let chunk2_path = temp_dir.path().join("chunk_1.csv");
+        fs::write(&chunk2_path, "bob@test.com,pass2,https://site.com\ndavid@test.com,pass4,https://site.com\n").unwrap();
+        
+        // Chunk 3: alice duplicate (exact same record)
+        let chunk3_path = temp_dir.path().join("chunk_2.csv");
+        fs::write(&chunk3_path, "alice@test.com,pass1,https://site.com\n").unwrap();
+        
+        let chunks = vec![
+            ChunkMetadata {
+                chunk_id: 0,
+                file_path: chunk1_path,
+                record_count: 2,
+                file_size_bytes: 80,
+                is_sorted: true,
+                source_files: vec![],
+            },
+            ChunkMetadata {
+                chunk_id: 1,
+                file_path: chunk2_path,
+                record_count: 2,
+                file_size_bytes: 80,
+                is_sorted: true,
+                source_files: vec![],
+            },
+            ChunkMetadata {
+                chunk_id: 2,
+                file_path: chunk3_path,
+                record_count: 1,
+                file_size_bytes: 50,
+                is_sorted: true,
+                source_files: vec![],
+            },
+        ];
+        
+        let mut checkpoint = SortCheckpoint::new(
+            vec![],
+            output_file.clone(),
+            temp_dir.path().to_path_buf(),
+        );
+        
+        let shutdown_flag = Arc::new(AtomicBool::new(false));
+        
+        // Merge chunks
+        let result = merger.merge_chunks(&chunks, &output_file, &mut checkpoint, shutdown_flag).await;
+        assert!(result.is_ok());
+        
+        // Verify output
+        assert!(output_file.exists());
+        let output_content = fs::read_to_string(&output_file).unwrap();
+        let lines: Vec<&str> = output_content.lines().collect();
+        
+        // Should have 4 unique records after deduplication
+        // alice appears in chunk1 and chunk3 (duplicate), so one should be removed
+        assert_eq!(lines.len(), 4);
+        
+        // Verify we have the expected usernames
+        assert!(output_content.contains("alice@test.com"));
+        assert!(output_content.contains("bob@test.com"));
+        assert!(output_content.contains("charlie@test.com"));
+        assert!(output_content.contains("david@test.com"));
+        
+        // Check stats - should have 4 unique and 1 duplicate removed
+        assert_eq!(checkpoint.stats.unique_records, 4);
+        assert_eq!(checkpoint.stats.duplicates_removed, 1); // One alice duplicate
+    }
+
+    #[tokio::test]
+    async fn test_merge_chunks_case_sensitive() {
+        let temp_dir = tempdir().unwrap();
+        let merger = ChunkMerger::new(8192, true, 10); // case sensitive
+        let output_file = temp_dir.path().join("output.csv");
+        
+        // Create chunks with different cases
+        let chunk_path = temp_dir.path().join("chunk_0.csv");
+        fs::write(&chunk_path, 
+            "Alice@test.com,pass1,https://site.com\nalice@test.com,pass2,https://site.com\n"
+        ).unwrap();
+        
+        let chunks = vec![
+            ChunkMetadata {
+                chunk_id: 0,
+                file_path: chunk_path,
+                record_count: 2,
+                file_size_bytes: 80,
+                is_sorted: true,
+                source_files: vec![],
+            },
+        ];
+        
+        let mut checkpoint = SortCheckpoint::new(
+            vec![],
+            output_file.clone(),
+            temp_dir.path().to_path_buf(),
+        );
+        
+        let shutdown_flag = Arc::new(AtomicBool::new(false));
+        
+        // Merge with case sensitive
+        let result = merger.merge_chunks(&chunks, &output_file, &mut checkpoint, shutdown_flag).await;
+        assert!(result.is_ok());
+        
+        // Both records should be kept (different case)
+        let output_content = fs::read_to_string(&output_file).unwrap();
+        assert_eq!(output_content.lines().count(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_merge_chunks_with_shutdown() {
+        let temp_dir = tempdir().unwrap();
+        let merger = ChunkMerger::new(8192, false, 10);
+        let output_file = temp_dir.path().join("output.csv");
+        
+        // Create a large chunk
+        let chunk_path = temp_dir.path().join("chunk_0.csv");
+        let mut content = String::new();
+        for i in 0..10000 {
+            content.push_str(&format!("user{}@test.com,pass{},https://site.com\n", i, i));
+        }
+        fs::write(&chunk_path, &content).unwrap();
+        
+        let chunks = vec![
+            ChunkMetadata {
+                chunk_id: 0,
+                file_path: chunk_path,
+                record_count: 10000,
+                file_size_bytes: content.len() as u64,
+                is_sorted: true,
+                source_files: vec![],
+            },
+        ];
+        
+        let mut checkpoint = SortCheckpoint::new(
+            vec![],
+            output_file.clone(),
+            temp_dir.path().to_path_buf(),
+        );
+        
+        // Set shutdown flag immediately
+        let shutdown_flag = Arc::new(AtomicBool::new(true));
+        
+        // Should handle shutdown gracefully
+        let result = merger.merge_chunks(&chunks, &output_file, &mut checkpoint, shutdown_flag).await;
+        assert!(result.is_ok());
+        
+        // Output file might be partially written
+        if output_file.exists() {
+            let output_content = fs::read_to_string(&output_file).unwrap();
+            // Should have stopped early due to shutdown
+            assert!(output_content.lines().count() < 10000);
+        }
+    }
+
+    #[test]
+    fn test_merge_entry_ordering() {
+        use std::collections::BinaryHeap;
+        use std::cmp::Reverse;
+        
+        // Test the MergeEntry ordering for the heap
+        let record1 = SortRecord::new(
+            "alice@test.com".to_string(),
+            "pass".to_string(),
+            "https://site.com".to_string(),
+            vec![],
+        );
+        
+        let record2 = SortRecord::new(
+            "bob@test.com".to_string(),
+            "pass".to_string(),
+            "https://site.com".to_string(),
+            vec![],
+        );
+        
+        let record3 = SortRecord::new(
+            "charlie@test.com".to_string(),
+            "pass".to_string(),
+            "https://site.com".to_string(),
+            vec![],
+        );
+        
+        // Create a min-heap using Reverse
+        let mut heap = BinaryHeap::new();
+        
+        // Add in random order
+        heap.push(Reverse((record2.dedup_key(false), 1)));
+        heap.push(Reverse((record1.dedup_key(false), 0)));
+        heap.push(Reverse((record3.dedup_key(false), 2)));
+        
+        // Should pop in sorted order
+        let first = heap.pop().unwrap();
+        assert!(first.0.0.starts_with("alice"));
+        
+        let second = heap.pop().unwrap();
+        assert!(second.0.0.starts_with("bob"));
+        
+        let third = heap.pop().unwrap();
+        assert!(third.0.0.starts_with("charlie"));
+    }
+
+    #[tokio::test]
+    async fn test_merge_chunks_with_invalid_records() {
+        let temp_dir = tempdir().unwrap();
+        let merger = ChunkMerger::new(8192, false, 10);
+        let output_file = temp_dir.path().join("output.csv");
+        
+        // Create chunk with some invalid lines
+        let chunk_path = temp_dir.path().join("chunk_0.csv");
+        fs::write(&chunk_path, 
+            "valid1@test.com,pass1,https://site.com\n\ninvalid_line_no_commas\nvalid2@test.com,pass2,https://site.com\n"
+        ).unwrap();
+        
+        let chunks = vec![
+            ChunkMetadata {
+                chunk_id: 0,
+                file_path: chunk_path,
+                record_count: 2, // Only counting valid records
+                file_size_bytes: 100,
+                is_sorted: true,
+                source_files: vec![],
+            },
+        ];
+        
+        let mut checkpoint = SortCheckpoint::new(
+            vec![],
+            output_file.clone(),
+            temp_dir.path().to_path_buf(),
+        );
+        
+        let shutdown_flag = Arc::new(AtomicBool::new(false));
+        
+        // Should skip invalid lines
+        let result = merger.merge_chunks(&chunks, &output_file, &mut checkpoint, shutdown_flag).await;
+        assert!(result.is_ok());
+        
+        // Only valid records in output
+        let output_content = fs::read_to_string(&output_file).unwrap();
+        assert_eq!(output_content.lines().count(), 2);
+        assert!(output_content.contains("valid1@test.com"));
+        assert!(output_content.contains("valid2@test.com"));
+        assert!(!output_content.contains("invalid_line"));
+    }
+
+    #[test]
+    fn test_validate_chunks_multiple_errors() {
+        let temp_dir = tempdir().unwrap();
+        let merger = ChunkMerger::new(8192, true, 10);
+
+        // Create one valid file
+        let valid_path = temp_dir.path().join("valid.csv");
+        fs::write(&valid_path, "data\n").unwrap();
+
+        let chunks = vec![
+            ChunkMetadata {
+                chunk_id: 0,
+                file_path: valid_path,
+                record_count: 1,
+                file_size_bytes: 5,
+                is_sorted: true,
+                source_files: vec![],
+            },
+            ChunkMetadata {
+                chunk_id: 1,
+                file_path: temp_dir.path().join("missing.csv"),
+                record_count: 1,
+                file_size_bytes: 5,
+                is_sorted: true,
+                source_files: vec![],
+            },
+        ];
+
+        // Should fail on first error (missing file)
+        let result = merger.validate_chunks(&chunks);
+        assert!(result.is_err());
     }
 }
