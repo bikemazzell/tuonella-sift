@@ -1,3 +1,5 @@
+#![allow(clippy::field_reassign_with_default, clippy::useless_vec)]
+
 use std::fs;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

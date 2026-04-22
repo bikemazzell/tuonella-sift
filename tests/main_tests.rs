@@ -1,3 +1,8 @@
+#![allow(
+    clippy::field_reassign_with_default,
+    clippy::needless_borrows_for_generic_args
+)]
+
 use anyhow::Result;
 use std::fs;
 use std::path::{Path, PathBuf};

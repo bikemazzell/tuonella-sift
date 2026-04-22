@@ -1,3 +1,10 @@
+#![allow(
+    clippy::comparison_to_empty,
+    clippy::field_reassign_with_default,
+    clippy::module_inception,
+    clippy::useless_vec
+)]
+
 #[cfg(test)]
 mod tests {
     use std::fs;
