@@ -110,3 +110,13 @@ tuonella-sift
 
 # Scaffolding
 CLAUDE.md
+
+# Local agent/workspace state
+.codex
+.codex/
+.serena/
+
+# Local scratch docs
+ARCHITECTURE.md
+RECOMMENDATION.md
+TESTS.md

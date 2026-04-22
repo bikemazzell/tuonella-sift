@@ -118,6 +118,7 @@ The tool uses a JSON configuration file (default: `config.json`):
 The tool includes robust checkpointing for long-running operations:
 
 - **⏰ Auto-save**: Checkpoints saved automatically during processing
+- **🛡️ Atomic updates**: Checkpoints are written via temp-file-and-rename to reduce corruption risk
 - **🛑 Graceful shutdown**: Press `Ctrl+C` to interrupt and save checkpoint
 - **🚀 Resume**: Use `--resume` flag to continue from where you left off
 - **📊 Progress tracking**: Shows completion percentage and statistics
