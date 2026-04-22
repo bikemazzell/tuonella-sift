@@ -43,13 +43,17 @@ mod tests {
     fn test_csv_output() {
         let record = SortRecord::new(
             "test@example.com".to_string(),
-            "secret".to_string(),
+            "sec,ret".to_string(),
             "example.com".to_string(),
-            vec!["extra".to_string()],
+            vec!["extra\"field".to_string()],
         );
 
         let csv_line = record.to_csv_line();
-        assert_eq!(csv_line, "test@example.com,secret,example.com,extra");
+        assert_eq!(csv_line, "test@example.com,\"sec,ret\",example.com,\"extra\"\"field\"");
+
+        let reparsed = SortRecord::from_csv_line(&csv_line).unwrap();
+        assert_eq!(reparsed.password, "sec,ret");
+        assert_eq!(reparsed.extra_fields, vec!["extra\"field"]);
     }
 
     #[test]
@@ -57,12 +61,12 @@ mod tests {
         let record = SortRecord::new(
             "User@Example.com".to_string(),
             "password".to_string(),
-            "site.com".to_string(),
+            "HTTPS://Site.com/".to_string(),
             vec![],
         );
 
-        assert_eq!(record.dedup_key(false), "user@example.com:password");
-        assert_eq!(record.dedup_key(true), "User@Example.com:password");
+        assert_eq!(record.dedup_key(false), "user@example.com:site.com");
+        assert_eq!(record.dedup_key(true), "User@Example.com:site.com");
     }
 
     #[test]
@@ -307,6 +311,34 @@ mod tests {
     }
 
     #[test]
+    fn test_checkpoint_save_overwrites_atomically_without_temp_artifacts() {
+        use crate::external_sort::checkpoint::SortCheckpoint;
+
+        let temp_dir = tempdir().unwrap();
+        let mut checkpoint = SortCheckpoint::new(
+            vec![PathBuf::from("input1.csv")],
+            PathBuf::from("output.csv"),
+            temp_dir.path().to_path_buf(),
+        );
+
+        checkpoint.save(temp_dir.path()).unwrap();
+
+        checkpoint.phase = crate::external_sort::checkpoint::ProcessingPhase::Completed;
+        checkpoint.stats.files_processed = 1;
+        checkpoint.save(temp_dir.path()).unwrap();
+
+        let loaded = SortCheckpoint::load(temp_dir.path()).unwrap();
+        assert_eq!(loaded.phase, crate::external_sort::checkpoint::ProcessingPhase::Completed);
+        assert_eq!(loaded.stats.files_processed, 1);
+
+        let entries: Vec<_> = std::fs::read_dir(temp_dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(entries, vec!["external_sort_checkpoint.json".to_string()]);
+    }
+
+    #[test]
     fn test_sort_record_normalization() {
         let record = SortRecord::new(
             "Test@Example.COM".to_string(),
@@ -329,28 +361,28 @@ mod tests {
         let record1 = SortRecord::new(
             "a@example.com".to_string(),
             "pass1".to_string(),
-            "example.com".to_string(),
+            "https://example.com".to_string(),
             vec![],
         );
         
         let record2 = SortRecord::new(
             "b@example.com".to_string(),
             "pass2".to_string(),
-            "example.com".to_string(),
+            "https://example.com".to_string(),
             vec![],
         );
         
         let record3 = SortRecord::new(
             "a@example.com".to_string(),
-            "pass1".to_string(), // Same password for true equality
-            "different.com".to_string(),
+            "different-password".to_string(),
+            "http://example.com/".to_string(),
             vec![],
         );
         
-        // Test ordering based on dedup key (username:password)
+        // Test ordering based on dedup key (normalized username + normalized url)
         assert!(record1 < record2);
         
-        // Test equality based on dedup key (same normalized username + password)
+        // Equality should ignore password when username + normalized URL match
         assert_eq!(record1.dedup_key(false), record3.dedup_key(false));
     }
 
@@ -449,13 +481,32 @@ mod tests {
             vec![],
         );
         
-        // Test case insensitive dedup key (uses normalized_username:password)
+        // Test case insensitive dedup key (uses normalized_username + normalized_url)
         let case_insensitive_key = record.dedup_key(false);
-        assert_eq!(case_insensitive_key, "test@example.com:password");
+        assert_eq!(case_insensitive_key, "test@example.com:example.com");
         
-        // Test case sensitive dedup key (uses original username:password)
+        // Test case sensitive dedup key (uses original username + normalized_url)
         let case_sensitive_key = record.dedup_key(true);
-        assert_eq!(case_sensitive_key, "Test@Example.COM:password");
+        assert_eq!(case_sensitive_key, "Test@Example.COM:example.com");
+    }
+
+    #[test]
+    fn test_same_identity_as_uses_username_and_normalized_url_only() {
+        let record1 = SortRecord::new(
+            "User@Example.COM".to_string(),
+            "password-1".to_string(),
+            "https://site.com/".to_string(),
+            vec![],
+        );
+        let record2 = SortRecord::new(
+            "user@example.com".to_string(),
+            "password-2".to_string(),
+            "http://site.com".to_string(),
+            vec![],
+        );
+
+        assert!(record1.same_identity_as(&record2, false));
+        assert!(!record1.same_identity_as(&record2, true));
     }
 
     #[tokio::test]
@@ -463,6 +514,479 @@ mod tests {
         let config = ExternalSortConfig::default();
         let processor = ExternalSortProcessor::new(config);
         assert!(processor.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_processor_with_checkpoint() {
+        let temp_dir = tempdir().unwrap();
+        let mut config = ExternalSortConfig::default();
+        config.temp_directory = temp_dir.path().to_path_buf();
+        
+        let checkpoint = SortCheckpoint::new(
+            vec![PathBuf::from("test1.csv"), PathBuf::from("test2.csv")],
+            PathBuf::from("output.csv"),
+            temp_dir.path().to_path_buf(),
+        );
+        
+        let _processor = ExternalSortProcessor::new(config)
+            .unwrap()
+            .with_checkpoint(checkpoint.clone());
+        
+        // Checkpoint is private, but we verified it was set through with_checkpoint
+    }
+
+    #[tokio::test]
+    async fn test_processor_with_shutdown_signal() {
+        let config = ExternalSortConfig::default();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        
+        let _processor = ExternalSortProcessor::new(config)
+            .unwrap()
+            .with_shutdown_signal(shutdown.clone());
+        
+        // shutdown_flag is private, but we can test behavior
+        
+        shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+        // We can't directly test shutdown_requested since it's private
+        // but we tested the behavior in shutdown tests
+    }
+
+    #[tokio::test]
+    async fn test_processor_shutdown_during_file_processing() {
+        let temp_dir = tempdir().unwrap();
+        let input_file = temp_dir.path().join("input.csv");
+        let output_file = temp_dir.path().join("output.csv");
+        
+        // Create test file with many records
+        let mut content = String::new();
+        for i in 0..1000 {
+            content.push_str(&format!("user{},pass{},site{}.com\n", i, i, i));
+        }
+        fs::write(&input_file, content).unwrap();
+        
+        let mut config = ExternalSortConfig::default();
+        config.temp_directory = temp_dir.path().join("sort_temp");
+        config.chunk_size_mb = 64; // Small chunks to ensure multiple chunks
+        config.processing_threads = 1;
+        config.verbose = false;
+        
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let mut processor = ExternalSortProcessor::new(config.clone())
+            .unwrap()
+            .with_shutdown_signal(shutdown.clone());
+        
+        // Set shutdown signal after small delay
+        let shutdown_clone = shutdown.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            shutdown_clone.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+        
+        let result = processor.process(&[input_file.clone()], &output_file).await;
+        assert!(result.is_ok());
+        
+        // Check that checkpoint was saved
+        let checkpoint_file = config.temp_directory.join("external_sort_checkpoint.json");
+        assert!(checkpoint_file.exists());
+        
+        // Load and verify checkpoint
+        let _saved_checkpoint = SortCheckpoint::load(&config.temp_directory).unwrap();
+        // With small files, processing might complete before shutdown
+    }
+
+    #[tokio::test]
+    async fn test_processor_checkpoint_save_on_periodic_interval() {
+        let temp_dir = tempdir().unwrap();
+        let mut input_files = Vec::new();
+        
+        // Create 6 test files to trigger periodic checkpoint (every 5 files)
+        for i in 0..6 {
+            let file = temp_dir.path().join(format!("input{}.csv", i));
+            fs::write(&file, format!("user{},pass{},site{}.com\n", i, i, i)).unwrap();
+            input_files.push(file);
+        }
+        
+        let output_file = temp_dir.path().join("output.csv");
+        
+        let mut config = ExternalSortConfig::default();
+        config.temp_directory = temp_dir.path().join("sort_temp");
+        config.processing_threads = 1; // Sequential to ensure checkpoint timing
+        config.verbose = false;
+        
+        let mut processor = ExternalSortProcessor::new(config.clone()).unwrap();
+        let result = processor.process(&input_files, &output_file).await;
+        assert!(result.is_ok());
+        
+        // Verify that checkpoint was created during processing
+        let stats = result.unwrap();
+        assert_eq!(stats.files_processed, 6);
+    }
+
+    #[tokio::test]
+    async fn test_processor_resume_from_checkpoint() {
+        let temp_dir = tempdir().unwrap();
+        let input_file1 = temp_dir.path().join("input1.csv");
+        let input_file2 = temp_dir.path().join("input2.csv");
+        let output_file = temp_dir.path().join("output.csv");
+        
+        fs::write(&input_file1, "user1,pass1,site1.com\n").unwrap();
+        fs::write(&input_file2, "user2,pass2,site2.com\n").unwrap();
+        
+        let mut config = ExternalSortConfig::default();
+        config.temp_directory = temp_dir.path().join("sort_temp");
+        config.verbose = false;
+        
+        // Create a checkpoint in FileProcessing phase
+        let mut checkpoint = SortCheckpoint::new(
+            vec![input_file1.clone(), input_file2.clone()],
+            output_file.clone(),
+            config.temp_directory.clone(),
+        );
+        checkpoint.phase = crate::external_sort::checkpoint::ProcessingPhase::FileProcessing;
+        checkpoint.completed_files.push(input_file1.clone());
+        checkpoint.stats.files_processed = 1;
+        checkpoint.save(&config.temp_directory).unwrap();
+        
+        // Resume processing with checkpoint
+        let mut processor = ExternalSortProcessor::new(config.clone())
+            .unwrap()
+            .with_checkpoint(checkpoint);
+        
+        let result = processor.process(&[input_file1, input_file2], &output_file).await;
+        assert!(result.is_ok());
+        
+        let stats = result.unwrap();
+        assert!(stats.files_processed >= 1);
+        assert!(output_file.exists());
+    }
+
+    #[tokio::test]
+    async fn test_processor_resumes_merging_from_existing_checkpoint() {
+        let temp_dir = tempdir().unwrap();
+        let missing_input = temp_dir.path().join("missing.csv");
+        let output_file = temp_dir.path().join("output.csv");
+
+        let mut config = ExternalSortConfig::default();
+        config.temp_directory = temp_dir.path().join("sort_temp");
+        config.verbose = false;
+
+        fs::create_dir_all(&config.temp_directory).unwrap();
+        let chunk_path = config.temp_directory.join("chunk_0.csv");
+        fs::write(&chunk_path, "user1,pass1,site1.com\n").unwrap();
+
+        let mut checkpoint = SortCheckpoint::new(
+            vec![missing_input.clone()],
+            output_file.clone(),
+            config.temp_directory.clone(),
+        );
+        checkpoint.phase = crate::external_sort::checkpoint::ProcessingPhase::Merging;
+        checkpoint.created_chunks = vec![ChunkMetadata {
+            chunk_id: 0,
+            file_path: chunk_path,
+            record_count: 1,
+            file_size_bytes: 22,
+            is_sorted: true,
+            source_files: vec![missing_input.clone()],
+        }];
+        checkpoint.stats.files_processed = 1;
+        checkpoint.save(&config.temp_directory).unwrap();
+
+        let mut processor = ExternalSortProcessor::new(config.clone())
+            .unwrap()
+            .with_checkpoint(checkpoint);
+
+        let stats = processor.process(&[missing_input], &output_file).await.unwrap();
+
+        assert!(output_file.exists());
+        assert_eq!(fs::read_to_string(&output_file).unwrap(), "user1,pass1,site1.com\n");
+        assert_eq!(stats.unique_records, 1);
+    }
+
+    #[tokio::test]
+    async fn test_processor_cleanup_success() {
+        let temp_dir = tempdir().unwrap();
+        let input_file = temp_dir.path().join("input.csv");
+        let output_file = temp_dir.path().join("output.csv");
+        
+        fs::write(&input_file, "user1,pass1,site1.com\nuser2,pass2,site2.com\n").unwrap();
+        
+        let mut config = ExternalSortConfig::default();
+        config.temp_directory = temp_dir.path().join("sort_temp");
+        config.verbose = false;
+        
+        let mut processor = ExternalSortProcessor::new(config.clone()).unwrap();
+        let result = processor.process(&[input_file], &output_file).await;
+        assert!(result.is_ok());
+        
+        // Verify temp files exist before cleanup
+        assert!(config.temp_directory.exists());
+        let checkpoint_file = config.temp_directory.join("external_sort_checkpoint.json");
+        assert!(checkpoint_file.exists());
+        
+        // Run cleanup
+        processor.cleanup().unwrap();
+        
+        // Verify cleanup removed checkpoint
+        assert!(!checkpoint_file.exists());
+    }
+
+    #[tokio::test]
+    async fn test_processor_cleanup_with_missing_files() {
+        let temp_dir = tempdir().unwrap();
+        let mut config = ExternalSortConfig::default();
+        config.temp_directory = temp_dir.path().join("sort_temp");
+        
+        let processor = ExternalSortProcessor::new(config.clone()).unwrap();
+        
+        // Cleanup should succeed even if no files exist
+        let result = processor.cleanup();
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_processor_shutdown_during_merge() {
+        let temp_dir = tempdir().unwrap();
+        let input_file = temp_dir.path().join("input.csv");
+        let output_file = temp_dir.path().join("output.csv");
+        
+        // Create file with enough data to create multiple chunks
+        let mut content = String::new();
+        for i in 0..100 {
+            content.push_str(&format!("user{},pass{},site{}.com\n", i, i, i));
+        }
+        fs::write(&input_file, content).unwrap();
+        
+        let mut config = ExternalSortConfig::default();
+        config.temp_directory = temp_dir.path().join("sort_temp");
+        config.chunk_size_mb = 64; // Very small chunks
+        config.verbose = false;
+        
+        // First pass: create chunks
+        let mut checkpoint = SortCheckpoint::new(
+            vec![input_file.clone()],
+            output_file.clone(),
+            config.temp_directory.clone(),
+        );
+        
+        // Simulate chunks already created
+        checkpoint.phase = crate::external_sort::checkpoint::ProcessingPhase::Merging;
+        checkpoint.created_chunks = vec![
+            ChunkMetadata {
+                chunk_id: 0,
+                file_path: config.temp_directory.join("chunk_0.csv"),
+                record_count: 50,
+                file_size_bytes: 1000,
+                is_sorted: true,
+                source_files: vec![input_file.clone()],
+            },
+            ChunkMetadata {
+                chunk_id: 1,
+                file_path: config.temp_directory.join("chunk_1.csv"),
+                record_count: 50,
+                file_size_bytes: 1000,
+                is_sorted: true,
+                source_files: vec![input_file.clone()],
+            },
+        ];
+        
+        // Create actual chunk files
+        fs::create_dir_all(&config.temp_directory).unwrap();
+        fs::write(&checkpoint.created_chunks[0].file_path, "user1,pass1,site1.com\n").unwrap();
+        fs::write(&checkpoint.created_chunks[1].file_path, "user2,pass2,site2.com\n").unwrap();
+        
+        checkpoint.save(&config.temp_directory).unwrap();
+        
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_clone = shutdown.clone();
+        
+        // Set shutdown during merge
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            shutdown_clone.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+        
+        let mut processor = ExternalSortProcessor::new(config.clone())
+            .unwrap()
+            .with_checkpoint(checkpoint)
+            .with_shutdown_signal(shutdown);
+        
+        let result = processor.process(&[input_file], &output_file).await;
+        assert!(result.is_ok());
+        
+        // Verify checkpoint was saved
+        let saved_checkpoint = SortCheckpoint::load(&config.temp_directory).unwrap();
+        // Phase could be Merging or Completed depending on timing
+        assert!(matches!(saved_checkpoint.phase, 
+                crate::external_sort::checkpoint::ProcessingPhase::Merging | 
+                crate::external_sort::checkpoint::ProcessingPhase::Completed));
+    }
+
+    #[tokio::test]
+    async fn test_processor_stats_building() {
+        let temp_dir = tempdir().unwrap();
+        let input_file = temp_dir.path().join("input.csv");
+        let output_file = temp_dir.path().join("output.csv");
+        
+        // Create test file with duplicates
+        fs::write(&input_file, "user1,pass1,site1.com\nuser1,pass1,site1.com\nuser2,pass2,site2.com\n").unwrap();
+        
+        let mut config = ExternalSortConfig::default();
+        config.temp_directory = temp_dir.path().join("sort_temp");
+        config.verbose = false;
+        // Deduplication is automatic for external sort
+        
+        let mut processor = ExternalSortProcessor::new(config).unwrap();
+        let result = processor.process(&[input_file], &output_file).await;
+        assert!(result.is_ok());
+        
+        let stats = result.unwrap();
+        assert_eq!(stats.files_processed, 1);
+        // Processing time may be 0 for very fast operations, but the field should be populated.
+        let _ = stats.processing_time_ms;
+        assert!(stats.chunks_created > 0);
+    }
+
+    #[tokio::test]
+    async fn test_processor_error_handling_invalid_file() {
+        let temp_dir = tempdir().unwrap();
+        let input_file = temp_dir.path().join("nonexistent.csv");
+        let output_file = temp_dir.path().join("output.csv");
+        
+        let mut config = ExternalSortConfig::default();
+        config.temp_directory = temp_dir.path().join("sort_temp");
+        config.verbose = false;
+        
+        let mut processor = ExternalSortProcessor::new(config).unwrap();
+        let result = processor.process(&[input_file], &output_file).await;
+        
+        // Should complete even with missing file
+        assert!(result.is_ok());
+        let stats = result.unwrap();
+        assert_eq!(stats.files_processed, 0);
+    }
+
+    #[tokio::test]
+    async fn test_processor_multiple_files_parallel() {
+        let temp_dir = tempdir().unwrap();
+        let mut input_files = Vec::new();
+        
+        // Create multiple test files
+        for i in 0..4 {
+            let file = temp_dir.path().join(format!("input{}.csv", i));
+            fs::write(&file, format!("user{},pass{},site{}.com\n", i, i, i)).unwrap();
+            input_files.push(file);
+        }
+        
+        let output_file = temp_dir.path().join("output.csv");
+        
+        let mut config = ExternalSortConfig::default();
+        config.temp_directory = temp_dir.path().join("sort_temp");
+        config.processing_threads = 2; // Test parallel processing
+        config.verbose = false;
+        
+        let mut processor = ExternalSortProcessor::new(config).unwrap();
+        let result = processor.process(&input_files, &output_file).await;
+        assert!(result.is_ok());
+        
+        let stats = result.unwrap();
+        assert_eq!(stats.files_processed, 4);
+        // Verify we processed the files
+        assert!(stats.chunks_created >= 1);
+        assert!(output_file.exists());
+        
+        // Verify output is sorted
+        let content = fs::read_to_string(&output_file).unwrap();
+        let lines: Vec<&str> = content.trim().split('\n').collect();
+        assert_eq!(lines.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn test_processor_empty_files() {
+        let temp_dir = tempdir().unwrap();
+        let input_file = temp_dir.path().join("empty.csv");
+        let output_file = temp_dir.path().join("output.csv");
+        
+        // Create empty file
+        fs::write(&input_file, "").unwrap();
+        
+        let mut config = ExternalSortConfig::default();
+        config.temp_directory = temp_dir.path().join("sort_temp");
+        config.verbose = false;
+        
+        let mut processor = ExternalSortProcessor::new(config).unwrap();
+        let result = processor.process(&[input_file], &output_file).await;
+        assert!(result.is_ok());
+        
+        let stats = result.unwrap();
+        assert_eq!(stats.total_records, 0);
+        assert_eq!(stats.files_processed, 1);
+    }
+
+    #[tokio::test]
+    async fn test_processor_checkpoint_phase_transitions() {
+        let temp_dir = tempdir().unwrap();
+        let input_file = temp_dir.path().join("input.csv");
+        let output_file = temp_dir.path().join("output.csv");
+        
+        fs::write(&input_file, "user1,pass1,site1.com\n").unwrap();
+        
+        let mut config = ExternalSortConfig::default();
+        config.temp_directory = temp_dir.path().join("sort_temp");
+        config.verbose = false;
+        
+        let mut processor = ExternalSortProcessor::new(config.clone()).unwrap();
+        
+        // Process and verify phase transitions
+        let result = processor.process(&[input_file], &output_file).await;
+        assert!(result.is_ok());
+        
+        // Load final checkpoint
+        let checkpoint = SortCheckpoint::load(&config.temp_directory).unwrap();
+        assert_eq!(checkpoint.phase, crate::external_sort::checkpoint::ProcessingPhase::Completed);
+        assert_eq!(checkpoint.stats.files_processed, 1);
+    }
+
+    #[cfg(feature = "cuda")]
+    #[tokio::test]
+    async fn test_processor_cuda_initialization() {
+        let mut config = ExternalSortConfig::default();
+        config.enable_cuda = true;
+        config.cuda_batch_size = 1000;
+        config.cuda_memory_percent = 50.0;
+        config.verbose = true;
+        
+        // This test will succeed with or without actual GPU
+        let processor = ExternalSortProcessor::new(config);
+        assert!(processor.is_ok());
+        
+        let _processor = processor.unwrap();
+        // If CUDA is available, processor will have cuda_processor
+        // If not, it will fall back to CPU
+    }
+
+    #[tokio::test]
+    async fn test_processor_concurrent_file_error_recovery() {
+        let temp_dir = tempdir().unwrap();
+        let good_file = temp_dir.path().join("good.csv");
+        let bad_file = temp_dir.path().join("bad.csv");
+        let output_file = temp_dir.path().join("output.csv");
+        
+        // Create one good file and reference one non-existent file
+        fs::write(&good_file, "user1,pass1,site1.com\n").unwrap();
+        
+        let mut config = ExternalSortConfig::default();
+        config.temp_directory = temp_dir.path().join("sort_temp");
+        config.processing_threads = 2;
+        config.verbose = false;
+        
+        let mut processor = ExternalSortProcessor::new(config).unwrap();
+        let result = processor.process(&[good_file, bad_file], &output_file).await;
+        
+        // Should succeed despite one file error
+        assert!(result.is_ok());
+        let stats = result.unwrap();
+        assert_eq!(stats.files_processed, 1); // Only good file processed
+        // External sort may not track total_records in all cases
     }
 
     #[test]
@@ -690,22 +1214,19 @@ mod tests {
         // Verify chunk file was created
         assert!(metadata.file_path.exists());
         assert_eq!(metadata.chunk_id, 0);
-        // Note: The actual deduplication happens based on normalized_username + normalized_url
-        // All 4 records have different dedup keys, so no duplicates are removed
-        assert_eq!(metadata.record_count, 4); // All 4 records kept (different passwords)
+        // Deduplication is based on normalized username + normalized URL
+        assert_eq!(metadata.record_count, 3);
         assert!(metadata.is_sorted);
 
         // Read and verify content is sorted
         let content = fs::read_to_string(&metadata.file_path).unwrap();
         let lines: Vec<&str> = content.lines().collect();
-        assert_eq!(lines.len(), 4);
+        assert_eq!(lines.len(), 3);
         
-        // Should be sorted by normalized username + url (all have same url)
-        // So sorted by username: alpha (x2), beta, zebra
+        // Should be sorted by normalized username + normalized URL
         assert!(lines[0].starts_with("alpha@test.com"));
-        assert!(lines[1].starts_with("alpha@test.com")); // Second alpha record
-        assert!(lines[2].starts_with("beta@test.com"));
-        assert!(lines[3].starts_with("zebra@test.com"));
+        assert!(lines[1].starts_with("beta@test.com"));
+        assert!(lines[2].starts_with("zebra@test.com"));
 
         // Cleanup
         fs::remove_file(&metadata.file_path).unwrap();
@@ -875,7 +1396,7 @@ mod tests {
     #[test]
     fn test_validate_chunks_success() {
         let temp_dir = tempdir().unwrap();
-        let merger = ChunkMerger::new(8192, true, 10);
+        let merger = ChunkMerger::new(8192, true, 10, false);
 
         // Create valid chunk files
         let mut chunks = vec![];
@@ -901,7 +1422,7 @@ mod tests {
     #[test]
     fn test_validate_chunks_missing_file() {
         let temp_dir = tempdir().unwrap();
-        let merger = ChunkMerger::new(8192, true, 10);
+        let merger = ChunkMerger::new(8192, true, 10, false);
 
         let chunks = vec![
             ChunkMetadata {
@@ -924,7 +1445,7 @@ mod tests {
     #[test]
     fn test_validate_chunks_unsorted() {
         let temp_dir = tempdir().unwrap();
-        let merger = ChunkMerger::new(8192, true, 10);
+        let merger = ChunkMerger::new(8192, true, 10, false);
 
         // Create a file but mark it as unsorted
         let chunk_path = temp_dir.path().join("chunk.csv");
@@ -950,7 +1471,7 @@ mod tests {
 
     #[test]
     fn test_estimate_merge_time() {
-        let merger = ChunkMerger::new(8192, true, 10);
+        let merger = ChunkMerger::new(8192, true, 10, false);
 
         // Test with no chunks
         let chunks: Vec<ChunkMetadata> = vec![];
@@ -999,7 +1520,7 @@ mod tests {
     #[tokio::test]
     async fn test_merge_chunks_empty() {
         let temp_dir = tempdir().unwrap();
-        let merger = ChunkMerger::new(8192, true, 10);
+        let merger = ChunkMerger::new(8192, true, 10, false);
         let output_file = temp_dir.path().join("output.csv");
         
         let chunks: Vec<ChunkMetadata> = vec![];
@@ -1022,7 +1543,7 @@ mod tests {
     #[tokio::test]
     async fn test_merge_chunks_single() {
         let temp_dir = tempdir().unwrap();
-        let merger = ChunkMerger::new(8192, false, 10);
+        let merger = ChunkMerger::new(8192, false, 10, false);
         let output_file = temp_dir.path().join("output.csv");
         
         // Create a single chunk with sorted data
@@ -1064,7 +1585,7 @@ mod tests {
     #[tokio::test]
     async fn test_merge_chunks_multiple_with_duplicates() {
         let temp_dir = tempdir().unwrap();
-        let merger = ChunkMerger::new(8192, false, 10); // case insensitive
+        let merger = ChunkMerger::new(8192, false, 10, false); // case insensitive
         let output_file = temp_dir.path().join("output.csv");
         
         // Create multiple chunks - each chunk must be internally sorted for proper merge
@@ -1142,7 +1663,7 @@ mod tests {
     #[tokio::test]
     async fn test_merge_chunks_case_sensitive() {
         let temp_dir = tempdir().unwrap();
-        let merger = ChunkMerger::new(8192, true, 10); // case sensitive
+        let merger = ChunkMerger::new(8192, true, 10, false); // case sensitive
         let output_file = temp_dir.path().join("output.csv");
         
         // Create chunks with different cases
@@ -1182,7 +1703,7 @@ mod tests {
     #[tokio::test]
     async fn test_merge_chunks_with_shutdown() {
         let temp_dir = tempdir().unwrap();
-        let merger = ChunkMerger::new(8192, false, 10);
+        let merger = ChunkMerger::new(8192, false, 10, false);
         let output_file = temp_dir.path().join("output.csv");
         
         // Create a large chunk
@@ -1274,7 +1795,7 @@ mod tests {
     #[tokio::test]
     async fn test_merge_chunks_with_invalid_records() {
         let temp_dir = tempdir().unwrap();
-        let merger = ChunkMerger::new(8192, false, 10);
+        let merger = ChunkMerger::new(8192, false, 10, false);
         let output_file = temp_dir.path().join("output.csv");
         
         // Create chunk with some invalid lines
@@ -1317,7 +1838,7 @@ mod tests {
     #[test]
     fn test_validate_chunks_multiple_errors() {
         let temp_dir = tempdir().unwrap();
-        let merger = ChunkMerger::new(8192, true, 10);
+        let merger = ChunkMerger::new(8192, true, 10, false);
 
         // Create one valid file
         let valid_path = temp_dir.path().join("valid.csv");

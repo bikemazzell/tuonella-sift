@@ -357,10 +357,9 @@ mod integration_tests {
         
         // Verify results
         assert!(output_file.exists());
-        // We have 4 unique records: key1, value1, key2, value2, key3, value3
-        // The CSV format is key,value so each line produces 2 "records" in sorting
-        assert_eq!(stats.unique_records, 4);
-        assert_eq!(stats.duplicates_removed, 0); // No duplicates in our test data
+        // key1,value1 appears in both inputs, so one duplicate is removed
+        assert_eq!(stats.unique_records, 3);
+        assert_eq!(stats.duplicates_removed, 1);
         
         Ok(())
     }

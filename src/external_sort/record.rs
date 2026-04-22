@@ -59,10 +59,20 @@ impl SortRecord {
 
     pub fn dedup_key(&self, case_sensitive: bool) -> String {
         if case_sensitive {
-            format!("{}:{}", self.username, self.password)
+            format!("{}:{}", self.username, self.normalized_url)
         } else {
-            format!("{}:{}", self.normalized_username, self.password)
+            format!("{}:{}", self.normalized_username, self.normalized_url)
         }
+    }
+
+    pub fn same_identity_as(&self, other: &Self, case_sensitive: bool) -> bool {
+        let usernames_match = if case_sensitive {
+            self.username == other.username
+        } else {
+            self.normalized_username == other.normalized_username
+        };
+
+        usernames_match && self.normalized_url == other.normalized_url
     }
 
     pub fn to_csv_line(&self) -> String {
@@ -73,7 +83,11 @@ impl SortRecord {
         for field in &self.extra_fields {
             fields.push(field.clone());
         }
-        fields.join(&CSV_FIELD_SEPARATOR.to_string())
+        fields
+            .into_iter()
+            .map(|field| escape_csv_field(&field))
+            .collect::<Vec<_>>()
+            .join(&CSV_FIELD_SEPARATOR.to_string())
     }
 
     pub fn field_count(&self) -> usize {
@@ -85,11 +99,25 @@ impl SortRecord {
             + self.extra_fields.iter().map(|f| f.len()).sum::<usize>()
             + ESTIMATED_RECORD_SIZE_BYTES
     }
+
+    pub fn cmp_for(&self, other: &Self, case_sensitive: bool) -> Ordering {
+        let username_cmp = if case_sensitive {
+            self.username.cmp(&other.username)
+        } else {
+            self.normalized_username.cmp(&other.normalized_username)
+        };
+
+        username_cmp
+            .then_with(|| self.normalized_url.cmp(&other.normalized_url))
+            .then_with(|| self.password.cmp(&other.password))
+            .then_with(|| self.extra_fields.cmp(&other.extra_fields))
+    }
 }
 
 impl PartialEq for SortRecord {
     fn eq(&self, other: &Self) -> bool {
-        self.dedup_key(false) == other.dedup_key(false)
+        self.normalized_username == other.normalized_username
+            && self.normalized_url == other.normalized_url
     }
 }
 
@@ -103,8 +131,22 @@ impl PartialOrd for SortRecord {
 
 impl Ord for SortRecord {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.dedup_key(false).cmp(&other.dedup_key(false))
+        self.cmp_for(other, false)
     }
+}
+
+fn escape_csv_field(field: &str) -> String {
+    let needs_quotes = field.contains(CSV_FIELD_SEPARATOR)
+        || field.contains(CSV_QUOTE_CHAR)
+        || field.contains('\n')
+        || field.contains('\r');
+
+    if !needs_quotes {
+        return field.to_string();
+    }
+
+    let escaped = field.replace(CSV_QUOTE_CHAR, "\"\"");
+    format!("\"{}\"", escaped)
 }
 
 fn parse_csv_fields(line: &str) -> Vec<String> {

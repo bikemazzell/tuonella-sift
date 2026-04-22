@@ -43,6 +43,7 @@ impl ExternalSortProcessor {
             config.merge_buffer_size_bytes(),
             config.case_sensitive,
             config.merge_progress_interval_seconds,
+            config.verbose,
         );
 
         #[cfg(feature = "cuda")]
@@ -76,7 +77,14 @@ impl ExternalSortProcessor {
     }
 
     pub fn with_checkpoint(mut self, checkpoint: SortCheckpoint) -> Self {
+        let next_chunk_id = checkpoint
+            .created_chunks
+            .iter()
+            .map(|chunk| chunk.chunk_id + 1)
+            .max()
+            .unwrap_or(0);
         self.checkpoint = checkpoint;
+        self.chunk_counter = Arc::new(AtomicUsize::new(next_chunk_id));
         self
     }
 
@@ -90,11 +98,15 @@ impl ExternalSortProcessor {
         input_files: &[PathBuf],
         output_file: &Path,
     ) -> Result<ExternalSortStats> {
-        self.checkpoint = SortCheckpoint::new(
-            input_files.to_vec(),
-            output_file.to_path_buf(),
-            self.config.temp_directory.clone(),
-        );
+        self.start_time = Instant::now();
+        let resuming = self.should_resume_from_checkpoint(input_files, output_file);
+        if !resuming {
+            self.checkpoint = SortCheckpoint::new(
+                input_files.to_vec(),
+                output_file.to_path_buf(),
+                self.config.temp_directory.clone(),
+            );
+        }
 
         if self.config.verbose {
             println!("🚀 Starting external sort processing");
@@ -110,20 +122,33 @@ impl ExternalSortProcessor {
             }
         }
 
-        self.checkpoint.phase = ProcessingPhase::FileProcessing;
-        self.save_checkpoint().await?;
-
-        if self.config.verbose {
-            println!("🔄 Starting parallel file processing...");
+        if self.checkpoint.phase == ProcessingPhase::Completed {
+            return Ok(self.build_stats());
         }
 
-        let chunks = self.process_files_to_chunks(input_files).await?;
+        let chunks = if matches!(
+            self.checkpoint.phase,
+            ProcessingPhase::Merging | ProcessingPhase::Completed
+        ) {
+            self.checkpoint.created_chunks.clone()
+        } else {
+            self.checkpoint.phase = ProcessingPhase::FileProcessing;
+            self.save_checkpoint().await?;
+
+            if self.config.verbose {
+                println!("🔄 Starting parallel file processing...");
+            }
+
+            self.process_files_to_chunks(input_files).await?
+        };
 
         if self.shutdown_requested() {
             if self.config.verbose {
                 println!("🛑 Shutdown requested after file processing. Saving checkpoint...");
             }
-            self.checkpoint.created_chunks = chunks;
+            if self.checkpoint.created_chunks.is_empty() {
+                self.checkpoint.created_chunks = chunks;
+            }
             self.save_checkpoint().await?;
             return Ok(self.build_stats());
         }
@@ -153,7 +178,7 @@ impl ExternalSortProcessor {
     }
 
     async fn process_files_to_chunks(&mut self, input_files: &[PathBuf]) -> Result<Vec<crate::external_sort::checkpoint::ChunkMetadata>> {
-        let mut all_chunks = Vec::new();
+        let mut all_chunks = self.checkpoint.created_chunks.clone();
         let mut tasks = JoinSet::new();
         let semaphore = Arc::new(tokio::sync::Semaphore::new(self.config.processing_threads));
 
@@ -163,6 +188,10 @@ impl ExternalSortProcessor {
         }
 
         for (file_index, file_path) in input_files.iter().enumerate() {
+            if self.checkpoint.completed_files.contains(file_path) {
+                continue;
+            }
+
             if self.shutdown_requested() {
                 if self.config.verbose {
                     println!("🛑 Shutdown requested during file scheduling. Stopping at file {}/{}", file_index, input_files.len());
@@ -203,7 +232,15 @@ impl ExternalSortProcessor {
                     println!("🔄 Starting file {}: {}", file_index + 1, file_name);
                 }
 
-                let result = chunk_processor.process_file_to_chunks_with_counter(&file_path_clone, &mut checkpoint_clone, shutdown_flag, chunk_counter).await;
+                let result = chunk_processor
+                    .process_file_to_chunks_with_counter(
+                        &file_path_clone,
+                        &mut checkpoint_clone,
+                        shutdown_flag,
+                        chunk_counter,
+                        verbose,
+                    )
+                    .await;
                 (file_index, result, checkpoint_clone)
             });
         }
@@ -248,14 +285,18 @@ impl ExternalSortProcessor {
             match task_result {
                 Ok(Some(join_result)) => {
                     match join_result {
-                        Ok((file_index, chunks_result, _updated_checkpoint)) => {
+                        Ok((file_index, chunks_result, updated_checkpoint)) => {
                             match chunks_result {
                                 Ok(chunks) => {
                                     let chunks_added = chunks.len();
                                     all_chunks.extend(chunks);
-                                    self.checkpoint.completed_files.push(input_files[file_index].clone());
+                                    if !self.checkpoint.completed_files.contains(&input_files[file_index]) {
+                                        self.checkpoint.completed_files.push(input_files[file_index].clone());
+                                    }
+                                    self.checkpoint.stats.total_records += updated_checkpoint.stats.total_records;
                                     self.checkpoint.stats.files_processed += 1;
                                     self.checkpoint.stats.chunks_created = all_chunks.len();
+                                    self.checkpoint.current_file_progress = updated_checkpoint.current_file_progress;
                                     completed_count += 1;
 
                                     if self.config.verbose {
@@ -333,6 +374,12 @@ impl ExternalSortProcessor {
         Ok(())
     }
 
+    fn should_resume_from_checkpoint(&self, input_files: &[PathBuf], output_file: &Path) -> bool {
+        !self.checkpoint.input_files.is_empty()
+            && self.checkpoint.input_files == input_files
+            && self.checkpoint.output_file == output_file
+    }
+
     async fn save_checkpoint(&mut self) -> Result<()> {
         self.checkpoint.update_timestamp();
         self.checkpoint.stats.processing_time_ms = self.start_time.elapsed().as_millis() as u64;
@@ -367,10 +414,8 @@ impl ExternalSortProcessor {
             std::fs::remove_file(checkpoint_file)?;
         }
 
-        if self.config.temp_directory.exists() {
-            if let Err(_) = std::fs::remove_dir(&self.config.temp_directory) {
-            }
-        }
+        let _ = self.config.temp_directory.exists()
+            && std::fs::remove_dir(&self.config.temp_directory).is_err();
 
         Ok(())
     }

@@ -20,7 +20,7 @@ pub struct SortCheckpoint {
     pub stats: CheckpointStats,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ProcessingPhase {
     Initialization,
     FileProcessing,
@@ -49,7 +49,7 @@ pub struct ChunkMetadata {
     pub source_files: Vec<PathBuf>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MergeProgress {
     pub started: bool,
     pub completed_chunks: Vec<usize>,
@@ -101,18 +101,6 @@ impl Default for FileProgress {
     }
 }
 
-impl Default for MergeProgress {
-    fn default() -> Self {
-        Self {
-            started: false,
-            completed_chunks: Vec::new(),
-            current_output_size: 0,
-            records_written: 0,
-            duplicates_removed: 0,
-        }
-    }
-}
-
 impl Default for CheckpointStats {
     fn default() -> Self {
         Self {
@@ -141,8 +129,10 @@ impl SortCheckpoint {
     pub fn save(&self, checkpoint_dir: &Path) -> Result<()> {
         std::fs::create_dir_all(checkpoint_dir)?;
         let checkpoint_path = checkpoint_dir.join(CHECKPOINT_FILE_NAME);
+        let temp_checkpoint_path = checkpoint_dir.join(format!("{}.tmp", CHECKPOINT_FILE_NAME));
         let content = serde_json::to_string_pretty(self)?;
-        std::fs::write(checkpoint_path, content)?;
+        std::fs::write(&temp_checkpoint_path, content)?;
+        std::fs::rename(temp_checkpoint_path, checkpoint_path)?;
         Ok(())
     }
 

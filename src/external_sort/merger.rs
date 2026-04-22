@@ -15,17 +15,19 @@ pub struct ChunkMerger {
     io_buffer_size: usize,
     case_sensitive: bool,
     progress_interval_seconds: u64,
+    verbose: bool,
 }
 
 #[derive(Debug)]
 struct MergeEntry {
     record: SortRecord,
     chunk_id: usize,
+    case_sensitive: bool,
 }
 
 impl PartialEq for MergeEntry {
     fn eq(&self, other: &Self) -> bool {
-        self.record.dedup_key(false) == other.record.dedup_key(false)
+        self.record.cmp_for(&other.record, self.case_sensitive) == std::cmp::Ordering::Equal
     }
 }
 
@@ -39,16 +41,22 @@ impl PartialOrd for MergeEntry {
 
 impl Ord for MergeEntry {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        other.record.dedup_key(false).cmp(&self.record.dedup_key(false))
+        self.record.cmp_for(&other.record, self.case_sensitive)
     }
 }
 
 impl ChunkMerger {
-    pub fn new(io_buffer_size: usize, case_sensitive: bool, progress_interval_seconds: u64) -> Self {
+    pub fn new(
+        io_buffer_size: usize,
+        case_sensitive: bool,
+        progress_interval_seconds: u64,
+        verbose: bool,
+    ) -> Self {
         Self {
             io_buffer_size,
             case_sensitive,
             progress_interval_seconds,
+            verbose,
         }
     }
 
@@ -82,11 +90,15 @@ impl ChunkMerger {
 
         for (chunk_id, reader) in chunk_readers.iter_mut().enumerate() {
             if let Some(record) = self.read_next_record(reader)? {
-                merge_heap.push(Reverse(MergeEntry { record, chunk_id }));
+                merge_heap.push(Reverse(MergeEntry {
+                    record,
+                    chunk_id,
+                    case_sensitive: self.case_sensitive,
+                }));
             }
         }
 
-        let mut last_dedup_key: Option<String> = None;
+        let mut last_written_record: Option<SortRecord> = None;
         let mut records_written = 0;
         let mut duplicates_removed = 0;
         let mut progress_counter = 0;
@@ -106,31 +118,42 @@ impl ChunkMerger {
                 } else {
                     0.0
                 };
-                println!("🛑 Merge interrupted at {:.1}% progress", shutdown_progress);
+                if self.verbose {
+                    println!("🛑 Merge interrupted at {:.1}% progress", shutdown_progress);
+                }
                 break;
             }
 
-            let current_key = merge_entry.record.dedup_key(self.case_sensitive);
+            let MergeEntry {
+                record,
+                chunk_id,
+                case_sensitive: _,
+            } = merge_entry;
+            let record_size = record.estimated_size() as u64;
 
-            if last_dedup_key.as_ref() != Some(&current_key) {
-                writeln!(writer, "{}", merge_entry.record.to_csv_line())?;
+            let is_duplicate = last_written_record
+                .as_ref()
+                .is_some_and(|previous| previous.same_identity_as(&record, self.case_sensitive));
+
+            if !is_duplicate {
+                writeln!(writer, "{}", record.to_csv_line())?;
                 records_written += 1;
-                last_dedup_key = Some(current_key);
+                last_written_record = Some(record);
             } else {
                 duplicates_removed += 1;
             }
 
-            if let Some(next_record) = self.read_next_record(&mut chunk_readers[merge_entry.chunk_id])? {
+            if let Some(next_record) = self.read_next_record(&mut chunk_readers[chunk_id])? {
                 merge_heap.push(Reverse(MergeEntry {
                     record: next_record,
-                    chunk_id: merge_entry.chunk_id,
+                    chunk_id,
+                    case_sensitive: self.case_sensitive,
                 }));
             }
 
             progress_counter += 1;
             
-            // Estimate bytes processed based on record size
-            bytes_processed += merge_entry.record.to_csv_line().len() as u64;
+            bytes_processed += record_size;
 
             // Show progress based on time interval instead of record count
             if last_progress_time.elapsed() >= progress_interval {
@@ -150,8 +173,10 @@ impl ChunkMerger {
                     }
                 };
 
-                println!("🔗 Merge progress: {:.1}% ({} unique, {} duplicates removed)",
-                    progress_pct, records_written, duplicates_removed);
+                if self.verbose {
+                    println!("🔗 Merge progress: {:.1}% ({} unique, {} duplicates removed)",
+                        progress_pct, records_written, duplicates_removed);
+                }
 
                 last_progress_time = std::time::Instant::now();
             }

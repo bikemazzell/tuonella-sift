@@ -80,7 +80,7 @@ impl ChunkProcessor {
                 }
                 Err(_) => {
                     // Try to recover by reading raw bytes and skipping invalid sequences
-                    if let Err(_) = self.skip_invalid_line(&mut reader) {
+                    if self.skip_invalid_line(&mut reader).is_err() {
                         break; // If we can't recover, stop processing this file
                     }
                     line_count += 1;
@@ -107,6 +107,7 @@ impl ChunkProcessor {
         checkpoint: &mut SortCheckpoint,
         shutdown_flag: Arc<AtomicBool>,
         chunk_counter: Arc<AtomicUsize>,
+        verbose: bool,
     ) -> Result<Vec<ChunkMetadata>> {
         let file_name = file_path
             .file_name()
@@ -136,7 +137,9 @@ impl ChunkProcessor {
                     ).await?;
                     chunks.push(chunk_metadata);
                 }
-                println!("🛑 {} interrupted at line {}", file_name, line_count);
+                if verbose {
+                    println!("🛑 {} interrupted at line {}", file_name, line_count);
+                }
                 break;
             }
 
@@ -173,7 +176,7 @@ impl ChunkProcessor {
                 }
                 Err(_) => {
                     // Try to recover by reading raw bytes and skipping invalid sequences
-                    if let Err(_) = self.skip_invalid_line(&mut reader) {
+                    if self.skip_invalid_line(&mut reader).is_err() {
                         break; // If we can't recover, stop processing this file
                     }
                     line_count += 1;
@@ -191,8 +194,10 @@ impl ChunkProcessor {
             chunks.push(chunk_metadata);
         }
 
-        println!("✅ {} completed: {} lines, {} records, {} chunks",
-            file_name, line_count, total_records, chunks.len());
+        if verbose {
+            println!("✅ {} completed: {} lines, {} records, {} chunks",
+                file_name, line_count, total_records, chunks.len());
+        }
 
         checkpoint.stats.total_records += total_records;
         Ok(chunks)
@@ -268,7 +273,7 @@ impl ChunkProcessor {
                 }
                 Err(_) => {
                     // Try to recover by reading raw bytes and skipping invalid sequences
-                    if let Err(_) = self.skip_invalid_line(&mut reader) {
+                    if self.skip_invalid_line(&mut reader).is_err() {
                         break; // If we can't recover, stop processing this file
                     }
                     line_count += 1;
@@ -299,9 +304,9 @@ impl ChunkProcessor {
         source_files: Vec<PathBuf>,
     ) -> Result<ChunkMetadata> {
         if self.case_sensitive {
-            records.par_sort_by(|a, b| a.dedup_key(true).cmp(&b.dedup_key(true)));
+            records.par_sort_by(|a, b| a.cmp_for(b, true));
         } else {
-            records.par_sort_by(|a, b| a.dedup_key(false).cmp(&b.dedup_key(false)));
+            records.par_sort_by(|a, b| a.cmp_for(b, false));
         }
 
         let chunk_file = self.temp_directory.join(format!(
@@ -314,16 +319,18 @@ impl ChunkProcessor {
         let file = File::create(&chunk_file)?;
         let mut writer = BufWriter::with_capacity(self.io_buffer_size, file);
 
-        let mut last_key: Option<String> = None;
+        let mut last_record: Option<SortRecord> = None;
         let mut records_written = 0;
 
         for record in records {
-            let current_key = record.dedup_key(self.case_sensitive);
-            
-            if last_key.as_ref() != Some(&current_key) {
+            let is_duplicate = last_record
+                .as_ref()
+                .is_some_and(|previous| previous.same_identity_as(&record, self.case_sensitive));
+
+            if !is_duplicate {
                 writeln!(writer, "{}", record.to_csv_line())?;
                 records_written += 1;
-                last_key = Some(current_key);
+                last_record = Some(record);
             }
         }
 
@@ -387,14 +394,9 @@ impl ChunkProcessor {
         use std::io::Read;
 
         let mut byte_buffer = [0u8; 1];
-        loop {
-            match reader.read_exact(&mut byte_buffer) {
-                Ok(_) => {
-                    if byte_buffer[0] == b'\n' {
-                        break;
-                    }
-                }
-                Err(_) => break, // EOF or other error
+        while let Ok(()) = reader.read_exact(&mut byte_buffer) {
+            if byte_buffer[0] == b'\n' {
+                break;
             }
         }
         Ok(())
